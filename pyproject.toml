@@ -20,6 +20,9 @@ Documentation = "https://tangleml.com/docs/"
 Repository = "https://github.com/TangleML/tangle-cli"
 Issues = "https://github.com/TangleML/tangle-cli/issues"
 
+[project.scripts]
+tangle = "tangle_cli.cli:app"
+
 [build-system]
 requires = ["uv_build>=0.11.2,<0.12.0"]
 build-backend = "uv_build"
