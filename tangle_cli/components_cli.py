@@ -70,7 +70,6 @@ def components_annotations_get(
     """Gets annotation values from component file."""
     if component_path is None or keys is None:
         _missing_required_args("get", {"component_path": component_path, "keys": keys})
-    print(locals())
     raise NotImplementedError()
 
 

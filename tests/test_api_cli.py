@@ -1,4 +1,6 @@
+import importlib
 import json
+import sys
 
 import httpx
 import pytest
@@ -236,6 +238,49 @@ def test_component_family_tag_collision_routes_by_resource_path(monkeypatch):
     assert requests[-1]["url"] == "http://api.test/api/users/me"
 
 
+def test_importing_cli_modules_does_not_fetch_schema(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append({"method": "GET", "url": url, **kwargs})
+        return json_response("GET", url, SCHEMA)
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(sys, "argv", ["tangle", "api", "components", "list"])
+
+    import tangle_cli.cli as root_cli
+
+    importlib.reload(api_cli)
+    importlib.reload(root_cli)
+
+    assert calls == []
+
+
+def test_non_api_root_command_does_not_fetch_when_argument_value_is_api(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append({"method": "GET", "url": url, **kwargs})
+        return json_response("GET", url, SCHEMA)
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(api_cli.httpx, "get", fake_get)
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "components", "annotations", "set", "foo", "api"],
+    )
+
+    api_cli.build_app()
+
+    assert calls == []
+    assert not api_cli._argv_requests_api_schema(api_cli.sys.argv)
+    assert not api_cli._argv_dispatches_dynamic_command(api_cli.sys.argv)
+
+
 def test_cache_miss_fetches_schema_before_dynamic_dispatch(monkeypatch, tmp_path):
     gets = []
     requests = []
@@ -437,6 +482,73 @@ def test_dynamic_command_invocation_maps_path_query_and_body(monkeypatch, capsys
     assert requests[-1]["url"] == "http://api.test/api/pipeline_runs/run%2F1"
 
     assert '"ok": true' in capsys.readouterr().out
+
+
+def test_refresh_http_error_does_not_echo_response_body(monkeypatch):
+    def fake_get(url, **kwargs):
+        response = text_response(
+            url="http://api.test/openapi.json",
+            method="GET",
+            text="secret-token",
+            status_code=401,
+        )
+        raise httpx.HTTPStatusError(
+            "client error", request=response.request, response=response
+        )
+
+    monkeypatch.setattr(api_cli.httpx, "get", fake_get)
+    app = api_cli.build_app(SCHEMA)
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["refresh", "--base-url", "http://api.test"])
+
+    message = str(exc_info.value)
+    assert "HTTP 401 Unauthorized" in message
+    assert "secret-token" not in message
+
+
+def test_nested_refs_are_resolved_for_simple_array_body_fields(monkeypatch):
+    schema = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/items/": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "names": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/components/schemas/Name"
+                                            },
+                                        }
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {"schemas": {"Name": {"type": "string"}}},
+    }
+    requests = []
+
+    def fake_request(method, url, **kwargs):
+        requests.append({"method": method, "url": url, **kwargs})
+        return json_response(method, url, {"ok": True})
+
+    monkeypatch.setattr(api_cli.httpx, "request", fake_request)
+    app = api_cli.build_app(schema)
+
+    run_app(
+        app, ["items", "create", "--names", "alice", "--base-url", "http://api.test"]
+    )
+
+    assert json.loads(requests[-1]["content"].decode()) == {"names": ["alice"]}
 
 
 def test_http_error_prints_body_and_exits_with_status(monkeypatch, capsys):

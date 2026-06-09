@@ -46,10 +46,10 @@ Linux:   ~/.cache/tangle-cli/openapi/
 Windows: %LOCALAPPDATA%\\TangleML\\tangle-cli\\Cache\\openapi\\
 ```
 
-Override the cache directory with:
+Override the OpenAPI schema cache directory with:
 
 ```bash
-export TANGLE_CLI_CACHE_DIR=/path/to/cache
+export TANGLE_CLI_CACHE_DIR=/path/to/openapi-schema-cache
 ```
 
 If your backend requires bearer auth, set a token:

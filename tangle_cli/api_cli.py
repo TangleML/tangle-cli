@@ -2,9 +2,9 @@
 
 The backend exposes a FastAPI OpenAPI schema. This module caches that schema
 locally, maps tags/paths/parameters into a Cyclopts command tree, and dispatches
-invocations as HTTP requests. Commands are generated at import time only from a
-cached schema, or after a one-time fetch when the user explicitly asks for API
-help/commands, so normal CLI startup does not require a running backend.
+invocations as HTTP requests. Commands are generated only when the root CLI is
+being built for an actual `tangle api ...` invocation, so importing this module
+never reads ambient argv, touches the schema cache, or contacts the backend.
 """
 
 from __future__ import annotations
@@ -124,9 +124,10 @@ _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 def default_cache_dir() -> Path:
     """Return the schema cache directory.
 
-    `TANGLE_CLI_CACHE_DIR` is an explicit escape hatch for tests/automation.
-    Otherwise platformdirs selects the OS-appropriate user cache directory and
-    we keep OpenAPI files in an `openapi` subdirectory.
+    `TANGLE_CLI_CACHE_DIR` is an explicit OpenAPI schema cache directory
+    override for tests/automation. Otherwise platformdirs selects the
+    OS-appropriate user cache directory and we keep OpenAPI files in an
+    `openapi` subdirectory.
     """
 
     configured = os.environ.get("TANGLE_CLI_CACHE_DIR")
@@ -225,9 +226,9 @@ def load_or_fetch_schema(
 def build_app(schema: dict[str, Any] | None = None) -> App:
     """Build the `tangle api` Cyclopts app.
 
-    When *schema* is supplied, dynamic commands are generated from it. The module-level
-    app intentionally only auto-fetches a schema for invocations that target `tangle api`,
-    so unrelated commands such as `tangle --help` do not hit the backend.
+    When *schema* is supplied, dynamic commands are generated from it. Otherwise
+    schema loading is driven by the current top-level CLI invocation: only actual
+    `tangle api ...` commands read the cache or fetch `/openapi.json`.
     """
 
     api_app = App(
@@ -278,11 +279,11 @@ def _register_refresh_command(api_app: App) -> None:
     ) -> None:
         """Fetch /openapi.json and update the local schema cache."""
 
-        normalized_base_url = _normalize_base_url(base_url or default_base_url())
+        normalized_base_url = _normalize_base_url(base_url) if base_url else default_base_url()
         try:
             schema, path = refresh_schema(normalized_base_url, token, header, auth_header)
         except httpx.HTTPStatusError as exc:
-            message = exc.response.text or exc.response.reason_phrase
+            message = f"HTTP {exc.response.status_code} {exc.response.reason_phrase}"
             raise SystemExit(
                 f"Failed to fetch {_openapi_url(normalized_base_url)}: {message}"
             ) from exc
@@ -428,7 +429,7 @@ def _operation_parameters(
                 original_name=original_name,
                 local_name=local_name,
                 location=location,  # type: ignore[arg-type]
-                python_type=_schema_to_python_type(parameter_schema),
+                python_type=_schema_to_python_type(schema, parameter_schema),
                 required=required,
                 default=default,
                 description=description,
@@ -481,7 +482,7 @@ def _request_body_parameters(
     parameters: list[CliParameter] = []
     for original_name, property_schema in sorted(properties.items()):
         property_schema = _flatten_schema(schema, property_schema)
-        if not _is_simple_schema(property_schema):
+        if not _is_simple_schema(schema, property_schema):
             continue
         local_name = _safe_identifier(str(original_name), used_names, "body")
         default = property_schema.get("default") if isinstance(property_schema, dict) else None
@@ -490,7 +491,7 @@ def _request_body_parameters(
                 original_name=str(original_name),
                 local_name=local_name,
                 location="body",
-                python_type=_schema_to_python_type(property_schema),
+                python_type=_schema_to_python_type(schema, property_schema),
                 required=str(original_name) in required_fields,
                 default=default,
                 description=str(property_schema.get("description") or ""),
@@ -550,30 +551,24 @@ def _flatten_schema(schema: dict[str, Any], value: Any) -> dict[str, Any]:
     return flattened
 
 
-def _is_simple_schema(schema: Any) -> bool:
+def _is_simple_schema(schema_doc: dict[str, Any], schema: Any) -> bool:
     """Return true for scalar/list types safe to expose as CLI options."""
 
-    schema = _unwrap_nullable_schema({}, schema)
+    schema = _unwrap_nullable_schema(schema_doc, schema)
     if not isinstance(schema, dict):
         return False
     schema_type = schema.get("type")
     if schema_type in {"string", "integer", "number", "boolean"}:
         return True
     if schema_type == "array":
-        items = schema.get("items") or {}
-        return isinstance(items, dict) and items.get("type") in {
-            "string",
-            "integer",
-            "number",
-            "boolean",
-        }
+        return _is_simple_schema(schema_doc, schema.get("items") or {})
     return False
 
 
-def _schema_to_python_type(schema: Any) -> Any:
+def _schema_to_python_type(schema_doc: dict[str, Any], schema: Any) -> Any:
     """Map a small OpenAPI schema subset to Python annotations for Cyclopts."""
 
-    schema = _unwrap_nullable_schema({}, schema)
+    schema = _unwrap_nullable_schema(schema_doc, schema)
     if not isinstance(schema, dict):
         return str
     schema_type = schema.get("type")
@@ -584,7 +579,7 @@ def _schema_to_python_type(schema: Any) -> Any:
     if schema_type == "boolean":
         return bool
     if schema_type == "array":
-        return list[_schema_to_python_type(schema.get("items") or {})]
+        return list[_schema_to_python_type(schema_doc, schema.get("items") or {})]
     return str
 
 
@@ -911,7 +906,11 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
     of letting Cyclopts report that only the static `refresh` command exists.
     """
 
-    base_url = _base_url_from_argv(sys.argv) or default_base_url()
+    api_tail = _api_argv_tail(sys.argv)
+    if api_tail is None:
+        return None
+
+    base_url = _base_url_from_argv(api_tail) or default_base_url()
     cached = load_cached_schema(base_url)
     if cached is not None:
         return cached
@@ -920,9 +919,9 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
     try:
         return load_or_fetch_schema(
             base_url,
-            _token_from_argv(sys.argv),
-            _headers_from_argv(sys.argv),
-            _auth_header_from_argv(sys.argv),
+            _token_from_argv(api_tail),
+            _headers_from_argv(api_tail),
+            _auth_header_from_argv(api_tail),
         )
     except Exception as exc:
         if _argv_dispatches_dynamic_command(sys.argv):
@@ -934,19 +933,36 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
 
 
 def _argv_requests_api_schema(argv: list[str]) -> bool:
-    args = list(argv[1:])
-    if "api" not in args:
+    api_tail = _api_argv_tail(argv)
+    if api_tail is None:
         return False
-    first_command = _api_first_command(args[args.index("api") + 1 :])
-    return first_command != "refresh"
+    first_command = _api_first_command(api_tail)
+    return first_command not in {None, "refresh"}
 
 
 def _argv_dispatches_dynamic_command(argv: list[str]) -> bool:
-    args = list(argv[1:])
-    if "api" not in args:
+    api_tail = _api_argv_tail(argv)
+    if api_tail is None:
         return False
-    first_command = _api_first_command(args[args.index("api") + 1 :])
+    first_command = _api_first_command(api_tail)
     return first_command not in {None, "refresh"}
+
+
+def _api_argv_tail(argv: list[str]) -> list[str] | None:
+    """Return args after the root `api` command, or None for non-API invocations."""
+
+    args = list(argv[1:])
+    for index, arg in enumerate(args):
+        if arg == "--":
+            if index + 1 < len(args) and args[index + 1] == "api":
+                return args[index + 2 :]
+            return None
+        if arg in {"--help", "-h", "--version"}:
+            return None
+        if arg.startswith("-"):
+            return None
+        return args[index + 1 :] if arg == "api" else None
+    return None
 
 
 def _api_first_command(api_tail: list[str]) -> str | None:
@@ -1148,6 +1164,3 @@ def _resolve_ref(schema: dict[str, Any], value: Any) -> Any:
             return value
         current = current.get(part)
     return current if current is not None else value
-
-
-app = build_app()
