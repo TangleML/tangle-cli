@@ -1,0 +1,42 @@
+[project]
+name = "tangle-cli"
+version = "0.0.1"
+description = "CLI for Tangle, the open-source ML pipeline orchestration platform"
+readme = "README.md"
+authors = [
+    { name = "Alexey Volkov", email = "alexey.volkov@ark-kun.com" },
+    { name = "Tangle authors" },
+]
+requires-python = ">=3.10"
+dependencies = [
+    "cloud-pipelines>=0.26.3.12",
+    "cloud-pipelines-backend",
+    "cyclopts>=4.16.1",
+    "httpx>=0.28.1",
+    "platformdirs>=4.10.0",
+]
+
+[project.urls]
+Homepage = "https://tangleml.com"
+Documentation = "https://tangleml.com/docs/"
+Repository = "https://github.com/TangleML/tangle-cli"
+Issues = "https://github.com/TangleML/tangle-cli/issues"
+
+[project.scripts]
+tangle = "tangle_cli.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Set the module-root to an empty string for a flat layout
+module-root = ""
+
+[tool.uv.sources]
+cloud-pipelines-backend = { git = "https://github.com/TangleML/tangle", rev = "stable_cli" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

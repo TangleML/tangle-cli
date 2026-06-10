@@ -1,0 +1,35 @@
+from cyclopts import App
+
+from . import api_cli
+from . import components_cli
+
+
+def build_sdk_app() -> App:
+    """Build the SDK command group."""
+
+    sdk_app = App(
+        name="sdk",
+        help="Work with local Tangle SDK resources and scaffolding.",
+    )
+    sdk_app.command(components_cli.app)
+    return sdk_app
+
+
+def build_app() -> App:
+    """Build the root CLI app lazily for the current invocation."""
+
+    app = App(
+        help="CLI for Tangle, the open-source ML pipeline orchestration platform.",
+        version="0.0.1",
+    )
+    app.command(api_cli.build_app())
+    app.command(build_sdk_app())
+    return app
+
+
+def main() -> None:
+    build_app()()
+
+
+if __name__ == "__main__":
+    main()
