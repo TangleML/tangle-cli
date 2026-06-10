@@ -5,7 +5,7 @@
 This lab repo is used to iterate on the next CLI shape before promoting changes to the public OSS package. The CLI is built with [Cyclopts](https://cyclopts.readthedocs.io/) and exposes two top-level command groups:
 
 - `tangle api` for OpenAPI-driven commands generated from the Tangle FastAPI schema.
-- `tangle sdk` for local SDK/scaffold commands such as component helpers.
+- `tangle sdk` for local SDK/scaffold commands and published-component inspection helpers.
 
 ## Run locally
 
@@ -14,16 +14,22 @@ uv run tangle --help
 uv run tangle api --help
 uv run tangle sdk --help
 uv run tangle sdk components --help
+uv run tangle sdk published-components --help
 ```
 
 ## SDK commands
 
-SDK/scaffold commands live under `tangle sdk`. Component helpers are intentionally nested under `sdk`; root-level `tangle components ...` is not registered in this lab CLI.
+SDK/scaffold commands live under `tangle sdk`. Local component generation/spec helpers are intentionally nested under `sdk components`; root-level `tangle components ...` is not registered in this lab CLI. Published/registry component inspection lives separately under `sdk published-components` so local component authoring and published component lookup do not share the same command group.
 
 ```bash
 uv run tangle sdk components --help
 uv run tangle sdk components annotations get
 uv run tangle sdk components annotations set
+uv run tangle sdk published-components --help
+uv run tangle sdk published-components search transformer
+uv run tangle sdk published-components inspect transformer
+uv run tangle sdk published-components inspect --digest sha256:...
+uv run tangle sdk published-components library
 ```
 
 ## API commands

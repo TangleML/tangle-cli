@@ -5,7 +5,7 @@ import sys
 import httpx
 import pytest
 
-from tangle_cli import api_cli, cli, components_cli
+from tangle_cli import api_cli, cli, components_cli, published_components_cli
 
 
 SCHEMA = {
@@ -250,9 +250,13 @@ def test_root_app_exposes_api_and_sdk_groups(capsys):
     run_app(app, ["sdk", "--help"])
     output = capsys.readouterr().out
     assert "components" in output
+    assert "published-components" in output
 
     run_app(app, ["sdk", "components", "--help"])
     assert "Work with Tangle component definitions" in capsys.readouterr().out
+
+    run_app(app, ["sdk", "published-components", "--help"])
+    assert "Inspect and search published Tangle components" in capsys.readouterr().out
 
     with pytest.raises(SystemExit) as exc_info:
         app(["components"])
@@ -277,6 +281,138 @@ def test_sdk_component_annotation_commands_preserve_help_and_error_behavior(caps
         app(["sdk", "components", "annotations", "set", "foo", "key"])
     assert exc_info.value.code == 1
     assert "Missing required argument" in capsys.readouterr().err
+
+
+def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, capsys):
+    app = cli.build_app()
+    fake_client = object()
+    client_calls = []
+
+    def fake_client_from_options(**kwargs):
+        client_calls.append(kwargs)
+        return fake_client
+
+    monkeypatch.setattr(
+        published_components_cli,
+        "_client_from_options",
+        fake_client_from_options,
+    )
+    monkeypatch.setattr(
+        published_components_cli,
+        "search_components",
+        lambda client, **kwargs: {"client_ok": client is fake_client, "search": kwargs},
+    )
+    monkeypatch.setattr(
+        published_components_cli,
+        "inspect_by_name",
+        lambda client, name, **kwargs: {
+            "client_ok": client is fake_client,
+            "name": name,
+            "inspect": kwargs,
+        },
+    )
+    monkeypatch.setattr(
+        published_components_cli,
+        "inspect_by_digest",
+        lambda client, digest, **kwargs: {
+            "client_ok": client is fake_client,
+            "digest": digest,
+            "inspect": kwargs,
+        },
+    )
+    monkeypatch.setattr(
+        published_components_cli,
+        "get_standard_library",
+        lambda client: {"client_ok": client is fake_client, "folders": []},
+    )
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "published-components",
+            "search",
+            "demo",
+            "--include-deprecated",
+            "--published-by",
+            "user@example.com",
+            "--digest",
+            "sha256:abc",
+            "--base-url",
+            "https://api.test",
+            "-H",
+            "Cloud-Auth: token",
+        ],
+    )
+    search_result = json.loads(capsys.readouterr().out)
+    assert search_result["client_ok"] is True
+    assert search_result["search"] == {
+        "name": "demo",
+        "include_deprecated": True,
+        "published_by": "user@example.com",
+        "digest": "sha256:abc",
+    }
+    assert client_calls[-1]["base_url"] == "https://api.test"
+    assert client_calls[-1]["header"] == ["Cloud-Auth: token"]
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "published-components",
+            "inspect",
+            "demo",
+            "--all-versions",
+            "--include-deprecated",
+            "--full-spec",
+        ],
+    )
+    name_result = json.loads(capsys.readouterr().out)
+    assert name_result["name"] == "demo"
+    assert name_result["inspect"]["include_all_versions"] is True
+    assert name_result["inspect"]["include_deprecated"] is True
+    assert name_result["inspect"]["full_spec"] is True
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "published-components",
+            "inspect",
+            "--digest",
+            "sha256:def",
+            "--follow-deprecated",
+        ],
+    )
+    digest_result = json.loads(capsys.readouterr().out)
+    assert digest_result["digest"] == "sha256:def"
+    assert digest_result["inspect"] == {
+        "full_spec": False,
+        "follow_deprecated": True,
+    }
+
+    run_app(app, ["sdk", "published-components", "library"])
+    library_result = json.loads(capsys.readouterr().out)
+    assert library_result == {"client_ok": True, "folders": []}
+
+
+def test_sdk_published_components_inspect_requires_name_or_digest():
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "published-components", "inspect"])
+    assert str(exc_info.value) == "Provide exactly one of NAME or --digest DIGEST"
+
+    with pytest.raises(SystemExit) as exc_info:
+        app([
+            "sdk",
+            "published-components",
+            "inspect",
+            "demo",
+            "--digest",
+            "sha256:abc",
+        ])
+    assert str(exc_info.value) == "Provide exactly one of NAME or --digest DIGEST"
 
 
 def test_importing_cli_modules_does_not_fetch_schema(monkeypatch, tmp_path):
@@ -458,6 +594,33 @@ def test_optional_query_params_parse_and_can_be_omitted(monkeypatch):
         requests[-1]["url"]
         == "http://api.test/api/pipeline_runs/?filter=active&include_stats=True&tag=a&tag=b"
     )
+
+
+def test_cli_body_at_file_reference_expands_json_file(monkeypatch, tmp_path):
+    requests = []
+
+    def fake_request(method, url, **kwargs):
+        requests.append({"method": method, "url": url, **kwargs})
+        return json_response(method, url, {"ok": True})
+
+    body_path = tmp_path / "body.json"
+    body_path.write_text('{"name":"from-file"}', encoding="utf-8")
+    monkeypatch.setattr(api_cli.httpx, "request", fake_request)
+    app = api_cli.build_app(SCHEMA)
+
+    run_app(
+        app,
+        [
+            "pipeline-runs",
+            "create",
+            "--body",
+            f"@{body_path}",
+            "--base-url",
+            "http://api.test",
+        ],
+    )
+
+    assert json.loads(requests[-1]["content"].decode()) == {"name": "from-file"}
 
 
 def test_body_json_can_satisfy_required_simple_body_fields(monkeypatch):

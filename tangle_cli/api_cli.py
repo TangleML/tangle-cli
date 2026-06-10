@@ -330,6 +330,7 @@ def _invoke_operation(operation: OperationCommand, values: dict[str, Any]) -> No
             header_entries=header_entries,
             body=body_arg,
             timeout=DEFAULT_TIMEOUT_SECONDS,
+            allow_body_file_references=True,
         )
     except httpx.HTTPStatusError as exc:
         message = exc.response.text or exc.response.reason_phrase

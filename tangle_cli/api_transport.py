@@ -151,6 +151,7 @@ def request_operation(
     headers: dict[str, str] | None = None,
     body: Any = _MISSING,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    allow_body_file_references: bool = False,
 ) -> httpx.Response:
     """Dispatch one normalized OpenAPI operation as an HTTP request.
 
@@ -168,6 +169,7 @@ def request_operation(
         header_entries=header_entries,
         headers=headers,
         body=body,
+        allow_body_file_references=allow_body_file_references,
     )
     response = httpx.request(
         method,
@@ -190,6 +192,7 @@ def build_operation_request(
     header_entries: list[str] | str | None = None,
     headers: dict[str, str] | None = None,
     body: Any = _MISSING,
+    allow_body_file_references: bool = False,
 ) -> tuple[str, str, dict[str, str], bytes | None]:
     """Build method, URL, headers, and body bytes for an operation."""
 
@@ -237,7 +240,13 @@ def build_operation_request(
     if operation.has_request_body:
         if body is _MISSING:
             body = None
-        request_body = _coerce_body_argument(body) if body is not None else None
+        request_body = (
+            _coerce_body_argument(
+                body, allow_file_references=allow_body_file_references
+            )
+            if body is not None
+            else None
+        )
     if body_fields:
         if request_body is None:
             request_body = {}
@@ -275,10 +284,15 @@ def _load_body_argument(body: str) -> Any:
         raise SystemExit(f"Invalid JSON body: {exc}") from exc
 
 
-def _coerce_body_argument(body: Any) -> Any:
-    if isinstance(body, str):
+def _coerce_body_argument(body: Any, *, allow_file_references: bool = False) -> Any:
+    if not isinstance(body, str):
+        return body
+    if allow_file_references:
         return _load_body_argument(body)
-    return body
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return body
 
 
 def _body_to_content(request_body: Any) -> bytes | None:

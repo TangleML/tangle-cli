@@ -220,6 +220,23 @@ def test_path_query_body_and_nested_ref_params(monkeypatch):
     }
 
 
+def test_programmatic_string_body_does_not_read_at_file_reference(monkeypatch, tmp_path):
+    requests = []
+
+    def fake_request(method, url, **kwargs):
+        requests.append({"method": method, "url": url, **kwargs})
+        return json_response(method, url, {"ok": True})
+
+    secret_path = tmp_path / "secret.json"
+    secret_path.write_text('{"token":"secret"}', encoding="utf-8")
+    monkeypatch.setattr(httpx, "request", fake_request)
+    client = TangleOpenApiClient.from_schema(SCHEMA, base_url="https://api.test")
+
+    client.call("published-components.create", body=f"@{secret_path}")
+
+    assert json.loads(requests[-1]["content"].decode()) == f"@{secret_path}"
+
+
 def test_auth_header_and_env_precedence(monkeypatch):
     requests = []
 
