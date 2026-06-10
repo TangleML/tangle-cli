@@ -14,6 +14,7 @@ dependencies = [
     "cyclopts>=4.16.1",
     "httpx>=0.28.1",
     "platformdirs>=4.10.0",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]

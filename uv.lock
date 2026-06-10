@@ -2284,6 +2284,7 @@ dependencies = [
     { name = "cyclopts" },
     { name = "httpx" },
     { name = "platformdirs" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -2298,6 +2299,7 @@ requires-dist = [
     { name = "cyclopts", specifier = ">=4.16.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "platformdirs", specifier = ">=4.10.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [package.metadata.requires-dev]
