@@ -8,7 +8,7 @@ etc. They are used by wrapper packages and OpenAPI-backed client helpers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import yaml
@@ -718,3 +718,45 @@ class PageChunk:
     next_page_token: str | None
     ui_filter_url: str
     next_ui_filter_url: str | None
+
+
+# ---- Dict-like compatibility ----------------------------------------------
+
+
+def _dataclass_to_dict(self) -> dict[str, Any]:
+    return asdict(self)
+
+
+def _dataclass_get(self, key: str, default: Any = None) -> Any:
+    return _dataclass_to_dict(self).get(key, default)
+
+
+def _dataclass_getitem(self, key: str) -> Any:
+    return _dataclass_to_dict(self)[key]
+
+
+for _dict_like_cls in (
+    GraphExecutionState,
+    PipelineRun,
+    TaskSpec,
+    ExecutionDetails,
+    KubernetesDebugInfo,
+    KubernetesJobInfo,
+    DebugInfo,
+    ContainerState,
+    RunDetails,
+    ArtifactComponentQuery,
+    ArtifactInfo,
+    UserInfo,
+    SecretInfo,
+    ComponentSpec,
+    ComponentInfo,
+    PageChunk,
+):
+    if not hasattr(_dict_like_cls, "to_dict"):
+        setattr(_dict_like_cls, "to_dict", _dataclass_to_dict)
+    setattr(_dict_like_cls, "get", _dataclass_get)
+    setattr(_dict_like_cls, "__getitem__", _dataclass_getitem)
+
+
+del _dict_like_cls

@@ -2,9 +2,11 @@
 
 The backend exposes a FastAPI OpenAPI schema. Schema cache, operation naming,
 parameter mapping, and HTTP dispatch live in reusable modules so the CLI and
-programmatic client share one behavior. Commands are generated only when the
-root CLI is being built for an actual `tangle api ...` invocation, so importing
-this module never reads ambient argv, touches the schema cache, or contacts the
+programmatic client share one behavior. Static commands are registered from the
+checked-in OpenAPI snapshot, while `refresh` can update the dynamic schema cache
+for expansion against a live backend. Commands are generated only when the root
+CLI is being built for an actual `tangle api ...` invocation, so importing this
+module never reads ambient argv, touches the schema cache, or contacts the
 backend.
 """
 
@@ -68,6 +70,7 @@ from .api_transport import (
     default_token,
     request_operation,
 )
+from .openapi.parser import load_openapi_schema as load_bundled_openapi_schema
 
 BaseUrlOption = Annotated[
     str | None,
@@ -106,21 +109,35 @@ BodyOption = Annotated[
     str | None,
     Parameter(help="JSON request body, or @path/to/file.json."),
 ]
+SchemaSourceOption = Annotated[
+    str,
+    Parameter(
+        help=(
+            "OpenAPI schema source for generated API commands: 'auto' merges "
+            "checked-in official operations with cached backend extensions "
+            "(default); 'official' uses only the checked-in static schema; "
+            "'cache' uses only a schema previously written by `tangle api refresh`."
+        )
+    ),
+]
 
 
 def build_app(schema: dict[str, Any] | None = None) -> App:
     """Build the `tangle api` Cyclopts app.
 
-    When *schema* is supplied, dynamic commands are generated from it. Otherwise
-    schema loading is driven by the current top-level CLI invocation: only actual
-    `tangle api ...` commands read the cache or fetch `/openapi.json`.
+    When *schema* is supplied, commands are generated from it. Otherwise the
+    checked-in official OpenAPI snapshot is always used, and cached live backend
+    operations are merged in as dynamic extensions by default. Official
+    definitions win for matching method/path operations.
     """
 
     api_app = App(
         name="api",
-        help="Call Tangle backend API endpoints from the cached OpenAPI schema.",
+        help="Call Tangle backend API endpoints from the checked-in OpenAPI schema.",
     )
     _register_refresh_command(api_app)
+    _register_reset_cache_command(api_app)
+    _register_schema_source_option(api_app)
 
     schema = schema if schema is not None else _schema_for_current_invocation()
     if schema is not None:
@@ -141,11 +158,20 @@ def register_dynamic_commands(api_app: App, schema: dict[str, Any]) -> None:
                 name=operation.group_name,
                 help=f"Call {operation.group_name} API endpoints.",
             )
+            _register_schema_source_option(group)
             groups[operation.group_name] = group
             api_app.command(group)
 
         command = _make_operation_callable(operation)
         group.command(command, name=operation.command_name)
+
+
+def _register_schema_source_option(app: App) -> None:
+    @app.default
+    def schema_source_option(*, schema_source: SchemaSourceOption = "auto") -> None:
+        """Select merged, official-only, or raw cached backend schema."""
+
+        _validate_schema_source(schema_source)
 
 
 def _register_refresh_command(api_app: App) -> None:
@@ -175,6 +201,22 @@ def _register_refresh_command(api_app: App) -> None:
         print(f"Cached OpenAPI schema for {normalized_base_url}")
         print(f"Path: {path}")
         print(f"OpenAPI paths: {path_count}")
+
+
+def _register_reset_cache_command(api_app: App) -> None:
+    @api_app.command(name="reset-cache")
+    def reset_cache(*, base_url: BaseUrlOption = None) -> None:
+        """Delete the cached live OpenAPI schema for a base URL."""
+
+        normalized_base_url = _normalize_base_url(base_url) if base_url else default_base_url()
+        path = cache_path(normalized_base_url)
+        if path.exists():
+            path.unlink()
+            print(f"Deleted cached OpenAPI schema for {normalized_base_url}")
+            print(f"Path: {path}")
+        else:
+            print(f"No cached OpenAPI schema for {normalized_base_url}")
+            print(f"Path: {path}")
 
 
 def _make_operation_callable(operation: OperationCommand):
@@ -260,6 +302,14 @@ def _operation_signature(operation: OperationCommand) -> inspect.Signature:
 
     parameters.append(
         inspect.Parameter(
+            "schema_source",
+            inspect.Parameter.KEYWORD_ONLY,
+            default="auto",
+            annotation=SchemaSourceOption,
+        )
+    )
+    parameters.append(
+        inspect.Parameter(
             "auth_header",
             inspect.Parameter.KEYWORD_ONLY,
             default=None,
@@ -314,6 +364,7 @@ def _operation_help(operation: OperationCommand) -> str:
 def _invoke_operation(operation: OperationCommand, values: dict[str, Any]) -> None:
     """Turn parsed CLI values into an HTTP request and print the response."""
 
+    _validate_schema_source(values.pop("schema_source", "official"))
     base_url = _normalize_base_url(values.pop("base_url", None) or default_base_url())
     token = values.pop("token", None) or default_token()
     auth_header = values.pop("auth_header", None)
@@ -354,37 +405,76 @@ def _invoke_operation(operation: OperationCommand, values: dict[str, Any]) -> No
 
 
 def _schema_for_current_invocation() -> dict[str, Any] | None:
-    """Return schema needed to build dynamic commands for this process.
+    """Return schema needed to build API commands for this process.
 
-    We prefer the cache and only fetch on API-focused invocations. If the user
-    is dispatching a dynamic command, fetch failures are made actionable instead
-    of letting Cyclopts report that only the static `refresh` command exists.
+    Static commands come from the checked-in official OpenAPI snapshot and are
+    available on a cold cache. By default, cached live backend operations are
+    merged in as extensions without overriding official operations.
     """
 
     api_tail = _api_argv_tail(sys.argv)
     if api_tail is None:
         return None
 
+    schema_source = _schema_source_from_argv(api_tail)
+    official = load_bundled_openapi_schema()
+    if schema_source == "official":
+        return official
+
     base_url = _base_url_from_argv(api_tail) or default_base_url()
     cached = load_cached_schema(base_url)
-    if cached is not None:
+    if schema_source == "cache":
+        if cached is None:
+            raise SystemExit(
+                f"No cached OpenAPI schema for {_normalize_base_url(base_url)}. "
+                "Run `tangle api refresh` with the same --base-url/--auth-header/--header options, "
+                "or use `--schema-source official` to use the official static schema."
+            )
         return cached
-    if not _argv_requests_api_schema(sys.argv):
-        return None
-    try:
-        return load_or_fetch_schema(
-            base_url,
-            _token_from_argv(api_tail),
-            _headers_from_argv(api_tail),
-            _auth_header_from_argv(api_tail),
-        )
-    except Exception as exc:
-        if _argv_dispatches_dynamic_command(sys.argv):
-            raise SystemExit(_schema_fetch_failure_message(base_url, exc)) from exc
-        # Keep `tangle api --help` usable if the backend is unavailable; the
-        # explicit `refresh` command or an attempted dynamic command reports the
-        # concrete fetch failure and next step.
-        return None
+    if cached is None:
+        return official
+    return _merge_official_with_cached_extensions(official, cached)
+
+
+def _merge_official_with_cached_extensions(
+    official: dict[str, Any],
+    cached: dict[str, Any],
+) -> dict[str, Any]:
+    """Return official schema plus cached-only extension operations.
+
+    Official operations win for matching method/path pairs. Cached schemas can
+    contribute entirely new paths, additional methods on existing paths, and
+    component definitions needed by cached-only extension operations.
+    """
+
+    merged = json.loads(json.dumps(official))
+    cached_paths = cached.get("paths", {}) or {}
+    merged_paths = merged.setdefault("paths", {})
+    for path, cached_path_item in cached_paths.items():
+        if not isinstance(cached_path_item, dict):
+            continue
+        if path not in merged_paths or not isinstance(merged_paths[path], dict):
+            merged_paths[path] = json.loads(json.dumps(cached_path_item))
+            continue
+        merged_path_item = merged_paths[path]
+        for key, value in cached_path_item.items():
+            if key.lower() in SUPPORTED_METHODS:
+                # Preserve official operation definitions when method/path match.
+                merged_path_item.setdefault(key, json.loads(json.dumps(value)))
+            elif key not in merged_path_item:
+                # Preserve cached-only path-level metadata for cached-only methods.
+                merged_path_item[key] = json.loads(json.dumps(value))
+
+    _merge_missing_dict_keys(merged.setdefault("components", {}), cached.get("components", {}) or {})
+    return merged
+
+
+def _merge_missing_dict_keys(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key, value in source.items():
+        if key not in target:
+            target[key] = json.loads(json.dumps(value))
+        elif isinstance(target[key], dict) and isinstance(value, dict):
+            _merge_missing_dict_keys(target[key], value)
 
 
 def _argv_requests_api_schema(argv: list[str]) -> bool:
@@ -422,7 +512,15 @@ def _api_argv_tail(argv: list[str]) -> list[str] | None:
 
 def _api_first_command(api_tail: list[str]) -> str | None:
     skip_next = False
-    options_with_values = {"--base-url", "--api-url", "--token", "--auth-header", "--header", "-H"}
+    options_with_values = {
+        "--base-url",
+        "--api-url",
+        "--token",
+        "--auth-header",
+        "--header",
+        "-H",
+        "--schema-source",
+    }
     for arg in api_tail:
         if skip_next:
             skip_next = False
@@ -436,6 +534,18 @@ def _api_first_command(api_tail: list[str]) -> str | None:
             continue
         return arg
     return None
+
+
+def _schema_source_from_argv(argv: list[str]) -> str:
+    value = _option_from_argv(argv, "--schema-source") or "auto"
+    return _validate_schema_source(value)
+
+
+def _validate_schema_source(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in {"auto", "official", "cache"}:
+        raise SystemExit("--schema-source must be 'auto', 'official', or 'cache'")
+    return normalized
 
 
 def _schema_fetch_failure_message(base_url: str, exc: Exception) -> str:

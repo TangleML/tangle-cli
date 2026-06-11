@@ -1,0 +1,3881 @@
+{
+  "components": {
+    "schemas": {
+      "ArtifactData": {
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "extra_data": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Data"
+          },
+          "hash": {
+            "title": "Hash",
+            "type": "string"
+          },
+          "is_dir": {
+            "title": "Is Dir",
+            "type": "boolean"
+          },
+          "total_size": {
+            "title": "Total Size",
+            "type": "integer"
+          },
+          "uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uri"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "total_size",
+          "is_dir",
+          "hash"
+        ],
+        "title": "ArtifactData",
+        "type": "object"
+      },
+      "ArtifactDataResponse": {
+        "properties": {
+          "is_dir": {
+            "title": "Is Dir",
+            "type": "boolean"
+          },
+          "total_size": {
+            "title": "Total Size",
+            "type": "integer"
+          },
+          "uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uri"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "total_size",
+          "is_dir"
+        ],
+        "title": "ArtifactDataResponse",
+        "type": "object"
+      },
+      "ArtifactNodeIdResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ArtifactNodeIdResponse",
+        "type": "object"
+      },
+      "ArtifactNodeResponse": {
+        "properties": {
+          "artifact_data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactDataResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "producer_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Execution Id"
+          },
+          "producer_output_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Output Name"
+          },
+          "type_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Name"
+          },
+          "type_properties": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type Properties"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ArtifactNodeResponse",
+        "type": "object"
+      },
+      "Body_create_api_pipeline_runs__post": {
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotations"
+          },
+          "components": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ComponentReference"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Components"
+          },
+          "root_task": {
+            "$ref": "#/components/schemas/TaskSpec"
+          }
+        },
+        "required": [
+          "root_task"
+        ],
+        "title": "Body_create_api_pipeline_runs__post",
+        "type": "object"
+      },
+      "Body_create_secret_api_secrets__post": {
+        "properties": {
+          "secret_value": {
+            "title": "Secret Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret_value"
+        ],
+        "title": "Body_create_secret_api_secrets__post",
+        "type": "object"
+      },
+      "Body_set_settings_api_users_me_settings_patch": {
+        "properties": {
+          "settings": {
+            "additionalProperties": true,
+            "title": "Settings",
+            "type": "object"
+          }
+        },
+        "required": [
+          "settings"
+        ],
+        "title": "Body_set_settings_api_users_me_settings_patch",
+        "type": "object"
+      },
+      "Body_update_secret_api_secrets__secret_name__put": {
+        "properties": {
+          "secret_value": {
+            "title": "Secret Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret_value"
+        ],
+        "title": "Body_update_secret_api_secrets__secret_name__put",
+        "type": "object"
+      },
+      "CachingStrategySpec": {
+        "properties": {
+          "maxCacheStaleness": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maxcachestaleness"
+          }
+        },
+        "title": "CachingStrategySpec",
+        "type": "object"
+      },
+      "ComponentLibrary": {
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotations"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "root_folder": {
+            "$ref": "#/components/schemas/ComponentLibraryFolder"
+          }
+        },
+        "required": [
+          "name",
+          "root_folder"
+        ],
+        "title": "ComponentLibrary",
+        "type": "object"
+      },
+      "ComponentLibraryFolder": {
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotations"
+          },
+          "components": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ComponentReference"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Components"
+          },
+          "folders": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ComponentLibraryFolder"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folders"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ComponentLibraryFolder",
+        "type": "object"
+      },
+      "ComponentLibraryResponse": {
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotations"
+          },
+          "component_count": {
+            "default": 0,
+            "title": "Component Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "hide_from_search": {
+            "default": false,
+            "title": "Hide From Search",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "published_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published By"
+          },
+          "root_folder": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ComponentLibraryFolder"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ComponentLibraryResponse",
+        "type": "object"
+      },
+      "ComponentReference": {
+        "description": "Component reference. Contains information that can be used to locate and load a component by name, digest or URL",
+        "properties": {
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Digest"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "spec": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ComponentSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "title": "ComponentReference",
+        "type": "object"
+      },
+      "ComponentResponse": {
+        "properties": {
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "digest",
+          "text"
+        ],
+        "title": "ComponentResponse",
+        "type": "object"
+      },
+      "ComponentSpec": {
+        "description": "Component specification. Describes the metadata (name, description, annotations and labels), the interface (inputs and outputs) and the implementation of the component.",
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "implementation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContainerImplementation"
+              },
+              {
+                "$ref": "#/components/schemas/GraphImplementation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Implementation"
+          },
+          "inputs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/InputSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inputs"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MetadataSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "outputs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OutputSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outputs"
+          }
+        },
+        "title": "ComponentSpec",
+        "type": "object"
+      },
+      "ConcatPlaceholder": {
+        "description": "Represents the command-line argument placeholder that will be replaced at run-time by the concatenated values of its items.",
+        "properties": {
+          "concat": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/InputValuePlaceholder"
+                },
+                {
+                  "$ref": "#/components/schemas/InputPathPlaceholder"
+                },
+                {
+                  "$ref": "#/components/schemas/OutputPathPlaceholder"
+                },
+                {
+                  "$ref": "#/components/schemas/ConcatPlaceholder"
+                },
+                {
+                  "$ref": "#/components/schemas/IfPlaceholder"
+                }
+              ]
+            },
+            "title": "Concat",
+            "type": "array"
+          }
+        },
+        "required": [
+          "concat"
+        ],
+        "title": "ConcatPlaceholder",
+        "type": "object"
+      },
+      "ContainerExecutionStatus": {
+        "enum": [
+          "INVALID",
+          "UNINITIALIZED",
+          "QUEUED",
+          "WAITING_FOR_UPSTREAM",
+          "PENDING",
+          "RUNNING",
+          "SUCCEEDED",
+          "FAILED",
+          "SYSTEM_ERROR",
+          "CANCELLING",
+          "CANCELLED",
+          "SKIPPED"
+        ],
+        "title": "ContainerExecutionStatus",
+        "type": "string"
+      },
+      "ContainerImplementation": {
+        "description": "Represents the container component implementation.",
+        "properties": {
+          "container": {
+            "$ref": "#/components/schemas/ContainerSpec"
+          }
+        },
+        "required": [
+          "container"
+        ],
+        "title": "ContainerImplementation",
+        "type": "object"
+      },
+      "ContainerSpec": {
+        "description": "Describes the container component implementation.",
+        "properties": {
+          "args": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InputValuePlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InputPathPlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/OutputPathPlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ConcatPlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IfPlaceholder"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Args"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InputValuePlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InputPathPlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/OutputPathPlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ConcatPlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IfPlaceholder"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command"
+          },
+          "env": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env"
+          },
+          "image": {
+            "title": "Image",
+            "type": "string"
+          }
+        },
+        "required": [
+          "image"
+        ],
+        "title": "ContainerSpec",
+        "type": "object"
+      },
+      "DynamicDataArgument": {
+        "description": "Argument that references data that's dynamically produced by the execution system at runtime.\n\nExamples of dynamic data:\n* Secret value\n* Container execution ID\n* Pipeline run ID\n* Loop index/item",
+        "properties": {
+          "dynamicData": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
+            "title": "Dynamicdata"
+          }
+        },
+        "required": [
+          "dynamicData"
+        ],
+        "title": "DynamicDataArgument",
+        "type": "object"
+      },
+      "ExecutionNodeReference": {
+        "properties": {
+          "execution_node_id": {
+            "title": "Execution Node Id",
+            "type": "string"
+          },
+          "pipeline_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Run Id"
+          }
+        },
+        "required": [
+          "execution_node_id",
+          "pipeline_run_id"
+        ],
+        "title": "ExecutionNodeReference",
+        "type": "object"
+      },
+      "ExecutionOptionsSpec": {
+        "properties": {
+          "cachingStrategy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CachingStrategySpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retryStrategy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RetryStrategySpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "ExecutionOptionsSpec",
+        "type": "object"
+      },
+      "ExecutionStatusSummary": {
+        "properties": {
+          "ended_executions": {
+            "title": "Ended Executions",
+            "type": "integer"
+          },
+          "has_ended": {
+            "title": "Has Ended",
+            "type": "boolean"
+          },
+          "total_executions": {
+            "title": "Total Executions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_executions",
+          "ended_executions",
+          "has_ended"
+        ],
+        "title": "ExecutionStatusSummary",
+        "type": "object"
+      },
+      "GetArtifactInfoResponse": {
+        "properties": {
+          "artifact_data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "GetArtifactInfoResponse",
+        "type": "object"
+      },
+      "GetArtifactSignedUrlResponse": {
+        "properties": {
+          "signed_url": {
+            "title": "Signed Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signed_url"
+        ],
+        "title": "GetArtifactSignedUrlResponse",
+        "type": "object"
+      },
+      "GetContainerExecutionLogResponse": {
+        "properties": {
+          "log_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Text"
+          },
+          "orchestration_error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Orchestration Error Message"
+          },
+          "system_error_exception_full": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Error Exception Full"
+          }
+        },
+        "title": "GetContainerExecutionLogResponse",
+        "type": "object"
+      },
+      "GetContainerExecutionStateResponse": {
+        "properties": {
+          "debug_info": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Debug Info"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "execution_nodes_linked_to_same_container_execution": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ExecutionNodeReference"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Nodes Linked To Same Container Execution"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ContainerExecutionStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "GetContainerExecutionStateResponse",
+        "type": "object"
+      },
+      "GetExecutionArtifactsResponse": {
+        "properties": {
+          "input_artifacts": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ArtifactNodeResponse"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Artifacts"
+          },
+          "output_artifacts": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ArtifactNodeResponse"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Artifacts"
+          }
+        },
+        "title": "GetExecutionArtifactsResponse",
+        "type": "object"
+      },
+      "GetExecutionInfoResponse": {
+        "properties": {
+          "child_task_execution_ids": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Child Task Execution Ids",
+            "type": "object"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "input_artifacts": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ArtifactNodeIdResponse"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Artifacts"
+          },
+          "output_artifacts": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ArtifactNodeIdResponse"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Artifacts"
+          },
+          "parent_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Execution Id"
+          },
+          "pipeline_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Run Id"
+          },
+          "task_spec": {
+            "$ref": "#/components/schemas/TaskSpec"
+          }
+        },
+        "required": [
+          "id",
+          "task_spec",
+          "child_task_execution_ids"
+        ],
+        "title": "GetExecutionInfoResponse",
+        "type": "object"
+      },
+      "GetGraphExecutionStateResponse": {
+        "properties": {
+          "child_execution_status_stats": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "title": "Child Execution Status Stats",
+            "type": "object"
+          },
+          "child_execution_status_summary": {
+            "$ref": "#/components/schemas/ExecutionStatusSummary"
+          }
+        },
+        "required": [
+          "child_execution_status_stats",
+          "child_execution_status_summary"
+        ],
+        "title": "GetGraphExecutionStateResponse",
+        "type": "object"
+      },
+      "GetUserResponse": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "permissions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Permissions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "permissions"
+        ],
+        "title": "GetUserResponse",
+        "type": "object"
+      },
+      "GraphImplementation": {
+        "description": "Represents the graph component implementation.",
+        "properties": {
+          "graph": {
+            "$ref": "#/components/schemas/GraphSpec"
+          }
+        },
+        "required": [
+          "graph"
+        ],
+        "title": "GraphImplementation",
+        "type": "object"
+      },
+      "GraphInputArgument": {
+        "description": "Represents the component argument value that comes from the graph component input.",
+        "properties": {
+          "graphInput": {
+            "$ref": "#/components/schemas/GraphInputReference"
+          }
+        },
+        "required": [
+          "graphInput"
+        ],
+        "title": "GraphInputArgument",
+        "type": "object"
+      },
+      "GraphInputReference": {
+        "description": "References the input of the graph (the scope is a single graph).",
+        "properties": {
+          "inputName": {
+            "title": "Inputname",
+            "type": "string"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          }
+        },
+        "required": [
+          "inputName"
+        ],
+        "title": "GraphInputReference",
+        "type": "object"
+      },
+      "GraphSpec": {
+        "description": "Describes the graph component implementation. It represents a graph of component tasks connected to the upstream sources of data using the argument specifications. It also describes the sources of graph output values.",
+        "properties": {
+          "outputValues": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GraphInputArgument"
+                    },
+                    {
+                      "$ref": "#/components/schemas/TaskOutputArgument"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DynamicDataArgument"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outputvalues"
+          },
+          "tasks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TaskSpec"
+            },
+            "title": "Tasks",
+            "type": "object"
+          }
+        },
+        "required": [
+          "tasks"
+        ],
+        "title": "GraphSpec",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IfPlaceholder": {
+        "description": "Represents the command-line argument placeholder that will be replaced at run-time by the expanded value of either \"then_value\" or \"else_value\" depending on the submission-time resolved value of the \"cond\" predicate.",
+        "properties": {
+          "if": {
+            "$ref": "#/components/schemas/IfPlaceholderStructure"
+          }
+        },
+        "required": [
+          "if"
+        ],
+        "title": "IfPlaceholder",
+        "type": "object"
+      },
+      "IfPlaceholderStructure": {
+        "description": "Used in by the IfPlaceholder - the command-line argument placeholder that will be replaced at run-time by the expanded value of either \"then_value\" or \"else_value\" depending on the submission-time resolved value of the \"cond\" predicate.",
+        "properties": {
+          "cond": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/IsPresentPlaceholder"
+              },
+              {
+                "$ref": "#/components/schemas/InputValuePlaceholder"
+              }
+            ],
+            "title": "Cond"
+          },
+          "else": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InputValuePlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InputPathPlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/OutputPathPlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ConcatPlaceholder"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IfPlaceholder"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Else"
+          },
+          "then": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/InputValuePlaceholder"
+                },
+                {
+                  "$ref": "#/components/schemas/InputPathPlaceholder"
+                },
+                {
+                  "$ref": "#/components/schemas/OutputPathPlaceholder"
+                },
+                {
+                  "$ref": "#/components/schemas/ConcatPlaceholder"
+                },
+                {
+                  "$ref": "#/components/schemas/IfPlaceholder"
+                }
+              ]
+            },
+            "title": "Then",
+            "type": "array"
+          }
+        },
+        "required": [
+          "cond",
+          "then"
+        ],
+        "title": "IfPlaceholderStructure",
+        "type": "object"
+      },
+      "InputPathPlaceholder": {
+        "description": "Represents the command-line argument placeholder that will be replaced at run-time by a local file path pointing to a file containing the input argument value.",
+        "properties": {
+          "inputPath": {
+            "title": "Inputpath",
+            "type": "string"
+          }
+        },
+        "required": [
+          "inputPath"
+        ],
+        "title": "InputPathPlaceholder",
+        "type": "object"
+      },
+      "InputSpec": {
+        "description": "Describes the component input specification",
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotations"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "optional": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": false,
+            "title": "Optional"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "InputSpec",
+        "type": "object"
+      },
+      "InputValuePlaceholder": {
+        "description": "Represents the command-line argument placeholder that will be replaced at run-time by the input argument value.",
+        "properties": {
+          "inputValue": {
+            "title": "Inputvalue",
+            "type": "string"
+          }
+        },
+        "required": [
+          "inputValue"
+        ],
+        "title": "InputValuePlaceholder",
+        "type": "object"
+      },
+      "IsPresentPlaceholder": {
+        "description": "Represents the command-line argument placeholder that will be replaced at run-time by a boolean value specifying whether the caller has passed an argument for the specified optional input.",
+        "properties": {
+          "isPresent": {
+            "title": "Ispresent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "isPresent"
+        ],
+        "title": "IsPresentPlaceholder",
+        "type": "object"
+      },
+      "ListComponentLibrariesResponse": {
+        "properties": {
+          "component_libraries": {
+            "items": {
+              "$ref": "#/components/schemas/ComponentLibraryResponse"
+            },
+            "title": "Component Libraries",
+            "type": "array"
+          }
+        },
+        "required": [
+          "component_libraries"
+        ],
+        "title": "ListComponentLibrariesResponse",
+        "type": "object"
+      },
+      "ListPipelineJobsResponse": {
+        "properties": {
+          "next_page_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Page Token"
+          },
+          "pipeline_runs": {
+            "items": {
+              "$ref": "#/components/schemas/PipelineRunResponse"
+            },
+            "title": "Pipeline Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pipeline_runs"
+        ],
+        "title": "ListPipelineJobsResponse",
+        "type": "object"
+      },
+      "ListPublishedComponentsResponse": {
+        "properties": {
+          "published_components": {
+            "items": {
+              "$ref": "#/components/schemas/PublishedComponentResponse"
+            },
+            "title": "Published Components",
+            "type": "array"
+          }
+        },
+        "required": [
+          "published_components"
+        ],
+        "title": "ListPublishedComponentsResponse",
+        "type": "object"
+      },
+      "ListSecretsResponse": {
+        "properties": {
+          "secrets": {
+            "items": {
+              "$ref": "#/components/schemas/SecretInfoResponse"
+            },
+            "title": "Secrets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "secrets"
+        ],
+        "title": "ListSecretsResponse",
+        "type": "object"
+      },
+      "MetadataSpec": {
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotations"
+          },
+          "labels": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Labels"
+          }
+        },
+        "title": "MetadataSpec",
+        "type": "object"
+      },
+      "OutputPathPlaceholder": {
+        "description": "Represents the command-line argument placeholder that will be replaced at run-time by a local file path pointing to a file where the program should write its output data.",
+        "properties": {
+          "outputPath": {
+            "title": "Outputpath",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outputPath"
+        ],
+        "title": "OutputPathPlaceholder",
+        "type": "object"
+      },
+      "OutputSpec": {
+        "description": "Describes the component output specification",
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotations"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "OutputSpec",
+        "type": "object"
+      },
+      "PipelineRunResponse": {
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotations"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "execution_status_stats": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Status Stats"
+          },
+          "execution_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionStatusSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "pipeline_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Name"
+          },
+          "root_execution_id": {
+            "title": "Root Execution Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "root_execution_id"
+        ],
+        "title": "PipelineRunResponse",
+        "type": "object"
+      },
+      "PublishedComponentResponse": {
+        "properties": {
+          "deprecated": {
+            "default": false,
+            "title": "Deprecated",
+            "type": "boolean"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "published_by": {
+            "title": "Published By",
+            "type": "string"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "digest",
+          "published_by"
+        ],
+        "title": "PublishedComponentResponse",
+        "type": "object"
+      },
+      "RetryStrategySpec": {
+        "properties": {
+          "maxRetries": {
+            "title": "Maxretries",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "maxRetries"
+        ],
+        "title": "RetryStrategySpec",
+        "type": "object"
+      },
+      "SecretInfoResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "secret_name": {
+            "title": "Secret Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret_name",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SecretInfoResponse",
+        "type": "object"
+      },
+      "TaskOutputArgument": {
+        "description": "Represents the component argument value that comes from the output of another task.",
+        "properties": {
+          "taskOutput": {
+            "$ref": "#/components/schemas/TaskOutputReference"
+          }
+        },
+        "required": [
+          "taskOutput"
+        ],
+        "title": "TaskOutputArgument",
+        "type": "object"
+      },
+      "TaskOutputReference": {
+        "description": "References the output of some task (the scope is a single graph).",
+        "properties": {
+          "outputName": {
+            "title": "Outputname",
+            "type": "string"
+          },
+          "taskId": {
+            "title": "Taskid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outputName",
+          "taskId"
+        ],
+        "title": "TaskOutputReference",
+        "type": "object"
+      },
+      "TaskSpec": {
+        "description": "Task specification. Task is a \"configured\" component - a component supplied with arguments and other applied configuration changes.",
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotations"
+          },
+          "arguments": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GraphInputArgument"
+                    },
+                    {
+                      "$ref": "#/components/schemas/TaskOutputArgument"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DynamicDataArgument"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arguments"
+          },
+          "componentRef": {
+            "$ref": "#/components/schemas/ComponentReference"
+          },
+          "executionOptions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionOptionsSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "isEnabled": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/GraphInputArgument"
+              },
+              {
+                "$ref": "#/components/schemas/TaskOutputArgument"
+              },
+              {
+                "$ref": "#/components/schemas/DynamicDataArgument"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isenabled"
+          }
+        },
+        "required": [
+          "componentRef"
+        ],
+        "title": "TaskSpec",
+        "type": "object"
+      },
+      "UserComponentLibraryPinsResponse": {
+        "properties": {
+          "component_library_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Component Library Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "component_library_ids"
+        ],
+        "title": "UserComponentLibraryPinsResponse",
+        "type": "object"
+      },
+      "UserSettingsResponse": {
+        "properties": {
+          "settings": {
+            "additionalProperties": true,
+            "title": "Settings",
+            "type": "object"
+          }
+        },
+        "required": [
+          "settings"
+        ],
+        "title": "UserSettingsResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Cloud Pipelines API",
+    "version": "0.0.1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/admin/execution_node/{id}/status": {
+      "put": {
+        "operationId": "admin_set_execution_node_status_api_admin_execution_node__id__status_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ContainerExecutionStatus"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Set Execution Node Status",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/set_read_only_model": {
+      "put": {
+        "operationId": "admin_set_read_only_model_api_admin_set_read_only_model_put",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "read_only",
+            "required": true,
+            "schema": {
+              "title": "Read Only",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Set Read Only Model",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/sql_engine_connection_pool_status": {
+      "get": {
+        "operationId": "get_sql_engine_connection_pool_status_api_admin_sql_engine_connection_pool_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Sql Engine Connection Pool Status Api Admin Sql Engine Connection Pool Status Get",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Sql Engine Connection Pool Status"
+      }
+    },
+    "/api/artifacts/{id}": {
+      "get": {
+        "operationId": "get_api_artifacts__id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetArtifactInfoResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get",
+        "tags": [
+          "artifacts"
+        ]
+      }
+    },
+    "/api/artifacts/{id}/signed_artifact_url": {
+      "get": {
+        "operationId": "get_signed_artifact_url_api_artifacts__id__signed_artifact_url_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetArtifactSignedUrlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Signed Artifact Url",
+        "tags": [
+          "artifacts"
+        ]
+      }
+    },
+    "/api/component_libraries/": {
+      "get": {
+        "operationId": "list_api_component_libraries__get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "name_substring",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Name Substring"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListComponentLibrariesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List",
+        "tags": [
+          "components"
+        ]
+      },
+      "post": {
+        "operationId": "create_api_component_libraries__post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "hide_from_search",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Hide From Search",
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComponentLibrary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComponentLibraryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create",
+        "tags": [
+          "components"
+        ]
+      }
+    },
+    "/api/component_libraries/{id}": {
+      "get": {
+        "operationId": "get_api_component_libraries__id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_component_texts",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Component Texts",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComponentLibraryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get",
+        "tags": [
+          "components"
+        ]
+      },
+      "put": {
+        "operationId": "replace_api_component_libraries__id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "hide_from_search",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Hide From Search"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComponentLibrary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComponentLibraryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Replace",
+        "tags": [
+          "components"
+        ]
+      }
+    },
+    "/api/component_library_pins/me/": {
+      "get": {
+        "operationId": "get_component_library_pins_api_component_library_pins_me__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserComponentLibraryPinsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Component Library Pins",
+        "tags": [
+          "components"
+        ]
+      },
+      "put": {
+        "operationId": "set_component_library_pins_api_component_library_pins_me__put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Component Library Ids",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Component Library Pins",
+        "tags": [
+          "components"
+        ]
+      }
+    },
+    "/api/components/{digest}": {
+      "get": {
+        "operationId": "get_api_components__digest__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "digest",
+            "required": true,
+            "schema": {
+              "title": "Digest",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComponentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get",
+        "tags": [
+          "components"
+        ]
+      }
+    },
+    "/api/executions/{id}/artifacts": {
+      "get": {
+        "operationId": "get_artifacts_api_executions__id__artifacts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetExecutionArtifactsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Artifacts",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/executions/{id}/container_log": {
+      "get": {
+        "operationId": "get_container_log_api_executions__id__container_log_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetContainerExecutionLogResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Container Log",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/executions/{id}/container_state": {
+      "get": {
+        "operationId": "get_container_execution_state_api_executions__id__container_state_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_execution_nodes_linked_to_same_container_execution",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Include Execution Nodes Linked To Same Container Execution"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetContainerExecutionStateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Container Execution State",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/executions/{id}/details": {
+      "get": {
+        "operationId": "get_api_executions__id__details_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetExecutionInfoResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/executions/{id}/graph_execution_state": {
+      "get": {
+        "operationId": "get_graph_execution_state_api_executions__id__graph_execution_state_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetGraphExecutionStateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Graph Execution State",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/executions/{id}/state": {
+      "get": {
+        "operationId": "get_graph_execution_state_api_executions__id__state_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetGraphExecutionStateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Graph Execution State",
+        "tags": [
+          "executions"
+        ]
+      }
+    },
+    "/api/pipeline_runs/": {
+      "get": {
+        "operationId": "list_api_pipeline_runs__get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page_token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Page Token"
+            }
+          },
+          {
+            "in": "query",
+            "name": "filter",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Filter"
+            }
+          },
+          {
+            "in": "query",
+            "name": "filter_query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Filter Query"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_pipeline_names",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Pipeline Names",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_execution_stats",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Execution Stats",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPipelineJobsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List",
+        "tags": [
+          "pipelineRuns"
+        ]
+      },
+      "post": {
+        "operationId": "create_api_pipeline_runs__post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_api_pipeline_runs__post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create",
+        "tags": [
+          "pipelineRuns"
+        ]
+      }
+    },
+    "/api/pipeline_runs/{id}": {
+      "get": {
+        "operationId": "get_api_pipeline_runs__id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_execution_stats",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Execution Stats",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get",
+        "tags": [
+          "pipelineRuns"
+        ]
+      }
+    },
+    "/api/pipeline_runs/{id}/annotations/": {
+      "get": {
+        "operationId": "list_annotations_api_pipeline_runs__id__annotations__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "title": "Response List Annotations Api Pipeline Runs  Id  Annotations  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Annotations",
+        "tags": [
+          "pipelineRuns"
+        ]
+      }
+    },
+    "/api/pipeline_runs/{id}/annotations/{key}": {
+      "delete": {
+        "operationId": "delete_annotation_api_pipeline_runs__id__annotations__key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Annotation",
+        "tags": [
+          "pipelineRuns"
+        ]
+      },
+      "put": {
+        "operationId": "set_annotation_api_pipeline_runs__id__annotations__key__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "value",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Value"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Annotation",
+        "tags": [
+          "pipelineRuns"
+        ]
+      }
+    },
+    "/api/pipeline_runs/{id}/cancel": {
+      "post": {
+        "operationId": "pipeline_run_cancel_api_pipeline_runs__id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pipeline Run Cancel",
+        "tags": [
+          "pipelineRuns"
+        ]
+      }
+    },
+    "/api/published_components/": {
+      "get": {
+        "operationId": "list_api_published_components__get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "include_deprecated",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Deprecated",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "name_substring",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Name Substring"
+            }
+          },
+          {
+            "in": "query",
+            "name": "published_by_substring",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Published By Substring"
+            }
+          },
+          {
+            "in": "query",
+            "name": "digest",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Digest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPublishedComponentsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List",
+        "tags": [
+          "components"
+        ]
+      },
+      "post": {
+        "operationId": "publish_api_published_components__post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComponentReference"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishedComponentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Publish",
+        "tags": [
+          "components"
+        ]
+      }
+    },
+    "/api/published_components/{digest}": {
+      "put": {
+        "operationId": "update_api_published_components__digest__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "digest",
+            "required": true,
+            "schema": {
+              "title": "Digest",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "deprecated",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Deprecated"
+            }
+          },
+          {
+            "in": "query",
+            "name": "superseded_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Superseded By"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishedComponentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update",
+        "tags": [
+          "components"
+        ]
+      }
+    },
+    "/api/secrets/": {
+      "get": {
+        "operationId": "list_secrets_api_secrets__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSecretsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Secrets",
+        "tags": [
+          "secrets"
+        ]
+      },
+      "post": {
+        "operationId": "create_secret_api_secrets__post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "secret_name",
+            "required": true,
+            "schema": {
+              "title": "Secret Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "description",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Description"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expires_at",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_secret_api_secrets__post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretInfoResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Secret",
+        "tags": [
+          "secrets"
+        ]
+      }
+    },
+    "/api/secrets/{secret_name}": {
+      "delete": {
+        "operationId": "delete_secret_api_secrets__secret_name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "secret_name",
+            "required": true,
+            "schema": {
+              "title": "Secret Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Secret",
+        "tags": [
+          "secrets"
+        ]
+      },
+      "put": {
+        "operationId": "update_secret_api_secrets__secret_name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "secret_name",
+            "required": true,
+            "schema": {
+              "title": "Secret Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "description",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Description"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expires_at",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_update_secret_api_secrets__secret_name__put"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretInfoResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Secret",
+        "tags": [
+          "secrets"
+        ]
+      }
+    },
+    "/api/users/me": {
+      "get": {
+        "operationId": "get_current_user_api_users_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/GetUserResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Current User Api Users Me Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Current User",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/api/users/me/settings": {
+      "delete": {
+        "operationId": "delete_settings_api_users_me_settings_delete",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "setting_names",
+            "required": true,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Setting Names",
+              "type": "array"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Settings",
+        "tags": [
+          "user_settings"
+        ]
+      },
+      "get": {
+        "description": "Gets user settings.\n\nIf `setting_names` is specified, returns only those settings.",
+        "operationId": "get_settings_api_users_me_settings_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "setting_names",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Setting Names"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserSettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Settings",
+        "tags": [
+          "user_settings"
+        ]
+      },
+      "patch": {
+        "operationId": "set_settings_api_users_me_settings_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_set_settings_api_users_me_settings_patch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Settings",
+        "tags": [
+          "user_settings"
+        ]
+      }
+    }
+  }
+}

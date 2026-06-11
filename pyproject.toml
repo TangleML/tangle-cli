@@ -14,7 +14,9 @@ dependencies = [
     "cyclopts>=4.16.1",
     "httpx>=0.28.1",
     "platformdirs>=4.10.0",
+    "pydantic>=2.0",
     "pyyaml>=6.0",
+    "requests>=2.32.0",
 ]
 
 [project.urls]
@@ -37,7 +39,25 @@ module-root = ""
 [tool.uv.sources]
 cloud-pipelines-backend = { git = "https://github.com/TangleML/tangle", rev = "stable_cli" }
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+]
+codegen = [
+    # Mirrors third_party/tangle backend import requirements used by
+    # `python -m tangle_cli.openapi.codegen --backend-path third_party/tangle`.
+    "alembic>=1.18.4",
+    "bugsnag>=4.9.0,<5",
+    "cloud-pipelines>=0.23.2.4",
+    "fastapi[standard]>=0.115.12",
+    "kubernetes>=33.1.0,<36",
+    "opentelemetry-api>=1.41.1",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.41.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.1",
+    "opentelemetry-instrumentation-fastapi>=0.60b1",
+    "opentelemetry-sdk>=1.39.1",
+    "sqlalchemy>=2.0.49",
 ]

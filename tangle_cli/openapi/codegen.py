@@ -1,0 +1,471 @@
+"""Generate the checked-in static Tangle API client pieces from OpenAPI.
+
+Run from the repository root with:
+
+    uv run python -m tangle_cli.openapi.codegen
+
+The generator intentionally reuses :mod:`tangle_cli.api_schema` for operation
+normalization so the offline client keeps the dynamic CLI/client expansion
+semantics without requiring OpenAPI parsing at normal runtime.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+import keyword
+import os
+import re
+import sys
+import tempfile
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from .parser import DEFAULT_OPENAPI_PATH, load_openapi_schema, parsed_operations
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_GENERATED_DIR = _REPO_ROOT / "tangle_cli" / "generated"
+DEFAULT_BACKEND_PATH = _REPO_ROOT / "third_party" / "tangle"
+
+
+def _safe_identifier(name: str) -> str:
+    value = re.sub(r"\W", "_", name).strip("_").lower()
+    value = re.sub(r"_+", "_", value) or "value"
+    if value[0].isdigit():
+        value = f"value_{value}"
+    if keyword.iskeyword(value):
+        value = f"{value}_"
+    return value
+
+
+def _class_name(name: str) -> str:
+    parts = re.split(r"[^0-9A-Za-z]+", name)
+    value = "".join(part[:1].upper() + part[1:] for part in parts if part)
+    if not value:
+        value = "GeneratedModel"
+    if value[0].isdigit():
+        value = f"Model{value}"
+    return value
+
+
+def _schema_ref_name(schema: dict[str, Any] | None) -> str | None:
+    if not schema:
+        return None
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+        return _class_name(ref.rsplit("/", 1)[1])
+    for key in ("anyOf", "oneOf", "allOf"):
+        for child in schema.get(key, []) or []:
+            name = _schema_ref_name(child)
+            if name:
+                return name
+    return None
+
+
+def _success_schema(operation: dict[str, Any]) -> dict[str, Any] | None:
+    responses = operation.get("responses", {}) or {}
+    for status in ("200", "201", "202", "204", "default"):
+        response = responses.get(status)
+        if response:
+            break
+    else:
+        response = next(iter(responses.values()), None)
+    if not isinstance(response, dict):
+        return None
+    content = response.get("content", {}) or {}
+    json_content = content.get("application/json") or next(iter(content.values()), {})
+    schema = json_content.get("schema") if isinstance(json_content, dict) else None
+    return schema if isinstance(schema, dict) else None
+
+
+def _response_model_name(operation: dict[str, Any]) -> str | None:
+    return _schema_ref_name(_success_schema(operation))
+
+
+def generate_models(schema: dict[str, Any]) -> str:
+    schemas = schema.get("components", {}).get("schemas", {}) or {}
+    lines: list[str] = [
+        '"""Generated Pydantic models for the checked-in Tangle OpenAPI schema.\n\nDo not edit by hand; run ``uv run python -m tangle_cli.openapi.codegen``.\n"""',
+        "",
+        "from __future__ import annotations",
+        "",
+        "from typing import Any",
+        "",
+        "from pydantic import BaseModel, Field",
+        "",
+        "try:",
+        "    from pydantic import ConfigDict",
+        "except ImportError:  # pragma: no cover - pydantic v1 fallback",
+        "    ConfigDict = None  # type: ignore[assignment]",
+        "",
+        "",
+        "class TangleGeneratedModel(BaseModel):",
+        "    \"\"\"Base for generated response models with dict-like conveniences.\"\"\"",
+        "",
+        "    if ConfigDict is not None:",
+        "        model_config = ConfigDict(extra=\"allow\", populate_by_name=True)",
+        "    else:  # pragma: no cover - pydantic v1 fallback",
+        "        class Config:",
+        "            extra = \"allow\"",
+        "            allow_population_by_field_name = True",
+        "",
+        "    def get(self, key: str, default: Any = None) -> Any:",
+        "        return self.to_dict().get(key, default)",
+        "",
+        "    def __getitem__(self, key: str) -> Any:",
+        "        return self.to_dict()[key]",
+        "",
+        "    def to_dict(self) -> dict[str, Any]:",
+        "        if hasattr(self, \"model_dump\"):",
+        "            return self.model_dump(by_alias=True)",
+        "        return self.dict(by_alias=True)",
+        "",
+        "    @classmethod",
+        "    def from_dict(cls, data: dict[str, Any]) -> Any:",
+        "        if hasattr(cls, \"model_validate\"):",
+        "            return cls.model_validate(data)",
+        "        return cls.parse_obj(data)",
+        "",
+    ]
+
+    exports = ["TangleGeneratedModel"]
+    for schema_name, schema_def in sorted(schemas.items(), key=lambda item: _class_name(item[0])):
+        class_name = _class_name(schema_name)
+        exports.append(class_name)
+        if not isinstance(schema_def, dict) or schema_def.get("type") not in {"object", None} and "properties" not in schema_def:
+            lines.extend([f"{class_name} = Any", ""])
+            continue
+        properties = schema_def.get("properties") or {}
+        lines.extend([f"class {class_name}(TangleGeneratedModel):"])
+        if not properties:
+            lines.append("    pass")
+        else:
+            for prop_name in sorted(properties):
+                field_name = _safe_identifier(prop_name)
+                if field_name != prop_name:
+                    lines.append(f"    {field_name}: Any = Field(default=None, alias={prop_name!r})")
+                else:
+                    lines.append(f"    {field_name}: Any = None")
+        lines.append("")
+
+    lines.append(f"__all__ = {exports!r}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _method_name(group_name: str, command_name: str) -> str:
+    return f"{_safe_identifier(group_name)}_{_safe_identifier(command_name)}"
+
+
+def _param_signature(parameters: list[Any], has_request_body: bool) -> tuple[str, list[str], list[str], list[str], bool]:
+    required: list[Any] = []
+    optional: list[Any] = []
+    for parameter in parameters:
+        (required if parameter.required else optional).append(parameter)
+    ordered = required + optional
+    seen: set[str] = set()
+    signature_parts: list[str] = []
+    path_names: list[str] = []
+    query_names: list[str] = []
+    body_names: list[str] = []
+    for parameter in ordered:
+        name = _safe_identifier(parameter.local_name)
+        if name in seen:
+            continue
+        seen.add(name)
+        if parameter.required:
+            signature_parts.append(f"{name}: Any")
+        else:
+            signature_parts.append(f"{name}: Any = None")
+        if parameter.location == "path":
+            path_names.append(name)
+        elif parameter.location == "query":
+            query_names.append(name)
+        elif parameter.location == "body":
+            body_names.append(name)
+    include_body = has_request_body and not body_names
+    if include_body:
+        signature_parts.append("body: Any = None")
+    return ", ".join(signature_parts), path_names, query_names, body_names, include_body
+
+
+def _dict_literal(names: list[str]) -> str:
+    if not names:
+        return "None"
+    return "{" + ", ".join(f"{name!r}: {name}" for name in names) + "}"
+
+
+def generate_operations(schema: dict[str, Any]) -> str:
+    operations = parsed_operations(schema)
+    response_models = sorted({name for op in operations if (name := _response_model_name(op.operation))})
+    imports = ", ".join(response_models)
+    lines: list[str] = [
+        '"""Generated static endpoint methods for the Tangle API.\n\nDo not edit by hand; run ``uv run python -m tangle_cli.openapi.codegen``.\n"""',
+        "",
+        "from __future__ import annotations",
+        "",
+        "from typing import Any",
+        "",
+    ]
+    if imports:
+        lines.extend([f"from .models import {imports}", ""])
+
+    lines.extend([
+        "",
+        "class GeneratedOperationsMixin:",
+        "    \"\"\"Mixin containing one checked-in method per OpenAPI operation.\"\"\"",
+        "",
+    ])
+
+    used_methods: set[str] = set()
+    for operation in operations:
+        method_name = _method_name(operation.group_name, operation.command_name)
+        if method_name in used_methods:
+            raise RuntimeError(f"duplicate generated method {method_name}")
+        used_methods.add(method_name)
+        signature, path_names, query_names, body_names, include_body = _param_signature(
+            list(operation.parameters), operation.has_request_body
+        )
+        response_model = _response_model_name(operation.operation)
+        response_arg = response_model if response_model else "None"
+        if signature:
+            def_line = f"    def {method_name}(self, {signature}) -> Any:"
+        else:
+            def_line = f"    def {method_name}(self) -> Any:"
+        lines.extend([
+            def_line,
+            f"        return self._request_json(",
+            f"            {operation.method.upper()!r},",
+            f"            {operation.path!r},",
+            f"            path_params={_dict_literal(path_names)},",
+            f"            params={_dict_literal(query_names)},",
+        ])
+        if body_names:
+            lines.append(f"            json_data={_dict_literal(body_names)},")
+        elif include_body:
+            lines.append("            json_data=body,")
+        else:
+            lines.append("            json_data=None,")
+        lines.extend([
+            f"            response_model={response_arg},",
+            "        )",
+            "",
+        ])
+
+    lines.append(f"__all__ = {[ 'GeneratedOperationsMixin' ]!r}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def update_openapi_from_url(
+    openapi_url: str,
+    *,
+    destination: str | Path = DEFAULT_OPENAPI_PATH,
+) -> Path:
+    """Fetch a remote OpenAPI JSON document and write it to *destination*."""
+
+    request = urllib.request.Request(openapi_url, headers={"User-Agent": "tangle-cli-codegen"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = response.read()
+    schema = json.loads(payload.decode("utf-8"))
+    return write_openapi_schema(schema, destination)
+
+
+def update_openapi_from_backend(
+    *,
+    backend_path: str | Path = DEFAULT_BACKEND_PATH,
+    destination: str | Path = DEFAULT_OPENAPI_PATH,
+    database_uri: str | None = None,
+) -> Path:
+    """Import the official backend FastAPI app and write its OpenAPI schema."""
+
+    schema = load_openapi_from_backend(backend_path, database_uri=database_uri)
+    return write_openapi_schema(schema, destination)
+
+
+def load_openapi_from_backend(
+    backend_path: str | Path = DEFAULT_BACKEND_PATH,
+    *,
+    database_uri: str | None = None,
+) -> dict[str, Any]:
+    """Return ``api_server_main.app.openapi()`` from a backend checkout.
+
+    The backend creates a database engine at import time, so codegen points it at
+    a temporary SQLite database unless an explicit URI is supplied.
+    """
+
+    backend_dir = Path(backend_path).resolve()
+    if not (backend_dir / "api_server_main.py").exists():
+        raise FileNotFoundError(f"{backend_dir} does not contain api_server_main.py")
+
+    old_path = list(sys.path)
+    old_database_uri = os.environ.get("DATABASE_URI")
+    old_database_url = os.environ.get("DATABASE_URL")
+    old_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "api_server_main" or name.startswith("cloud_pipelines_backend")
+    }
+    for name in list(old_modules):
+        sys.modules.pop(name, None)
+
+    with tempfile.TemporaryDirectory(prefix="tangle-openapi-codegen-") as tmpdir:
+        os.environ["DATABASE_URI"] = database_uri or f"sqlite:///{Path(tmpdir) / 'openapi_codegen.sqlite'}"
+        os.environ.pop("DATABASE_URL", None)
+        sys.path.insert(0, str(backend_dir))
+        try:
+            api_server_main = importlib.import_module("api_server_main")
+            schema = api_server_main.app.openapi()
+        finally:
+            sys.path[:] = old_path
+            for name in [
+                name
+                for name in sys.modules
+                if name == "api_server_main" or name.startswith("cloud_pipelines_backend")
+            ]:
+                sys.modules.pop(name, None)
+            sys.modules.update(old_modules)
+            if old_database_uri is None:
+                os.environ.pop("DATABASE_URI", None)
+            else:
+                os.environ["DATABASE_URI"] = old_database_uri
+            if old_database_url is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = old_database_url
+
+    if not isinstance(schema, dict) or "paths" not in schema:
+        raise ValueError(f"Backend at {backend_dir} did not produce an OpenAPI paths object")
+    return schema
+
+
+def write_openapi_schema(schema: dict[str, Any], destination: str | Path = DEFAULT_OPENAPI_PATH) -> Path:
+    """Write *schema* as the checked-in OpenAPI snapshot."""
+
+    if not isinstance(schema, dict) or "paths" not in schema:
+        raise ValueError("OpenAPI schema did not contain paths")
+    destination_path = Path(destination)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_path.write_text(json.dumps(schema, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return destination_path
+
+
+def generate(
+    openapi_path: str | Path = DEFAULT_OPENAPI_PATH,
+    generated_dir: str | Path = _GENERATED_DIR,
+) -> tuple[dict[str, Any], list[Path]]:
+    schema = load_openapi_schema(openapi_path)
+    output_dir = Path(generated_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generated_files = [
+        output_dir / "__init__.py",
+        output_dir / "models.py",
+        output_dir / "operations.py",
+    ]
+    generated_files[0].write_text(
+        '"""Generated OpenAPI support modules."""\n',
+        encoding="utf-8",
+    )
+    generated_files[1].write_text(generate_models(schema), encoding="utf-8")
+    generated_files[2].write_text(generate_operations(schema), encoding="utf-8")
+    return schema, generated_files
+
+
+def _display_path(path: str | Path) -> str:
+    resolved = Path(path).resolve()
+    try:
+        return str(resolved.relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _print_summary(
+    *,
+    source: str,
+    openapi_path: str | Path,
+    generated_files: list[Path],
+    schema: dict[str, Any],
+    wrote_openapi: bool,
+) -> None:
+    print(f"Loaded OpenAPI from {source}")
+    if wrote_openapi:
+        print(f"Wrote {_display_path(openapi_path)}")
+    for path in generated_files:
+        print(f"Wrote {_display_path(path)}")
+    print(f"Generated {len(parsed_operations(schema))} operations from {len(schema.get('paths', {}))} paths")
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--openapi", default=str(DEFAULT_OPENAPI_PATH), help="Path to openapi.json")
+    parser.add_argument(
+        "--out",
+        default=str(_GENERATED_DIR),
+        help="Generated support module directory (default: tangle_cli/generated).",
+    )
+    parser.add_argument(
+        "--openapi-url",
+        default=None,
+        help="Remote OpenAPI JSON URL to fetch before regenerating.",
+    )
+    parser.add_argument(
+        "--backend-path",
+        default=None,
+        help=(
+            "Backend checkout/submodule path to import for OpenAPI generation "
+            f"(default: {_display_path(DEFAULT_BACKEND_PATH)})."
+        ),
+    )
+    parser.add_argument(
+        "--backend-database-uri",
+        default=None,
+        help="Database URI used while importing the backend app; defaults to a temporary SQLite DB.",
+    )
+    parser.add_argument(
+        "--from-snapshot",
+        action="store_true",
+        help="Regenerate support modules from the existing local openapi.json snapshot.",
+    )
+    args = parser.parse_args(argv)
+    source_count = sum(bool(value) for value in (args.openapi_url, args.backend_path, args.from_snapshot))
+    if source_count > 1:
+        parser.error("choose only one OpenAPI source: --openapi-url, --backend-path, or --from-snapshot")
+
+    wrote_openapi = False
+    if args.openapi_url:
+        update_openapi_from_url(args.openapi_url, destination=args.openapi)
+        source = f"URL: {args.openapi_url}"
+        wrote_openapi = True
+    elif args.from_snapshot:
+        source = f"snapshot: {_display_path(args.openapi)}"
+    else:
+        backend_path = Path(args.backend_path) if args.backend_path else DEFAULT_BACKEND_PATH
+        if not (backend_path / "api_server_main.py").exists():
+            if args.backend_path:
+                parser.exit(1, f"Backend source not found: {_display_path(backend_path)}\n")
+            parser.exit(
+                1,
+                "Default backend submodule not found. Run: git submodule update --init --recursive\n",
+            )
+        update_openapi_from_backend(
+            backend_path=backend_path,
+            destination=args.openapi,
+            database_uri=args.backend_database_uri,
+        )
+        source = f"backend: {_display_path(backend_path)}"
+        wrote_openapi = True
+
+    schema, generated_files = generate(args.openapi, args.out)
+    _print_summary(
+        source=source,
+        openapi_path=args.openapi,
+        generated_files=generated_files,
+        schema=schema,
+        wrote_openapi=wrote_openapi,
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
