@@ -202,7 +202,9 @@ with `git submodule update --init --recursive`.
 
 `--out` controls where generated support modules are written. It defaults to
 `tangle_cli/generated`, which is the package support module used by the public
-`tangle_cli/client.py` wrapper. Codegen writes exactly these support files:
+`tangle_cli/client.py` wrapper. `--operations-class-name` controls the generated
+operations class name in `<out>/operations.py`; it defaults to
+`GeneratedTangleApiOperations`. Codegen writes exactly these support files:
 
 ```text
 <out>/__init__.py
@@ -235,7 +237,10 @@ uv run python -m tangle_cli.openapi.codegen --openapi-url https://raw.githubuser
 Downstream tools can point `--out` at their own generated support package, e.g.:
 
 ```bash
-uv run python -m tangle_cli.openapi.codegen --openapi-url https://oasis.shopify.io/openapi.json --out src/tangle_deploy/generated_api
+uv run python -m tangle_cli.openapi.codegen \
+  --openapi-url https://oasis.shopify.io/openapi.json \
+  --out src/tangle_deploy/generated_api \
+  --operations-class-name GeneratedTangleApiExtensions
 ```
 
 At the time of writing the official repository does not commit that raw

@@ -82,8 +82,15 @@ def test_codegen_main_no_args_uses_default_backend_and_prints_summary(
         openapi_path.write_text(json.dumps(_schema()), encoding="utf-8")
         return openapi_path
 
-    def fake_generate(openapi_path, generated_dir):
-        calls.append(("generate", {"openapi_path": openapi_path, "generated_dir": generated_dir}))
+    def fake_generate(openapi_path, generated_dir, **kwargs):
+        calls.append((
+            "generate",
+            {
+                "openapi_path": openapi_path,
+                "generated_dir": generated_dir,
+                **kwargs,
+            },
+        ))
         return _schema(), _generated_files(tmp_path)
 
     monkeypatch.setattr(codegen, "DEFAULT_BACKEND_PATH", backend)
@@ -100,6 +107,7 @@ def test_codegen_main_no_args_uses_default_backend_and_prints_summary(
     assert calls[0][0] == "update"
     assert calls[0][1]["backend_path"] == backend
     assert calls[1][0] == "generate"
+    assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
     output = capsys.readouterr().out
     assert f"Loaded OpenAPI from backend: {backend}" in output
     assert f"Wrote {tmp_path / 'openapi.json'}" in output
@@ -128,8 +136,15 @@ def test_codegen_main_from_snapshot_is_explicit(monkeypatch, tmp_path, capsys) -
     def fail_update(*args, **kwargs):  # pragma: no cover - assertion helper
         raise AssertionError("snapshot mode must not update openapi.json")
 
-    def fake_generate(openapi_path, generated_dir):
-        calls.append(("generate", {"openapi_path": openapi_path, "generated_dir": generated_dir}))
+    def fake_generate(openapi_path, generated_dir, **kwargs):
+        calls.append((
+            "generate",
+            {
+                "openapi_path": openapi_path,
+                "generated_dir": generated_dir,
+                **kwargs,
+            },
+        ))
         return _schema(), _generated_files(tmp_path)
 
     monkeypatch.setattr(codegen, "update_openapi_from_backend", fail_update)
@@ -145,10 +160,41 @@ def test_codegen_main_from_snapshot_is_explicit(monkeypatch, tmp_path, capsys) -
     ])
 
     assert calls[0][0] == "generate"
+    assert calls[0][1]["operations_class_name"] == "GeneratedTangleApiOperations"
     output = capsys.readouterr().out
     assert f"Loaded OpenAPI from snapshot: {tmp_path / 'openapi.json'}" in output
     assert f"Wrote {tmp_path / 'openapi.json'}" not in output
     assert "Generated 1 operations from 1 paths" in output
+
+
+def test_codegen_main_accepts_custom_operations_class_name(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, object]] = []
+
+    def fake_generate(openapi_path, generated_dir, **kwargs):
+        calls.append((
+            "generate",
+            {
+                "openapi_path": openapi_path,
+                "generated_dir": generated_dir,
+                **kwargs,
+            },
+        ))
+        return _schema(), _generated_files(tmp_path)
+
+    monkeypatch.setattr(codegen, "generate", fake_generate)
+
+    codegen.main([
+        "--openapi",
+        str(tmp_path / "openapi.json"),
+        "--out",
+        str(tmp_path / "generated"),
+        "--from-snapshot",
+        "--operations-class-name",
+        "GeneratedTangleApiExtensions",
+    ])
+
+    assert calls[0][0] == "generate"
+    assert calls[0][1]["operations_class_name"] == "GeneratedTangleApiExtensions"
 
 
 def test_codegen_main_fetches_from_openapi_url_before_generating(
@@ -162,8 +208,15 @@ def test_codegen_main_fetches_from_openapi_url_before_generating(
         openapi_path.write_text(json.dumps(_schema()), encoding="utf-8")
         return openapi_path
 
-    def fake_generate(openapi_path, generated_dir):
-        calls.append(("generate", {"openapi_path": openapi_path, "generated_dir": generated_dir}))
+    def fake_generate(openapi_path, generated_dir, **kwargs):
+        calls.append((
+            "generate",
+            {
+                "openapi_path": openapi_path,
+                "generated_dir": generated_dir,
+                **kwargs,
+            },
+        ))
         return _schema(), _generated_files(tmp_path)
 
     monkeypatch.setattr(codegen, "update_openapi_from_url", fake_update_openapi_from_url)
@@ -186,6 +239,7 @@ def test_codegen_main_fetches_from_openapi_url_before_generating(
         },
     )
     assert calls[1][0] == "generate"
+    assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
     output = capsys.readouterr().out
     assert "Loaded OpenAPI from URL: https://example.com/openapi.json" in output
     assert "Generated 1 operations from 1 paths" in output
@@ -222,9 +276,45 @@ def test_generate_writes_support_modules_to_custom_out(tmp_path) -> None:
     assert (out / "__init__.py").exists()
     assert (out / "models.py").exists()
     operations = (out / "operations.py").read_text(encoding="utf-8")
-    assert "class GeneratedOperationsMixin" in operations
+    assert "class GeneratedTangleApiOperations" in operations
     assert "def published_components_list" in operations
     assert "name_substring" in operations
+
+
+def test_generate_supports_custom_operations_class_name(tmp_path) -> None:
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "custom_generated_api"
+    openapi.write_text(
+        json.dumps({
+            "openapi": "3.1.0",
+            "paths": {"/api/components/{digest}": {"get": {}}},
+            "components": {"schemas": {}},
+        }),
+        encoding="utf-8",
+    )
+
+    codegen.generate(
+        openapi,
+        out,
+        operations_class_name="GeneratedTangleApiExtensions",
+    )
+
+    operations = (out / "operations.py").read_text(encoding="utf-8")
+    assert "class GeneratedTangleApiExtensions" in operations
+    assert "__all__ = ['GeneratedTangleApiExtensions']" in operations
+
+
+def test_codegen_main_rejects_invalid_operations_class_name(tmp_path, capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        codegen.main([
+            "--openapi",
+            str(tmp_path / "openapi.json"),
+            "--operations-class-name",
+            "not-valid!",
+        ])
+
+    assert exc_info.value.code == 2
+    assert "Invalid generated operations class name" in capsys.readouterr().err
 
 
 def test_generate_operations_uses_concrete_return_annotations() -> None:
@@ -318,6 +408,8 @@ def test_generate_operations_uses_concrete_return_annotations() -> None:
         },
     })
 
+    assert "class GeneratedTangleApiOperations" in operations
+    assert "__all__ = ['GeneratedTangleApiOperations']" in operations
     assert "from .models import FooResponse" in operations
     assert "def arrays_list(self) -> list[FooResponse]:" in operations
     assert "def maps_list(self) -> dict[str, Any]:" in operations
