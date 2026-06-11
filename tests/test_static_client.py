@@ -6,6 +6,7 @@ from typing import Any
 import requests
 
 from tangle_cli import TangleApiClient
+from tangle_cli.logger import CaptureLogger
 from tangle_cli.generated.models import (
     GetGraphExecutionStateResponse,
     ListPublishedComponentsResponse,
@@ -13,6 +14,7 @@ from tangle_cli.generated.models import (
     PublishedComponentResponse,
     SecretInfoResponse,
 )
+from tangle_cli.models import ComponentSpec
 
 
 def response(payload: Any = None, status_code: int = 200) -> requests.Response:
@@ -216,6 +218,129 @@ class ResolveDigestClient(TangleApiClient):
         else:
             rows = []
         return ListPublishedComponentsResponse.from_dict({"published_components": rows})
+
+
+def test_find_existing_components_returns_deduped_list_with_filters() -> None:
+    client = ResolveDigestClient(
+        by_digest={
+            "sha256:one": [{
+                "digest": "sha256:one",
+                "name": "demo",
+                "published_by": "alice@example.com",
+            }],
+            "sha256:two": [{
+                "digest": "sha256:two",
+                "name": "by-digest",
+                "published_by": "alice@example.com",
+            }],
+            "sha256:spec": [{
+                "digest": "sha256:spec",
+                "name": "spec-name",
+                "published_by": "alice@example.com",
+            }],
+        },
+        by_name={
+            "demo": [
+                {
+                    "digest": "sha256:one",
+                    "name": "demo",
+                    "published_by": "alice@example.com",
+                },
+                {
+                    "digest": "sha256:other",
+                    "name": "not-demo",
+                    "published_by": "alice@example.com",
+                },
+            ],
+            "mapped-name": [{
+                "digest": "sha256:mapped",
+                "name": "mapped-name",
+                "published_by": "alice@example.com",
+            }],
+            "explicit-name": [{
+                "digest": "sha256:explicit",
+                "name": "explicit-name",
+                "published_by": "alice@example.com",
+            }],
+            "spec-name": [{
+                "digest": "sha256:spec",
+                "name": "spec-name",
+                "published_by": "alice@example.com",
+            }],
+            "[Official] spec-name": [{
+                "digest": "sha256:spec",
+                "name": "[Official] spec-name",
+                "published_by": "alice@example.com",
+            }],
+        },
+    )
+    logger = CaptureLogger()
+    client.logger = logger
+
+    matches = client.find_existing_components(
+        [
+            "demo",
+            {"name": "mapped-name", "digest": "sha256:one"},
+            ComponentSpec(name="spec-name", digest="sha256:spec"),
+        ],
+        names=["explicit-name"],
+        digests=["sha256:two"],
+        include_deprecated=True,
+        published_by="alice@example.com",
+        verbose=True,
+    )
+
+    assert {match.digest for match in matches} == {
+        "sha256:one",
+        "sha256:two",
+        "sha256:spec",
+        "sha256:mapped",
+        "sha256:explicit",
+    }
+    assert all(match.published_by == "alice@example.com" for match in matches)
+    assert {
+        (
+            lookup["include_deprecated"],
+            lookup["published_by_substring"],
+            lookup["digest"],
+            lookup["name_substring"],
+        )
+        for lookup in client.lookups
+    } == {
+        (True, "alice@example.com", "sha256:one", None),
+        (True, "alice@example.com", "sha256:two", None),
+        (True, "alice@example.com", "sha256:spec", None),
+        (True, "alice@example.com", None, "demo"),
+        (True, "alice@example.com", None, "mapped-name"),
+        (True, "alice@example.com", None, "explicit-name"),
+        (True, "alice@example.com", None, "spec-name"),
+        (True, "alice@example.com", None, "[Official] spec-name"),
+    }
+    assert "Found existing component" in (logger.get_logs() or "")
+
+
+def test_find_existing_components_prefers_published_by_substring() -> None:
+    client = ResolveDigestClient(by_name={
+        "demo": [{
+            "digest": "sha256:one",
+            "name": "demo",
+            "published_by": "bob@example.com",
+        }],
+    })
+
+    matches = client.find_existing_components(
+        ["demo"],
+        published_by="alice@example.com",
+        published_by_substring="bob@example.com",
+    )
+
+    assert [match.name for match in matches] == ["demo"]
+    assert client.lookups == [{
+        "include_deprecated": False,
+        "name_substring": "demo",
+        "published_by_substring": "bob@example.com",
+        "digest": None,
+    }]
 
 
 def test_resolve_digest_returns_non_deprecated_digest() -> None:
