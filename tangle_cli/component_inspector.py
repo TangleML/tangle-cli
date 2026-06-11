@@ -19,19 +19,17 @@ from tangle_cli.models import ComponentInfo, ComponentSpec
 
 
 class ComponentApiClient(Protocol):
-    """Small subset of :class:`tangle_cli.dynamic_discovery_client.TangleDynamicDiscoveryClient` used here."""
+    """Small subset of Tangle API clients used by component inspection."""
 
     base_url: str
 
-    def call(self, operation_name: str, **params: Any) -> Any: ...
-
 
 def _request_path(client: ComponentApiClient, path: str) -> httpx.Response:
-    """Fetch an API-origin path using a dynamic-discovery client's auth settings.
+    """Fetch an API-origin path using the client's auth settings.
 
     ``component_library.yaml`` is not guaranteed to be represented as an
     OpenAPI operation, but it is served from the same origin as the API. This
-    helper preserves the dynamic client's base URL and auth/header precedence
+    helper preserves the client's base URL and auth/header precedence
     without depending on the removed legacy hand-written client module.
     """
 
@@ -60,13 +58,31 @@ def _request_path(client: ComponentApiClient, path: str) -> httpx.Response:
     return response
 
 
+def _to_plain(value: Any) -> Any:
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        return value.to_dict()
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        return value.model_dump(by_alias=True)
+    return value
+
+
+def _is_not_found_error(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 404
+
+
 def _component_response(client: ComponentApiClient, digest: str) -> dict[str, Any] | None:
     try:
-        data = client.call("components.get", digest=digest)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
+        components_get = getattr(client, "components_get", None)
+        if callable(components_get):
+            data = components_get(digest)
+        else:
+            data = client.components.get(digest=digest)  # type: ignore[attr-defined]
+    except Exception as exc:
+        if _is_not_found_error(exc):
             return None
         raise
+    data = _to_plain(data)
     return data if isinstance(data, dict) else None
 
 
@@ -78,13 +94,22 @@ def _published_components(
     published_by_substring: str | None = None,
     digest: str | None = None,
 ) -> list[dict[str, Any]]:
-    result = client.call(
-        "published-components.list",
-        include_deprecated=include_deprecated,
-        name_substring=name_substring,
-        published_by_substring=published_by_substring,
-        digest=digest,
-    )
+    published_components_list = getattr(client, "published_components_list", None)
+    if callable(published_components_list):
+        result = published_components_list(
+            include_deprecated=include_deprecated,
+            name_substring=name_substring,
+            published_by_substring=published_by_substring,
+            digest=digest,
+        )
+    else:
+        result = client.published_components.list(  # type: ignore[attr-defined]
+            include_deprecated=include_deprecated,
+            name_substring=name_substring,
+            published_by_substring=published_by_substring,
+            digest=digest,
+        )
+    result = _to_plain(result)
     if isinstance(result, dict) and isinstance(result.get("published_components"), list):
         return result["published_components"]
     if isinstance(result, list):
@@ -350,6 +375,9 @@ def _enrich_with_spec(
 
 
 def _get_component_spec(client: ComponentApiClient, digest: str) -> ComponentSpec | None:
+    get_component_spec = getattr(client, "get_component_spec", None)
+    if callable(get_component_spec):
+        return get_component_spec(digest)
     data = _component_response(client, digest)
     return ComponentSpec.from_dict(data) if data is not None else None
 
