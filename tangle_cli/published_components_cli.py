@@ -7,8 +7,8 @@ from typing import Annotated
 
 from cyclopts import App, Parameter
 
-from .dynamic_discovery_client import TangleDynamicDiscoveryClient
 from .api_transport import DEFAULT_TIMEOUT_SECONDS
+from .client import TangleApiClient
 from .component_inspector import (
     get_standard_library,
     inspect_by_digest,
@@ -54,10 +54,10 @@ def _client_from_options(
     token: str | None = None,
     auth_header: str | None = None,
     header: list[str] | None = None,
-) -> TangleDynamicDiscoveryClient:
-    """Create the dynamic-discovery client used by published-component commands."""
+) -> TangleApiClient:
+    """Create the static client used by published-component commands."""
 
-    return TangleDynamicDiscoveryClient.from_cache_or_refresh(
+    return TangleApiClient(
         base_url=base_url,
         token=token,
         auth_header=auth_header,
