@@ -1,0 +1,4 @@
+[submodule "third_party/tangle"]
+	path = third_party/tangle
+	url = https://github.com/TangleML/tangle
+	branch = master

@@ -458,17 +458,18 @@ def test_non_api_root_command_does_not_fetch_when_argument_value_is_api(
     assert not api_cli._argv_dispatches_dynamic_command(api_cli.sys.argv)
 
 
-def test_cache_miss_fetches_schema_before_dynamic_dispatch(monkeypatch, tmp_path):
+def test_cold_cache_static_command_dispatch_uses_bundled_schema(monkeypatch, tmp_path):
     gets = []
     requests = []
 
     def fake_get(url, **kwargs):
         gets.append({"method": "GET", "url": url, **kwargs})
-        return json_response("GET", url, SCHEMA)
+        request = httpx.Request("GET", url)
+        raise httpx.ConnectError("backend unavailable", request=request)
 
     def fake_request(method, url, **kwargs):
         requests.append({"method": method, "url": url, **kwargs})
-        return json_response(method, url, {"digest": "sha256:abc"})
+        return json_response(method, url, {"published_components": []})
 
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(api_cli.httpx, "get", fake_get)
@@ -479,86 +480,283 @@ def test_cache_miss_fetches_schema_before_dynamic_dispatch(monkeypatch, tmp_path
         [
             "tangle",
             "api",
-            "components",
-            "get",
-            "sha256:abc",
+            "published-components",
+            "list",
+            "--name-substring",
+            "scrape v2",
             "--base-url",
             "http://api.test",
-            "--auth-header",
-            "Basic cli-auth",
-            "-H",
-            "Cloud-Auth: cli-value",
         ],
     )
 
     app = api_cli.build_app()
-    schema_headers = lower_headers(gets[0]["headers"])
-    assert gets[0]["url"] == "http://api.test/openapi.json"
-    assert schema_headers["authorization"] == "Basic cli-auth"
-    assert schema_headers["cloud-auth"] == "cli-value"
-    assert gets[0]["timeout"] == api_cli.DEFAULT_TIMEOUT_SECONDS
+    assert gets == []
 
     run_app(
         app,
         [
-            "components",
-            "get",
-            "sha256:abc",
+            "published-components",
+            "list",
+            "--name-substring",
+            "scrape v2",
             "--base-url",
             "http://api.test",
-            "--auth-header",
-            "Basic cli-auth",
         ],
     )
-    assert requests[-1]["url"] == "http://api.test/api/components/sha256%3Aabc"
+    assert requests[-1]["method"] == "GET"
+    assert requests[-1]["url"] == "http://api.test/api/published_components/?name_substring=scrape+v2"
 
 
-def test_cold_cache_api_short_help_does_not_treat_help_as_dynamic_command(
+def test_cold_cache_api_help_shows_static_resource_groups_and_refresh(
     monkeypatch, tmp_path, capsys
 ):
+    gets = []
+
     def fake_get(url, **kwargs):
+        gets.append({"method": "GET", "url": url, **kwargs})
         request = httpx.Request("GET", url)
         raise httpx.ConnectError("backend unavailable", request=request)
 
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(api_cli.httpx, "get", fake_get)
-    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", "-h"])
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", "--help"])
 
     app = api_cli.build_app()
-    run_app(app, ["-h"])
+    run_app(app, ["--help"])
 
     output = capsys.readouterr().out
+    assert gets == []
+    assert "published-components" in output
+    assert "pipeline-runs" in output
     assert "refresh" in output
     assert "Unknown command" not in output
 
 
-def test_cache_miss_dynamic_fetch_failure_is_actionable(monkeypatch, tmp_path):
-    def fake_get(url, **kwargs):
-        request = httpx.Request("GET", url)
-        raise httpx.ConnectError("backend unavailable", request=request)
+def _oasis_like_schema_with_published_component_extensions() -> dict:
+    schema = json.loads(json.dumps(SCHEMA))
+    schema["paths"]["/api/published_components/"]["get"] = {
+        "tags": ["components"],
+        "summary": "Cached drifted list published components",
+        "parameters": [
+            {
+                "name": "cached_only",
+                "in": "query",
+                "schema": {"type": "string"},
+            }
+        ],
+    }
+    schema["paths"]["/api/published_components/experimental/search"] = {
+        "post": {"tags": ["components"], "summary": "Search Components"}
+    }
+    schema["paths"]["/api/published_components/experimental/search/schema"] = {
+        "get": {"tags": ["components"], "summary": "Get Component Search Schema"}
+    }
+    return schema
 
+
+def test_no_cache_default_schema_source_shows_official_static_only(
+    monkeypatch, tmp_path, capsys
+):
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(api_cli.httpx, "get", fake_get)
     monkeypatch.setattr(
         api_cli.sys,
         "argv",
-        [
-            "tangle",
-            "api",
-            "components",
-            "get",
-            "sha256:abc",
-            "--auth-header",
-            "Basic secret-value",
-        ],
+        ["tangle", "api", "published-components", "--help"],
+    )
+
+    app = api_cli.build_app()
+    run_app(app, ["published-components", "--help"])
+
+    output = capsys.readouterr().out
+    assert "list" in output
+    assert "experimental-search" not in output
+    assert "experimental-search-schema" not in output
+
+
+def test_default_schema_source_merges_cached_backend_extensions(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
+    api_cli.write_cached_schema(
+        _oasis_like_schema_with_published_component_extensions(),
+        "http://api.test",
+    )
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "published-components", "--help"],
+    )
+
+    app = api_cli.build_app()
+    run_app(app, ["published-components", "--help"])
+
+    output = capsys.readouterr().out
+    assert "list" in output
+    assert "experimental-search" in output
+    assert "experimental-search-schema" in output
+
+
+def test_default_schema_source_preserves_official_operation_on_cache_collision(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
+    api_cli.write_cached_schema(
+        _oasis_like_schema_with_published_component_extensions(),
+        "http://api.test",
+    )
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "published-components", "list", "--help"],
+    )
+
+    app = api_cli.build_app()
+    run_app(app, ["published-components", "list", "--help"])
+
+    output = capsys.readouterr().out
+    assert "--name-substring" in output
+    assert "--cached-only" not in output
+
+
+def test_official_schema_source_hides_cached_extensions(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
+    api_cli.write_cached_schema(
+        _oasis_like_schema_with_published_component_extensions(),
+        "http://api.test",
+    )
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "published-components", "--schema-source", "official", "--help"],
+    )
+
+    app = api_cli.build_app()
+    run_app(app, ["published-components", "--schema-source", "official", "--help"])
+
+    output = capsys.readouterr().out
+    assert "list" in output
+    assert "experimental-search" not in output
+    assert "experimental-search-schema" not in output
+
+
+def test_cache_schema_source_uses_raw_cached_schema(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
+    api_cli.write_cached_schema(
+        _oasis_like_schema_with_published_component_extensions(),
+        "http://api.test",
+    )
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "published-components", "list", "--schema-source", "cache", "--help"],
+    )
+
+    app = api_cli.build_app()
+    run_app(app, ["published-components", "list", "--schema-source", "cache", "--help"])
+
+    output = capsys.readouterr().out
+    assert "--cached-only" in output
+
+
+def test_explicit_cache_schema_source_requires_cached_schema(monkeypatch, tmp_path):
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "published-components", "--schema-source", "cache", "--help"],
     )
 
     with pytest.raises(SystemExit) as exc_info:
         api_cli.build_app()
 
-    message = str(exc_info.value)
-    assert "tangle api refresh" in message
-    assert "secret-value" not in message
+    assert "No cached OpenAPI schema for http://api.test" in str(exc_info.value)
+
+
+
+def test_reset_cache_deletes_existing_cached_schema(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    api_cli.write_cached_schema(SCHEMA, "http://api.test")
+    path = api_cli.cache_path("http://api.test")
+    assert path.exists()
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "reset-cache", "--base-url", "http://api.test"],
+    )
+
+    app = api_cli.build_app()
+    run_app(app, ["reset-cache", "--base-url", "http://api.test"])
+
+    output = capsys.readouterr().out
+    assert not path.exists()
+    assert "Deleted cached OpenAPI schema for http://api.test" in output
+    assert str(path) in output
+
+
+def test_reset_cache_reports_noop_when_cache_absent(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    path = api_cli.cache_path("http://api.test")
+    assert not path.exists()
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "reset-cache", "--base-url", "http://api.test"],
+    )
+
+    app = api_cli.build_app()
+    run_app(app, ["reset-cache", "--base-url", "http://api.test"])
+
+    output = capsys.readouterr().out
+    assert "No cached OpenAPI schema for http://api.test" in output
+    assert str(path) in output
+
+
+def test_reset_cache_returns_auto_mode_to_official_only(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
+    api_cli.write_cached_schema(
+        _oasis_like_schema_with_published_component_extensions(),
+        "http://api.test",
+    )
+
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", "reset-cache"])
+    reset_app = api_cli.build_app()
+    run_app(reset_app, ["reset-cache"])
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "published-components", "--help"],
+    )
+    help_app = api_cli.build_app()
+    run_app(help_app, ["published-components", "--help"])
+
+    output = capsys.readouterr().out
+    assert "list" in output
+    assert "experimental-search" not in output
+    assert "experimental-search-schema" not in output
+
+def test_refresh_remains_available_on_cold_cache(monkeypatch, tmp_path, capsys):
+    def fake_get(url, **kwargs):
+        request = httpx.Request("GET", url)
+        raise httpx.ConnectError("backend unavailable", request=request)
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(api_cli.httpx, "get", fake_get)
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", "refresh", "--help"])
+
+    app = api_cli.build_app()
+    run_app(app, ["refresh", "--help"])
+
+    output = capsys.readouterr().out
+    assert "Fetch /openapi.json" in output
+    assert "--base-url" in output
 
 
 def test_optional_query_params_parse_and_can_be_omitted(monkeypatch):

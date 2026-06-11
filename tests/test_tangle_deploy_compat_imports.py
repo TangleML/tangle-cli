@@ -5,10 +5,11 @@ from __future__ import annotations
 import importlib.util
 
 
-def test_tangle_deploy_required_import_surface_uses_openapi_client_only() -> None:
+def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     import tangle_cli
-    from tangle_cli import TangleOpenApiClient, utils as utils_module
+    from tangle_cli import TangleApiClient, TangleOpenApiClient, utils as utils_module
     from tangle_cli.api_client import TangleOpenApiClient as OpenApiClient
+    from tangle_cli.client import TangleApiClient as StaticClient
     from tangle_cli.component_inspector import (
         get_standard_library,
         inspect_by_digest,
@@ -87,10 +88,10 @@ def test_tangle_deploy_required_import_surface_uses_openapi_client_only() -> Non
     )
 
     assert TangleOpenApiClient.__name__ == OpenApiClient.__name__ == "TangleOpenApiClient"
-    old_client_name = "Tangle" + "ApiClient"
-    old_client_module = "tangle_cli." + "client"
-    assert not hasattr(tangle_cli, old_client_name)
-    assert importlib.util.find_spec(old_client_module) is None
+    assert TangleApiClient.__name__ == StaticClient.__name__ == "TangleApiClient"
+    assert hasattr(tangle_cli, "TangleApiClient")
+    assert importlib.util.find_spec("tangle_cli.client") is not None
+    assert callable(TangleApiClient("https://api.test").set_verbose)
     assert ComponentSpec.__name__ == "ComponentSpec"
     assert PipelineRun.__name__ == "PipelineRun"
     assert callable(get_standard_library)
