@@ -8,7 +8,7 @@ higher-level compatibility helpers that downstream callers use.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, is_dataclass
 from typing import Any
 from urllib.parse import quote, urljoin
@@ -39,11 +39,21 @@ from .models import (
 )
 
 
+def migrate_to(native_method: str) -> Callable[[Any], Any]:
+    """Attach a machine-readable hint for compatibility wrapper migrations."""
+
+    def decorator(method: Any) -> Any:
+        method.__tangle_migrate_to__ = native_method
+        return method
+
+    return decorator
+
+
 class TangleApiClient(GeneratedOperationsMixin):
     """Single public API wrapper for Tangle backends.
 
     The constructor keeps the historical ``tangle-deploy`` shape while also
-    accepting the auth/header knobs used by the dynamic OpenAPI client. No
+    accepting the auth/header knobs used by the dynamic-discovery client. No
     OpenAPI schema is loaded at runtime; all endpoint wrappers are checked in.
     """
 
@@ -150,6 +160,11 @@ class TangleApiClient(GeneratedOperationsMixin):
         data = self._decode_response(response)
         if response_model is not None and isinstance(data, dict):
             return response_model.from_dict(data)
+        if response_model is not None and isinstance(data, list):
+            return [
+                response_model.from_dict(item) if isinstance(item, dict) else item
+                for item in data
+            ]
         return data
 
     def _headers(self, extra_headers: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -197,9 +212,11 @@ class TangleApiClient(GeneratedOperationsMixin):
 
     # ---- Compatibility helpers consumed by tangle-deploy -----------------
 
+    @migrate_to("artifacts_get")
     def get_artifact(self, artifact_id: str) -> ArtifactInfo:
         return ArtifactInfo.from_dict(_to_plain(self.artifacts_get(artifact_id)))
 
+    @migrate_to("artifacts_signed_artifact_url")
     def get_artifact_signed_url(self, artifact_id: str) -> str | dict[str, Any] | None:
         data = _to_plain(self.artifacts_signed_artifact_url(artifact_id))
         return data.get("signed_url") if isinstance(data, dict) else data
@@ -209,18 +226,23 @@ class TangleApiClient(GeneratedOperationsMixin):
         self._enrich_execution_tree(details)
         return details
 
+    @migrate_to("executions_graph_execution_state")
     def get_execution_graph_state(self, execution_id: str) -> GraphExecutionState:
         return GraphExecutionState.from_dict(_to_plain(self.executions_graph_execution_state(execution_id)))
 
+    @migrate_to("executions_state")
     def get_execution_graph_state_alt(self, execution_id: str) -> GraphExecutionState:
         return GraphExecutionState.from_dict(_to_plain(self.executions_state(execution_id)))
 
+    @migrate_to("executions_container_state")
     def get_execution_container_state(self, execution_id: str) -> ContainerState:
         return ContainerState.from_dict(_to_plain(self.executions_container_state(execution_id)))
 
+    @migrate_to("executions_artifacts")
     def get_execution_artifacts(self, execution_id: str) -> dict[str, Any]:
         return _to_plain(self.executions_artifacts(execution_id))
 
+    @migrate_to("executions_container_log")
     def get_execution_container_log(self, execution_id: str) -> str | dict[str, Any] | None:
         data = _to_plain(self.executions_container_log(execution_id))
         if isinstance(data, dict) and "log_text" in data:
@@ -239,6 +261,7 @@ class TangleApiClient(GeneratedOperationsMixin):
         response.raise_for_status()
         return response
 
+    @migrate_to("pipeline_runs_list")
     def list_pipeline_runs(
         self,
         page_token: str | None = None,
@@ -257,6 +280,7 @@ class TangleApiClient(GeneratedOperationsMixin):
             )
         )
 
+    @migrate_to("pipeline_runs_create")
     def create_pipeline_run(
         self,
         root_task: Any,
@@ -272,17 +296,21 @@ class TangleApiClient(GeneratedOperationsMixin):
             self._request_json("POST", "/api/pipeline_runs/", json_data=self._clean_mapping(body))
         )
 
+    @migrate_to("pipeline_runs_get")
     def get_pipeline_run(self, run_id: str) -> PipelineRun:
         return PipelineRun.from_dict(_to_plain(self.pipeline_runs_get(run_id)))
 
+    @migrate_to("pipeline_runs_cancel")
     def cancel_pipeline_run(self, run_id: str) -> None:
         self.pipeline_runs_cancel(run_id)
         return None
 
+    @migrate_to("pipeline_runs_annotations")
     def list_pipeline_run_annotations(self, run_id: str) -> dict[str, str | None]:
         data = self.pipeline_runs_annotations(run_id)
         return data if isinstance(data, dict) else {}
 
+    @migrate_to("pipeline_runs_put_annotations")
     def set_pipeline_run_annotation(
         self,
         run_id: str,
@@ -292,19 +320,23 @@ class TangleApiClient(GeneratedOperationsMixin):
         self.pipeline_runs_put_annotations(run_id, key, value=value)
         return None
 
+    @migrate_to("pipeline_runs_delete_annotations")
     def delete_pipeline_run_annotation(self, run_id: str, key: str) -> None:
         self.pipeline_runs_delete_annotations(run_id, key)
         return None
 
+    @migrate_to("users_me")
     def get_current_user(self) -> UserInfo | None:
         data = _to_plain(self.users_me())
         if data is None:
             return None
         return UserInfo(id=data.get("id"), permissions=data.get("permissions", []))
 
+    @migrate_to("components_get")
     def get_component(self, digest: str) -> ComponentSpec:
         return ComponentSpec.from_dict(_to_plain(self.components_get(digest)))
 
+    @migrate_to("components_get")
     def get_component_spec(self, digest: str) -> ComponentSpec:
         return self.get_component(digest)
 
@@ -335,6 +367,7 @@ class TangleApiClient(GeneratedOperationsMixin):
 
         return current
 
+    @migrate_to("published_components_list")
     def list_published_components(
         self,
         include_deprecated: bool = False,
@@ -426,6 +459,7 @@ class TangleApiClient(GeneratedOperationsMixin):
                     _index_component_info(found, info)
         return found
 
+    @migrate_to("published_components_create")
     def publish_component(self, component_reference: dict[str, Any]) -> dict[str, Any]:
         return _to_plain(
             self._request_json(
@@ -435,6 +469,7 @@ class TangleApiClient(GeneratedOperationsMixin):
             )
         )
 
+    @migrate_to("published_components_update")
     def update_published_component(
         self,
         digest: str,
@@ -496,11 +531,13 @@ class TangleApiClient(GeneratedOperationsMixin):
         details = self.get_run_details(run_id, include_implementations=True)
         return details.execution.task_spec if details.execution else None
 
+    @migrate_to("secrets_list")
     def list_secrets(self) -> list[SecretInfo]:
         data = _to_plain(self.secrets_list())
         rows = data.get("secrets", []) if isinstance(data, dict) else data or []
         return [SecretInfo.from_dict(row) for row in rows]
 
+    @migrate_to("secrets_create")
     def create_secret(
         self,
         secret_name: str,
@@ -519,6 +556,7 @@ class TangleApiClient(GeneratedOperationsMixin):
             )
         )
 
+    @migrate_to("secrets_update")
     def update_secret(
         self,
         secret_name: str,
@@ -537,6 +575,7 @@ class TangleApiClient(GeneratedOperationsMixin):
             )
         )
 
+    @migrate_to("secrets_delete")
     def delete_secret(self, secret_name: str) -> None:
         self.secrets_delete(secret_name)
         return None

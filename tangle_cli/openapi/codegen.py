@@ -64,7 +64,7 @@ def _schema_ref_name(schema: dict[str, Any] | None) -> str | None:
     return None
 
 
-def _success_schema(operation: dict[str, Any]) -> dict[str, Any] | None:
+def _success_response(operation: dict[str, Any]) -> dict[str, Any] | None:
     responses = operation.get("responses", {}) or {}
     for status in ("200", "201", "202", "204", "default"):
         response = responses.get(status)
@@ -72,7 +72,12 @@ def _success_schema(operation: dict[str, Any]) -> dict[str, Any] | None:
             break
     else:
         response = next(iter(responses.values()), None)
-    if not isinstance(response, dict):
+    return response if isinstance(response, dict) else None
+
+
+def _success_schema(operation: dict[str, Any]) -> dict[str, Any] | None:
+    response = _success_response(operation)
+    if response is None:
         return None
     content = response.get("content", {}) or {}
     json_content = content.get("application/json") or next(iter(content.values()), {})
@@ -80,8 +85,78 @@ def _success_schema(operation: dict[str, Any]) -> dict[str, Any] | None:
     return schema if isinstance(schema, dict) else None
 
 
+def _schema_type(schema: dict[str, Any]) -> str | None:
+    schema_type = schema.get("type")
+    if isinstance(schema_type, str):
+        return schema_type
+    if isinstance(schema_type, list):
+        for item in schema_type:
+            if item != "null":
+                return str(item)
+    return None
+
+
+def _schema_allows_null(schema: dict[str, Any] | None) -> bool:
+    if not schema:
+        return False
+    if schema.get("nullable") is True or schema.get("type") == "null":
+        return True
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list) and "null" in schema_type:
+        return True
+    for key in ("anyOf", "oneOf"):
+        for child in schema.get(key, []) or []:
+            if isinstance(child, dict) and _schema_allows_null(child):
+                return True
+    return False
+
+
 def _response_model_name(operation: dict[str, Any]) -> str | None:
-    return _schema_ref_name(_success_schema(operation))
+    schema = _success_schema(operation)
+    if not schema:
+        return None
+    if _schema_type(schema) == "array":
+        items = schema.get("items")
+        return _schema_ref_name(items if isinstance(items, dict) else None)
+    return _schema_ref_name(schema)
+
+
+def _response_return_annotation(operation: dict[str, Any]) -> str:
+    response = _success_response(operation)
+    if response is None:
+        return "Any"
+    schema = _success_schema(operation)
+    if schema is None or not schema:
+        return "None"
+    return _schema_return_annotation(schema)
+
+
+def _schema_return_annotation(schema: dict[str, Any]) -> str:
+    ref_name = _schema_ref_name(schema)
+    if ref_name:
+        return f"{ref_name} | None" if _schema_allows_null(schema) else ref_name
+
+    schema_type = _schema_type(schema)
+    if schema_type == "array":
+        items = schema.get("items")
+        item_ref = _schema_ref_name(items if isinstance(items, dict) else None)
+        annotation = f"list[{item_ref}]" if item_ref else "list[Any]"
+        return f"{annotation} | None" if _schema_allows_null(schema) else annotation
+
+    primitives = {
+        "string": "str",
+        "integer": "int",
+        "number": "float",
+        "boolean": "bool",
+    }
+    if schema_type in primitives:
+        annotation = primitives[schema_type]
+        return f"{annotation} | None" if _schema_allows_null(schema) else annotation
+
+    if schema_type == "object" or "properties" in schema or "additionalProperties" in schema:
+        return "dict[str, Any]"
+
+    return "Any"
 
 
 def generate_models(schema: dict[str, Any]) -> str:
@@ -230,10 +305,11 @@ def generate_operations(schema: dict[str, Any]) -> str:
         )
         response_model = _response_model_name(operation.operation)
         response_arg = response_model if response_model else "None"
+        response_annotation = _response_return_annotation(operation.operation)
         if signature:
-            def_line = f"    def {method_name}(self, {signature}) -> Any:"
+            def_line = f"    def {method_name}(self, {signature}) -> {response_annotation}:"
         else:
-            def_line = f"    def {method_name}(self) -> Any:"
+            def_line = f"    def {method_name}(self) -> {response_annotation}:"
         lines.extend([
             def_line,
             f"        return self._request_json(",

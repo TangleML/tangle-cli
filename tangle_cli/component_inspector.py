@@ -19,7 +19,7 @@ from tangle_cli.models import ComponentInfo, ComponentSpec
 
 
 class ComponentApiClient(Protocol):
-    """Small subset of :class:`tangle_cli.api_client.TangleOpenApiClient` used here."""
+    """Small subset of :class:`tangle_cli.dynamic_discovery_client.TangleDynamicDiscoveryClient` used here."""
 
     base_url: str
 
@@ -27,7 +27,7 @@ class ComponentApiClient(Protocol):
 
 
 def _request_path(client: ComponentApiClient, path: str) -> httpx.Response:
-    """Fetch an API-origin path using a dynamic OpenAPI client's auth settings.
+    """Fetch an API-origin path using a dynamic-discovery client's auth settings.
 
     ``component_library.yaml`` is not guaranteed to be represented as an
     OpenAPI operation, but it is served from the same origin as the API. This

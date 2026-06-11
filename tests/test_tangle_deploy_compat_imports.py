@@ -7,8 +7,8 @@ import importlib.util
 
 def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     import tangle_cli
-    from tangle_cli import TangleApiClient, TangleOpenApiClient, utils as utils_module
-    from tangle_cli.api_client import TangleOpenApiClient as OpenApiClient
+    from tangle_cli import TangleApiClient, TangleDynamicDiscoveryClient, utils as utils_module
+    from tangle_cli.dynamic_discovery_client import TangleDynamicDiscoveryClient as DynamicDiscoveryClient
     from tangle_cli.client import TangleApiClient as StaticClient
     from tangle_cli.component_inspector import (
         get_standard_library,
@@ -87,7 +87,7 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
         traverse_pipeline_tasks,
     )
 
-    assert TangleOpenApiClient.__name__ == OpenApiClient.__name__ == "TangleOpenApiClient"
+    assert TangleDynamicDiscoveryClient.__name__ == DynamicDiscoveryClient.__name__ == "TangleDynamicDiscoveryClient"
     assert TangleApiClient.__name__ == StaticClient.__name__ == "TangleApiClient"
     assert hasattr(tangle_cli, "TangleApiClient")
     assert importlib.util.find_spec("tangle_cli.client") is not None
