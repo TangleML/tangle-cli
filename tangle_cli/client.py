@@ -338,22 +338,6 @@ class TangleApiClient(GeneratedOperationsMixin):
                     _index_component_info(found, info)
         return found
 
-    def get_component_search_schema(self) -> dict[str, Any]:
-        return _to_plain(
-            self._request_json(
-                "GET",
-                "/api/published_components/experimental/search/schema",
-            )
-        )
-
-    def search_components_v2(self, *, body: dict[str, Any]) -> dict[str, Any]:
-        return _to_plain(
-            self._request_json(
-                "POST",
-                "/api/published_components/experimental/search",
-                json_data=body,
-            )
-        )
 
     def get_run_details(
         self,
