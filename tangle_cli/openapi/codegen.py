@@ -28,6 +28,7 @@ from .parser import DEFAULT_OPENAPI_PATH, load_openapi_schema, parsed_operations
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GENERATED_DIR = _REPO_ROOT / "tangle_cli" / "generated"
 DEFAULT_BACKEND_PATH = _REPO_ROOT / "third_party" / "tangle"
+DEFAULT_OPERATIONS_CLASS_NAME = "GeneratedTangleApiOperations"
 
 
 def _safe_identifier(name: str) -> str:
@@ -234,6 +235,12 @@ def _method_name(group_name: str, command_name: str) -> str:
     return f"{_safe_identifier(group_name)}_{_safe_identifier(command_name)}"
 
 
+def _validate_class_name(name: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_]\w*", name) or keyword.iskeyword(name):
+        raise ValueError(f"Invalid generated operations class name: {name!r}")
+    return name
+
+
 def _param_signature(parameters: list[Any], has_request_body: bool) -> tuple[str, list[str], list[str], list[str], bool]:
     required: list[Any] = []
     optional: list[Any] = []
@@ -272,7 +279,11 @@ def _dict_literal(names: list[str]) -> str:
     return "{" + ", ".join(f"{name!r}: {name}" for name in names) + "}"
 
 
-def generate_operations(schema: dict[str, Any]) -> str:
+def generate_operations(
+    schema: dict[str, Any],
+    operations_class_name: str = DEFAULT_OPERATIONS_CLASS_NAME,
+) -> str:
+    operations_class_name = _validate_class_name(operations_class_name)
     operations = parsed_operations(schema)
     response_models = sorted({name for op in operations if (name := _response_model_name(op.operation))})
     imports = ", ".join(response_models)
@@ -289,8 +300,8 @@ def generate_operations(schema: dict[str, Any]) -> str:
 
     lines.extend([
         "",
-        "class GeneratedOperationsMixin:",
-        "    \"\"\"Mixin containing one checked-in method per OpenAPI operation.\"\"\"",
+        f"class {operations_class_name}:",
+        "    \"\"\"Generated checked-in methods for Tangle API operations.\"\"\"",
         "",
     ])
 
@@ -330,7 +341,7 @@ def generate_operations(schema: dict[str, Any]) -> str:
             "",
         ])
 
-    lines.append(f"__all__ = {[ 'GeneratedOperationsMixin' ]!r}")
+    lines.append(f"__all__ = {[operations_class_name]!r}")
     lines.append("")
     return "\n".join(lines)
 
@@ -431,6 +442,8 @@ def write_openapi_schema(schema: dict[str, Any], destination: str | Path = DEFAU
 def generate(
     openapi_path: str | Path = DEFAULT_OPENAPI_PATH,
     generated_dir: str | Path = _GENERATED_DIR,
+    *,
+    operations_class_name: str = DEFAULT_OPERATIONS_CLASS_NAME,
 ) -> tuple[dict[str, Any], list[Path]]:
     schema = load_openapi_schema(openapi_path)
     output_dir = Path(generated_dir)
@@ -445,7 +458,10 @@ def generate(
         encoding="utf-8",
     )
     generated_files[1].write_text(generate_models(schema), encoding="utf-8")
-    generated_files[2].write_text(generate_operations(schema), encoding="utf-8")
+    generated_files[2].write_text(
+        generate_operations(schema, operations_class_name=operations_class_name),
+        encoding="utf-8",
+    )
     return schema, generated_files
 
 
@@ -482,6 +498,14 @@ def main(argv: list[str] | None = None) -> None:
         help="Generated support module directory (default: tangle_cli/generated).",
     )
     parser.add_argument(
+        "--operations-class-name",
+        default=DEFAULT_OPERATIONS_CLASS_NAME,
+        help=(
+            "Class name to generate in operations.py "
+            f"(default: {DEFAULT_OPERATIONS_CLASS_NAME})."
+        ),
+    )
+    parser.add_argument(
         "--openapi-url",
         default=None,
         help="Remote OpenAPI JSON URL to fetch before regenerating.",
@@ -505,6 +529,10 @@ def main(argv: list[str] | None = None) -> None:
         help="Regenerate support modules from the existing local openapi.json snapshot.",
     )
     args = parser.parse_args(argv)
+    try:
+        _validate_class_name(args.operations_class_name)
+    except ValueError as exc:
+        parser.error(str(exc))
     source_count = sum(bool(value) for value in (args.openapi_url, args.backend_path, args.from_snapshot))
     if source_count > 1:
         parser.error("choose only one OpenAPI source: --openapi-url, --backend-path, or --from-snapshot")
@@ -533,7 +561,11 @@ def main(argv: list[str] | None = None) -> None:
         source = f"backend: {_display_path(backend_path)}"
         wrote_openapi = True
 
-    schema, generated_files = generate(args.openapi, args.out)
+    schema, generated_files = generate(
+        args.openapi,
+        args.out,
+        operations_class_name=args.operations_class_name,
+    )
     _print_summary(
         source=source,
         openapi_path=args.openapi,

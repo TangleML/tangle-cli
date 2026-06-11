@@ -22,7 +22,7 @@ from .api_transport import (
     default_base_url,
     default_token,
 )
-from .generated.operations import GeneratedOperationsMixin
+from .generated.operations import GeneratedTangleApiOperations
 from .logger import Logger, _null_logger
 from .models import (
     ComponentInfo,
@@ -35,7 +35,7 @@ from .models import (
 )
 
 
-class TangleApiClient(GeneratedOperationsMixin):
+class TangleApiClient(GeneratedTangleApiOperations):
     """Single public API wrapper for Tangle backends.
 
     The constructor keeps the historical ``tangle-deploy`` shape while also

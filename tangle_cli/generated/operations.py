@@ -10,8 +10,8 @@ from typing import Any
 from .models import ComponentLibraryResponse, ComponentResponse, GetArtifactInfoResponse, GetArtifactSignedUrlResponse, GetContainerExecutionLogResponse, GetContainerExecutionStateResponse, GetExecutionArtifactsResponse, GetExecutionInfoResponse, GetGraphExecutionStateResponse, GetUserResponse, ListComponentLibrariesResponse, ListPipelineJobsResponse, ListPublishedComponentsResponse, ListSecretsResponse, PipelineRunResponse, PublishedComponentResponse, SecretInfoResponse, UserComponentLibraryPinsResponse, UserSettingsResponse
 
 
-class GeneratedOperationsMixin:
-    """Mixin containing one checked-in method per OpenAPI operation."""
+class GeneratedTangleApiOperations:
+    """Generated checked-in methods for Tangle API operations."""
 
     def admin_execution_node_status(self, id: Any, status: Any) -> None:
         return self._request_json(
@@ -373,4 +373,4 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-__all__ = ['GeneratedOperationsMixin']
+__all__ = ['GeneratedTangleApiOperations']
