@@ -176,12 +176,19 @@ The stable public wrapper for downstream Python tools is:
 from tangle_cli.client import TangleApiClient
 
 client = TangleApiClient("http://localhost:8000")
-run = client.get_pipeline_run("run-id")
+run = client.pipeline_runs_get("run-id")
+existing = client.find_existing_components(
+    ["component-name"],
+    published_by_substring="alice@example.com",
+)
 ```
 
 `TangleApiClient` uses checked-in endpoint methods generated offline from
 `tangle_cli/openapi/openapi.json`, so normal imports do not fetch or parse the
-OpenAPI schema.
+OpenAPI schema. Handwritten semantic helpers such as
+`find_existing_components(...)` return domain models; that helper accepts
+component specs, mapping references, or plain names plus optional names/digests
+and publisher filters, and returns a de-duplicated `list[ComponentInfo]`.
 
 To refresh the checked-in generated methods/models from the official Tangle
 backend submodule, run:

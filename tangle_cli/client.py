@@ -296,48 +296,65 @@ class TangleApiClient(GeneratedTangleApiOperations):
 
     def find_existing_components(
         self,
-        components: Iterable[ComponentSpec | Mapping[str, Any]] | None = None,
+        components: Iterable[ComponentSpec | Mapping[str, Any] | str] | None = None,
         *,
         names: Iterable[str] | None = None,
         digests: Iterable[str] | None = None,
         include_deprecated: bool = False,
-    ) -> dict[str, ComponentInfo]:
-        """Find published components matching provided component specs/names/digests.
+        published_by: str | None = None,
+        published_by_substring: str | None = None,
+        verbose: bool = False,
+    ) -> list[ComponentInfo]:
+        """Find published components matching component specs, names, or digests.
 
-        The result is keyed by every useful identifier we can infer (digest and
-        name), which keeps the helper compatible with callers that check either.
+        ``components`` may contain domain component specs, mapping-like component
+        references, or plain component names. Results are de-duplicated by digest
+        when available, falling back to name.
         """
 
         search_names = set(names or [])
         search_digests = set(digests or [])
         for component in components or []:
             data = _to_plain(component)
-            if isinstance(component, ComponentSpec):
+            if isinstance(component, str):
+                search_names.add(component)
+            elif isinstance(component, ComponentSpec):
                 search_names.update(name for name in component.search_names if name)
                 if component.digest:
                     search_digests.add(component.digest)
-            elif isinstance(data, dict):
+            elif isinstance(data, Mapping):
                 if data.get("name"):
                     search_names.add(str(data["name"]))
                 if data.get("digest"):
                     search_digests.add(str(data["digest"]))
 
+        publisher_filter = published_by_substring or published_by
         found: dict[str, ComponentInfo] = {}
+
+        def add(info: ComponentInfo) -> None:
+            key = info.digest or info.name
+            if not key:
+                return
+            found[key] = info
+            if verbose:
+                self.logger.info(f"   Found existing component: {info.name} ({key[:16]}...)")
+
         for digest in search_digests:
             for info in self.list_published_component_infos(
                 include_deprecated=include_deprecated,
+                published_by_substring=publisher_filter,
                 digest=digest,
             ):
-                _index_component_info(found, info)
+                add(info)
         for name in search_names:
             for info in self.list_published_component_infos(
                 include_deprecated=include_deprecated,
+                published_by_substring=publisher_filter,
                 name_substring=name,
             ):
                 if info.name == name:
-                    _index_component_info(found, info)
-        return found
-
+                    add(info)
+        return list(found.values())
 
     def get_run_details(
         self,
@@ -405,13 +422,6 @@ def _to_plain(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _to_plain(item) for key, item in value.items()}
     return value
-
-
-def _index_component_info(index: dict[str, ComponentInfo], info: ComponentInfo) -> None:
-    if info.digest:
-        index[info.digest] = info
-    if info.name:
-        index[info.name] = info
 
 
 __all__ = ["TangleApiClient"]
