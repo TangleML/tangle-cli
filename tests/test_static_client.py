@@ -6,8 +6,12 @@ from typing import Any
 import requests
 
 from tangle_cli import TangleApiClient
-from tangle_cli.generated.models import PipelineRunResponse, PublishedComponentResponse
-from tangle_cli.models import PipelineRun, SecretInfo
+from tangle_cli.generated.models import (
+    ListPublishedComponentsResponse,
+    PipelineRunResponse,
+    PublishedComponentResponse,
+    SecretInfoResponse,
+)
 
 
 def response(payload: Any = None, status_code: int = 200) -> requests.Response:
@@ -61,37 +65,88 @@ def test_request_json_instantiates_list_response_models() -> None:
     assert runs[0].id == "run-1"
 
 
-def test_compat_get_pipeline_run_returns_dataclass_with_dict_helpers() -> None:
+def test_dumb_compat_wrappers_are_removed_but_semantic_helpers_remain() -> None:
+    removed = [
+        "get_artifact",
+        "get_artifact_signed_url",
+        "get_execution_graph_state",
+        "get_execution_graph_state_alt",
+        "get_execution_container_state",
+        "get_execution_artifacts",
+        "get_execution_container_log",
+        "list_pipeline_runs",
+        "create_pipeline_run",
+        "get_pipeline_run",
+        "cancel_pipeline_run",
+        "list_pipeline_run_annotations",
+        "set_pipeline_run_annotation",
+        "delete_pipeline_run_annotation",
+        "get_current_user",
+        "get_component",
+        "list_published_components",
+        "publish_component",
+        "update_published_component",
+        "list_secrets",
+        "create_secret",
+        "update_secret",
+        "delete_secret",
+    ]
+    for name in removed:
+        assert not hasattr(TangleApiClient, name)
+
+    retained = [
+        "resolve_digest",
+        "get_run_details",
+        "get_run_pipeline_spec",
+        "get_execution_details",
+        "_enrich_execution_tree",
+        "find_existing_components",
+        "list_published_component_infos",
+        "get_component_spec",
+        "stream_execution_container_log",
+        "get_component_search_schema",
+        "search_components_v2",
+    ]
+    for name in retained:
+        assert hasattr(TangleApiClient, name)
+
+
+def test_get_run_details_uses_native_operations_for_retained_semantic_helper() -> None:
     session = FakeSession([
-        response({"id": "run-1", "root_execution_id": "exec-1", "created_by": "alice"})
+        response({"id": "run-1", "root_execution_id": "exec-1", "created_by": "alice"}),
+        response({
+            "id": "exec-1",
+            "pipeline_run_id": "run-1",
+            "task_spec": {},
+            "input_artifacts": {},
+            "output_artifacts": {},
+        }),
+        response({"owner": "alice"}),
+        response({"child_execution_status_stats": {"exec-1": {"SUCCEEDED": 1}}}),
     ])
     client = TangleApiClient("https://api.test", session=session)
 
-    run = client.get_pipeline_run("run-1")
-
-    assert isinstance(run, PipelineRun)
-    assert run.id == "run-1"
-    assert run.get("created_by") == "alice"
-    assert run["root_execution_id"] == "exec-1"
-
-
-def test_compat_wrapper_migration_hints_are_machine_readable() -> None:
-    assert TangleApiClient.get_execution_container_state.__tangle_migrate_to__ == (
-        "executions_container_state"
+    details = client.get_run_details(
+        "run-1",
+        include_annotations=True,
+        include_execution_state=True,
     )
-    assert TangleApiClient.get_pipeline_run.__tangle_migrate_to__ == "pipeline_runs_get"
-    assert TangleApiClient.list_published_components.__tangle_migrate_to__ == (
-        "published_components_list"
-    )
-    assert TangleApiClient.create_secret.__tangle_migrate_to__ == "secrets_create"
 
-    assert not hasattr(TangleApiClient.resolve_digest, "__tangle_migrate_to__")
-    assert not hasattr(TangleApiClient.get_run_details, "__tangle_migrate_to__")
-    assert not hasattr(TangleApiClient.find_existing_components, "__tangle_migrate_to__")
-    assert not hasattr(TangleApiClient._enrich_execution_tree, "__tangle_migrate_to__")
+    assert details.run.id == "run-1"
+    assert details.execution is not None
+    assert details.execution.id == "exec-1"
+    assert details.annotations == {"owner": "alice"}
+    assert details.execution_state is not None
+    assert details.execution_state.status_totals == {"SUCCEEDED": 1}
+    assert [call["url"] for call in session.calls] == [
+        "https://api.test/api/pipeline_runs/run-1",
+        "https://api.test/api/executions/exec-1/details",
+        "https://api.test/api/pipeline_runs/run-1/annotations/",
+        "https://api.test/api/executions/exec-1/graph_execution_state",
+    ]
 
 
-def test_secret_helpers_use_static_generated_endpoint_shapes() -> None:
+def test_secret_native_operation_uses_static_generated_endpoint_shape() -> None:
     session = FakeSession([
         response({
             "secret_name": "demo",
@@ -102,9 +157,9 @@ def test_secret_helpers_use_static_generated_endpoint_shapes() -> None:
     ])
     client = TangleApiClient("https://api.test", session=session)
 
-    secret = client.create_secret("demo", "value", description="d")
+    secret = client.secrets_create("demo", "value", description="d")
 
-    assert isinstance(secret, SecretInfo)
+    assert isinstance(secret, SecretInfoResponse)
     assert secret.secret_name == "demo"
     assert session.calls[0]["method"] == "POST"
     assert session.calls[0]["url"] == "https://api.test/api/secrets/"
@@ -123,13 +178,13 @@ class ResolveDigestClient(TangleApiClient):
         self.by_name = by_name or {}
         self.lookups: list[dict[str, Any]] = []
 
-    def list_published_components(
+    def published_components_list(
         self,
         include_deprecated: bool = False,
         name_substring: str | None = None,
         published_by_substring: str | None = None,
         digest: str | None = None,
-    ) -> list[Any]:
+    ) -> ListPublishedComponentsResponse:
         self.lookups.append({
             "include_deprecated": include_deprecated,
             "name_substring": name_substring,
@@ -137,10 +192,12 @@ class ResolveDigestClient(TangleApiClient):
             "digest": digest,
         })
         if digest is not None:
-            return self.by_digest.get(digest, [])
-        if name_substring is not None:
-            return self.by_name.get(name_substring, [])
-        return []
+            rows = self.by_digest.get(digest, [])
+        elif name_substring is not None:
+            rows = self.by_name.get(name_substring, [])
+        else:
+            rows = []
+        return ListPublishedComponentsResponse.from_dict({"published_components": rows})
 
 
 def test_resolve_digest_returns_non_deprecated_digest() -> None:
