@@ -90,6 +90,8 @@ def test_dumb_compat_wrappers_are_removed_but_semantic_helpers_remain() -> None:
         "create_secret",
         "update_secret",
         "delete_secret",
+        "get_component_search_schema",
+        "search_components_v2",
     ]
     for name in removed:
         assert not hasattr(TangleApiClient, name)
@@ -104,8 +106,6 @@ def test_dumb_compat_wrappers_are_removed_but_semantic_helpers_remain() -> None:
         "list_published_component_infos",
         "get_component_spec",
         "stream_execution_container_log",
-        "get_component_search_schema",
-        "search_components_v2",
     ]
     for name in retained:
         assert hasattr(TangleApiClient, name)
