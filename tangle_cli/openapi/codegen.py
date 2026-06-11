@@ -160,8 +160,49 @@ def _schema_return_annotation(schema: dict[str, Any]) -> str:
     return "Any"
 
 
-def generate_models(schema: dict[str, Any]) -> str:
+
+def _validate_module_name(module_name: str) -> str:
+    parts = module_name.split(".")
+    if not parts or any(not re.fullmatch(r"[A-Za-z_]\w*", part) or keyword.iskeyword(part) for part in parts):
+        raise ValueError(f"Invalid model extension module name: {module_name!r}")
+    return module_name
+
+
+def _model_extension_mapping(module_name: str | None) -> dict[str, str]:
+    if not module_name:
+        return {}
+    module_name = _validate_module_name(module_name)
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:  # pragma: no cover - importlib preserves details
+        raise ValueError(f"Could not import model extension module {module_name!r}: {exc}") from exc
+
+    mapping = getattr(module, "MODEL_EXTENSIONS", None)
+    if not isinstance(mapping, dict):
+        raise ValueError(
+            f"Model extension module {module_name!r} must define a MODEL_EXTENSIONS dict"
+        )
+
+    extensions: dict[str, str] = {}
+    for model_name, extension_name in mapping.items():
+        if not isinstance(model_name, str) or not isinstance(extension_name, str):
+            raise ValueError("MODEL_EXTENSIONS keys and values must be strings")
+        _validate_class_name(model_name)
+        _validate_class_name(extension_name)
+        if not hasattr(module, extension_name):
+            raise ValueError(
+                f"Model extension module {module_name!r} does not define {extension_name!r}"
+            )
+        extensions[model_name] = extension_name
+    return extensions
+
+
+def generate_models(
+    schema: dict[str, Any],
+    model_extension_module: str | None = None,
+) -> str:
     schemas = schema.get("components", {}).get("schemas", {}) or {}
+    extension_mapping = _model_extension_mapping(model_extension_module)
     lines: list[str] = [
         '"""Generated Pydantic models for the checked-in Tangle OpenAPI schema.\n\nDo not edit by hand; run ``uv run python -m tangle_cli.openapi.codegen``.\n"""',
         "",
@@ -176,6 +217,24 @@ def generate_models(schema: dict[str, Any]) -> str:
         "except ImportError:  # pragma: no cover - pydantic v1 fallback",
         "    ConfigDict = None  # type: ignore[assignment]",
         "",
+    ]
+
+    generated_class_names = {
+        _class_name(schema_name)
+        for schema_name, schema_def in schemas.items()
+        if isinstance(schema_def, dict)
+        and (schema_def.get("type") in {"object", None} or "properties" in schema_def)
+    }
+    used_extensions = {
+        class_name: extension_mapping[class_name]
+        for class_name in sorted(generated_class_names)
+        if class_name in extension_mapping
+    }
+    if model_extension_module and used_extensions:
+        imports = ", ".join(sorted(set(used_extensions.values())))
+        lines.extend([f"from {model_extension_module} import {imports}", ""])
+
+    lines.extend([
         "",
         "class TangleGeneratedModel(BaseModel):",
         "    \"\"\"Base for generated response models with dict-like conveniences.\"\"\"",
@@ -204,7 +263,7 @@ def generate_models(schema: dict[str, Any]) -> str:
         "            return cls.model_validate(data)",
         "        return cls.parse_obj(data)",
         "",
-    ]
+    ])
 
     exports = ["TangleGeneratedModel"]
     for schema_name, schema_def in sorted(schemas.items(), key=lambda item: _class_name(item[0])):
@@ -214,7 +273,9 @@ def generate_models(schema: dict[str, Any]) -> str:
             lines.extend([f"{class_name} = Any", ""])
             continue
         properties = schema_def.get("properties") or {}
-        lines.extend([f"class {class_name}(TangleGeneratedModel):"])
+        bases = [used_extensions[class_name]] if class_name in used_extensions else []
+        bases.append("TangleGeneratedModel")
+        lines.extend([f"class {class_name}({', '.join(bases)}):"])
         if not properties:
             lines.append("    pass")
         else:
@@ -457,6 +518,7 @@ def generate(
     generated_dir: str | Path = _GENERATED_DIR,
     *,
     operations_class_name: str = DEFAULT_OPERATIONS_CLASS_NAME,
+    model_extension_module: str | None = None,
 ) -> tuple[dict[str, Any], list[Path]]:
     schema = load_openapi_schema(openapi_path)
     output_dir = Path(generated_dir)
@@ -470,7 +532,10 @@ def generate(
         '"""Generated OpenAPI support modules."""\n',
         encoding="utf-8",
     )
-    generated_files[1].write_text(generate_models(schema), encoding="utf-8")
+    generated_files[1].write_text(
+        generate_models(schema, model_extension_module=model_extension_module),
+        encoding="utf-8",
+    )
     generated_files[2].write_text(
         generate_operations(schema, operations_class_name=operations_class_name),
         encoding="utf-8",
@@ -519,6 +584,14 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--model-extension-module",
+        default=None,
+        help=(
+            "Optional importable module containing a MODEL_EXTENSIONS mapping "
+            "from generated model class names to extension class names."
+        ),
+    )
+    parser.add_argument(
         "--openapi-url",
         default=None,
         help="Remote OpenAPI JSON URL to fetch before regenerating.",
@@ -544,6 +617,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         _validate_class_name(args.operations_class_name)
+        _model_extension_mapping(args.model_extension_module)
     except ValueError as exc:
         parser.error(str(exc))
     source_count = sum(bool(value) for value in (args.openapi_url, args.backend_path, args.from_snapshot))
@@ -578,6 +652,7 @@ def main(argv: list[str] | None = None) -> None:
         args.openapi,
         args.out,
         operations_class_name=args.operations_class_name,
+        model_extension_module=args.model_extension_module,
     )
     _print_summary(
         source=source,

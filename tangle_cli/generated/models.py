@@ -14,6 +14,8 @@ try:
 except ImportError:  # pragma: no cover - pydantic v1 fallback
     ConfigDict = None  # type: ignore[assignment]
 
+from tangle_cli.generated_model_extensions import GetGraphExecutionStateResponseExtensions
+
 
 class TangleGeneratedModel(BaseModel):
     """Base for generated response models with dict-like conveniences."""
@@ -191,7 +193,7 @@ class GetExecutionInfoResponse(TangleGeneratedModel):
     pipeline_run_id: Any = None
     task_spec: Any = None
 
-class GetGraphExecutionStateResponse(TangleGeneratedModel):
+class GetGraphExecutionStateResponse(GetGraphExecutionStateResponseExtensions, TangleGeneratedModel):
     child_execution_status_stats: Any = None
     child_execution_status_summary: Any = None
 

@@ -281,6 +281,83 @@ def test_generate_writes_support_modules_to_custom_out(tmp_path) -> None:
     assert "name_substring" in operations
 
 
+def test_generate_supports_model_extension_module(monkeypatch, tmp_path) -> None:
+    extension_dir = tmp_path / "extensions"
+    extension_dir.mkdir()
+    (extension_dir / "demo_extensions.py").write_text(
+        "class FooResponseExtensions:\n"
+        "    @property\n"
+        "    def demo(self):\n"
+        "        return 'extended'\n"
+        "\n"
+        "MODEL_EXTENSIONS = {\n"
+        "    'FooResponse': 'FooResponseExtensions',\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(extension_dir))
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "custom_generated_api"
+    openapi.write_text(
+        json.dumps({
+            "openapi": "3.1.0",
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "FooResponse": {
+                        "type": "object",
+                        "properties": {"id": {"type": "string"}},
+                    },
+                    "OtherResponse": {
+                        "type": "object",
+                        "properties": {"id": {"type": "string"}},
+                    },
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    codegen.generate(
+        openapi,
+        out,
+        model_extension_module="demo_extensions",
+    )
+
+    models = (out / "models.py").read_text(encoding="utf-8")
+    assert "from demo_extensions import FooResponseExtensions" in models
+    assert "class FooResponse(FooResponseExtensions, TangleGeneratedModel):" in models
+    assert "class OtherResponse(TangleGeneratedModel):" in models
+
+
+def test_codegen_main_rejects_invalid_model_extension_module(tmp_path, capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        codegen.main([
+            "--openapi",
+            str(tmp_path / "openapi.json"),
+            "--model-extension-module",
+            "not-valid!",
+        ])
+
+    assert exc_info.value.code == 2
+    assert "Invalid model extension module name" in capsys.readouterr().err
+
+
+def test_generate_rejects_invalid_model_extension_mapping(monkeypatch, tmp_path) -> None:
+    extension_dir = tmp_path / "extensions"
+    extension_dir.mkdir()
+    (extension_dir / "bad_extensions.py").write_text(
+        "MODEL_EXTENSIONS = {'FooResponse': 'MissingExtensions'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(extension_dir))
+    openapi = tmp_path / "openapi.json"
+    openapi.write_text(json.dumps({"openapi": "3.1.0", "paths": {}}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not define"):
+        codegen.generate(openapi, tmp_path / "out", model_extension_module="bad_extensions")
+
+
 def test_generate_supports_custom_operations_class_name(tmp_path) -> None:
     openapi = tmp_path / "openapi.json"
     out = tmp_path / "custom_generated_api"

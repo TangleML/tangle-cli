@@ -189,7 +189,8 @@ backend submodule, run:
 ```bash
 git submodule update --init --recursive
 uv sync --group codegen
-uv run --group codegen python -m tangle_cli.openapi.codegen
+uv run --group codegen python -m tangle_cli.openapi.codegen \
+  --model-extension-module tangle_cli.generated_model_extensions
 uv run pytest
 ```
 
@@ -204,7 +205,19 @@ with `git submodule update --init --recursive`.
 `tangle_cli/generated`, which is the package support module used by the public
 `tangle_cli/client.py` wrapper. `--operations-class-name` controls the generated
 operations class name in `<out>/operations.py`; it defaults to
-`GeneratedTangleApiOperations`. Codegen writes exactly these support files:
+`GeneratedTangleApiOperations`. `--model-extension-module` points codegen at an
+importable module with a `MODEL_EXTENSIONS` mapping from generated model class
+names to extension class names. Matching generated models inherit those
+extensions before `TangleGeneratedModel`, e.g.:
+
+```python
+MODEL_EXTENSIONS = {
+    "GetGraphExecutionStateResponse": "GetGraphExecutionStateResponseExtensions",
+}
+```
+
+The extension classes must be importable from that module and should not import
+generated model classes. Codegen writes exactly these support files:
 
 ```text
 <out>/__init__.py
@@ -219,7 +232,9 @@ To regenerate from the already checked-in snapshot instead of the backend, pass
 `--from-snapshot` explicitly:
 
 ```bash
-uv run python -m tangle_cli.openapi.codegen --from-snapshot
+uv run python -m tangle_cli.openapi.codegen \
+  --from-snapshot \
+  --model-extension-module tangle_cli.generated_model_extensions
 ```
 
 If you already have a remote OpenAPI JSON document, fetch that directly instead:
@@ -240,7 +255,8 @@ Downstream tools can point `--out` at their own generated support package, e.g.:
 uv run python -m tangle_cli.openapi.codegen \
   --openapi-url https://oasis.shopify.io/openapi.json \
   --out src/tangle_deploy/generated_api \
-  --operations-class-name GeneratedTangleApiExtensions
+  --operations-class-name GeneratedTangleApiExtensions \
+  --model-extension-module tangle_deploy.tangle_api_model_extensions
 ```
 
 At the time of writing the official repository does not commit that raw
