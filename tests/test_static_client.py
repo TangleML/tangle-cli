@@ -7,6 +7,7 @@ import requests
 
 from tangle_cli import TangleApiClient
 from tangle_cli.generated.models import (
+    GetGraphExecutionStateResponse,
     ListPublishedComponentsResponse,
     PipelineRunResponse,
     PublishedComponentResponse,
@@ -36,6 +37,23 @@ class FakeSession:
         if self.responses:
             return self.responses.pop(0)
         return response({})
+
+
+def test_generated_graph_state_response_extensions_work_at_runtime() -> None:
+    state = GetGraphExecutionStateResponse.from_dict({
+        "child_execution_status_stats": {
+            "exec-1": {"SUCCEEDED": 2, "FAILED": 1},
+            "exec-2": {"SYSTEM_ERROR": 1},
+        }
+    })
+
+    assert state.per_execution == {
+        "exec-1": {"SUCCEEDED": 2, "FAILED": 1},
+        "exec-2": {"SYSTEM_ERROR": 1},
+    }
+    assert state.status_totals == {"SUCCEEDED": 2, "FAILED": 1, "SYSTEM_ERROR": 1}
+    assert state.failed_execution_ids == ["exec-1", "exec-2"]
+
 
 
 def test_public_static_client_import_and_generated_operation() -> None:
