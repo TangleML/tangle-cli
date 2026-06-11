@@ -6,7 +6,7 @@ from typing import Any
 import requests
 
 from tangle_cli import TangleApiClient
-from tangle_cli.generated.models import PipelineRunResponse
+from tangle_cli.generated.models import PipelineRunResponse, PublishedComponentResponse
 from tangle_cli.models import PipelineRun, SecretInfo
 
 
@@ -81,6 +81,137 @@ def test_secret_helpers_use_static_generated_endpoint_shapes() -> None:
     assert session.calls[0]["url"] == "https://api.test/api/secrets/"
     assert session.calls[0]["params"] == {"secret_name": "demo", "description": "d"}
     assert session.calls[0]["json"] == {"secret_value": "value"}
+
+
+class ResolveDigestClient(TangleApiClient):
+    def __init__(
+        self,
+        by_digest: dict[str, list[Any]] | None = None,
+        by_name: dict[str, list[Any]] | None = None,
+    ) -> None:
+        super().__init__("https://api.test")
+        self.by_digest = by_digest or {}
+        self.by_name = by_name or {}
+        self.lookups: list[dict[str, Any]] = []
+
+    def list_published_components(
+        self,
+        include_deprecated: bool = False,
+        name_substring: str | None = None,
+        published_by_substring: str | None = None,
+        digest: str | None = None,
+    ) -> list[Any]:
+        self.lookups.append({
+            "include_deprecated": include_deprecated,
+            "name_substring": name_substring,
+            "published_by_substring": published_by_substring,
+            "digest": digest,
+        })
+        if digest is not None:
+            return self.by_digest.get(digest, [])
+        if name_substring is not None:
+            return self.by_name.get(name_substring, [])
+        return []
+
+
+def test_resolve_digest_returns_non_deprecated_digest() -> None:
+    component = PublishedComponentResponse.from_dict({
+        "digest": "sha256:one",
+        "published_by": "alice@example.com",
+        "deprecated": False,
+    })
+    client = ResolveDigestClient(by_digest={"sha256:one": [component]})
+
+    assert client.resolve_digest("sha256:one") == "sha256:one"
+    assert client.lookups == [{
+        "include_deprecated": True,
+        "name_substring": None,
+        "published_by_substring": None,
+        "digest": "sha256:one",
+    }]
+
+
+def test_resolve_digest_follows_deprecation_successor_chain() -> None:
+    client = ResolveDigestClient(
+        by_digest={
+            "sha256:old": [{
+                "digest": "sha256:old",
+                "deprecated": True,
+                "superseded_by": "sha256:mid",
+            }],
+            "sha256:mid": [{
+                "digest": "sha256:mid",
+                "deprecated": True,
+                "superseded_by": "new-component",
+            }],
+        },
+        by_name={
+            "new-component": [{
+                "digest": "sha256:new",
+                "deprecated": False,
+            }],
+        },
+    )
+
+    assert client.resolve_digest("sha256:old") == "sha256:new"
+
+
+def test_resolve_digest_protects_against_successor_cycles() -> None:
+    client = ResolveDigestClient(
+        by_digest={
+            "sha256:old": [{
+                "digest": "sha256:old",
+                "deprecated": True,
+                "superseded_by": "sha256:next",
+            }],
+            "sha256:next": [{
+                "digest": "sha256:next",
+                "deprecated": True,
+                "superseded_by": "sha256:old",
+            }],
+        },
+    )
+
+    assert client.resolve_digest("sha256:old") == "sha256:old"
+
+
+def test_resolve_digest_returns_original_for_no_matches() -> None:
+    client = ResolveDigestClient()
+
+    assert client.resolve_digest("missing") == "missing"
+
+
+def test_resolve_digest_returns_original_for_ambiguous_matches() -> None:
+    client = ResolveDigestClient(by_digest={
+        "ambiguous": [
+            {"digest": "sha256:one"},
+            {"digest": "sha256:two"},
+        ],
+    })
+
+    assert client.resolve_digest("ambiguous") == "ambiguous"
+
+
+def test_resolve_digest_falls_back_to_name_substring() -> None:
+    client = ResolveDigestClient(
+        by_name={"component-name": [{"digest": "sha256:by-name", "deprecated": False}]},
+    )
+
+    assert client.resolve_digest("component-name") == "sha256:by-name"
+    assert client.lookups == [
+        {
+            "include_deprecated": True,
+            "name_substring": None,
+            "published_by_substring": None,
+            "digest": "component-name",
+        },
+        {
+            "include_deprecated": True,
+            "name_substring": "component-name",
+            "published_by_substring": None,
+            "digest": None,
+        },
+    ]
 
 
 def test_make_request_retries_after_refresh_auth_on_401() -> None:

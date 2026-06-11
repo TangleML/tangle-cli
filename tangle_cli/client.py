@@ -309,17 +309,31 @@ class TangleApiClient(GeneratedOperationsMixin):
         return self.get_component(digest)
 
     def resolve_digest(self, digest: str) -> str:
-        """Resolve a component identifier to a digest when possible."""
+        """Resolve a component digest/name, following deprecation successors."""
 
-        if digest.startswith("sha256:"):
-            return digest
-        matches = self.list_published_components(digest=digest)
-        if len(matches) == 1 and matches[0].get("digest"):
-            return str(matches[0]["digest"])
-        matches = self.list_published_components(name_substring=digest)
-        if len(matches) == 1 and matches[0].get("digest"):
-            return str(matches[0]["digest"])
-        return digest
+        current = digest
+        seen: set[str] = set()
+
+        while current not in seen:
+            seen.add(current)
+            matches = self.list_published_components(include_deprecated=True, digest=current)
+            if not matches:
+                matches = self.list_published_components(
+                    include_deprecated=True,
+                    name_substring=current,
+                )
+            if len(matches) != 1:
+                return current
+
+            component = matches[0]
+            resolved = str(component.get("digest") or current)
+            successor = component.get("superseded_by")
+            if component.get("deprecated") and successor:
+                current = str(successor)
+                continue
+            return resolved
+
+        return current
 
     def list_published_components(
         self,
