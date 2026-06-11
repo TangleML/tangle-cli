@@ -47,36 +47,35 @@ class FakeClient:
             },
         }
 
-    def call(self, operation_name: str, **params: Any) -> Any:
-        if operation_name == "components.get":
-            return self.component if params.get("digest") == "abc123" else None
-        if operation_name == "published-components.list":
-            if params.get("digest") == "abc123" or params.get("name_substring") == "demo":
-                return {
-                    "published_components": [
-                        {
-                            "name": "demo",
-                            "digest": "abc123",
-                            "version": "1.2.3",
-                            "published_by": "user@example.com",
-                            "description": "Demo component",
-                        }
-                    ]
-                }
-            if params.get("digest") == "old":
-                return {
-                    "published_components": [
-                        {
-                            "name": "demo",
-                            "digest": "old",
-                            "version": "1.0.0",
-                            "deprecated": True,
-                            "superseded_by": "abc123",
-                        }
-                    ]
-                }
-            return {"published_components": []}
-        raise AssertionError(f"unexpected operation: {operation_name}")
+    def components_get(self, digest: str) -> Any:
+        return self.component if digest == "abc123" else None
+
+    def published_components_list(self, **params: Any) -> Any:
+        if params.get("digest") == "abc123" or params.get("name_substring") == "demo":
+            return {
+                "published_components": [
+                    {
+                        "name": "demo",
+                        "digest": "abc123",
+                        "version": "1.2.3",
+                        "published_by": "user@example.com",
+                        "description": "Demo component",
+                    }
+                ]
+            }
+        if params.get("digest") == "old":
+            return {
+                "published_components": [
+                    {
+                        "name": "demo",
+                        "digest": "old",
+                        "version": "1.0.0",
+                        "deprecated": True,
+                        "superseded_by": "abc123",
+                    }
+                ]
+            }
+        return {"published_components": []}
 
 
 class TestTransparencyCheck:
@@ -115,9 +114,6 @@ class TestComponentLibrary:
             def __init__(self):
                 self.paths: list[str] = []
 
-            def call(self, operation_name: str, **params: Any) -> Any:
-                raise AssertionError(f"unexpected operation: {operation_name}")
-
             def request_path(self, path: str):
                 self.paths.append(path)
                 if path == "/component_library.yaml":
@@ -145,9 +141,6 @@ class TestComponentLibrary:
 
             def __init__(self):
                 self.paths: list[str] = []
-
-            def call(self, operation_name: str, **params: Any) -> Any:
-                raise AssertionError(f"unexpected operation: {operation_name}")
 
             def request_path(self, path: str):
                 self.paths.append(path)
@@ -177,10 +170,11 @@ class TestComponentLibrary:
                 self.component_name = component_name
                 self.paths: list[str] = []
 
-            def call(self, operation_name: str, **params: Any) -> Any:
-                if operation_name in {"components.get", "published-components.list"}:
-                    return {"published_components": []}
-                raise AssertionError(f"unexpected operation: {operation_name}")
+            def components_get(self, digest: str) -> Any:
+                return None
+
+            def published_components_list(self, **params: Any) -> Any:
+                return {"published_components": []}
 
             def request_path(self, path: str):
                 self.paths.append(path)
@@ -252,10 +246,8 @@ class TestInspectComponents:
 
     def test_search_components_handles_null_description(self):
         class NullDescriptionClient(FakeClient):
-            def call(self, operation_name: str, **params: Any) -> Any:
-                if operation_name == "published-components.list":
-                    return {"published_components": [{"name": "demo", "digest": "abc123", "description": None}]}
-                return super().call(operation_name, **params)
+            def published_components_list(self, **params: Any) -> Any:
+                return {"published_components": [{"name": "demo", "digest": "abc123", "description": None}]}
 
         result = search_components(NullDescriptionClient(), name="demo")
 
