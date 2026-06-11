@@ -48,6 +48,19 @@ def test_public_static_client_import_and_generated_operation() -> None:
     assert session.calls[0]["url"] == "https://api.test/api/pipeline_runs/run%2F1"
 
 
+def test_request_json_instantiates_list_response_models() -> None:
+    session = FakeSession([
+        response([{"id": "run-1", "root_execution_id": "exec-1", "created_by": "alice"}])
+    ])
+    client = TangleApiClient("https://api.test", session=session)
+
+    runs = client._request_json("GET", "/api/pipeline_runs/", response_model=PipelineRunResponse)
+
+    assert isinstance(runs, list)
+    assert isinstance(runs[0], PipelineRunResponse)
+    assert runs[0].id == "run-1"
+
+
 def test_compat_get_pipeline_run_returns_dataclass_with_dict_helpers() -> None:
     session = FakeSession([
         response({"id": "run-1", "root_execution_id": "exec-1", "created_by": "alice"})
@@ -60,6 +73,22 @@ def test_compat_get_pipeline_run_returns_dataclass_with_dict_helpers() -> None:
     assert run.id == "run-1"
     assert run.get("created_by") == "alice"
     assert run["root_execution_id"] == "exec-1"
+
+
+def test_compat_wrapper_migration_hints_are_machine_readable() -> None:
+    assert TangleApiClient.get_execution_container_state.__tangle_migrate_to__ == (
+        "executions_container_state"
+    )
+    assert TangleApiClient.get_pipeline_run.__tangle_migrate_to__ == "pipeline_runs_get"
+    assert TangleApiClient.list_published_components.__tangle_migrate_to__ == (
+        "published_components_list"
+    )
+    assert TangleApiClient.create_secret.__tangle_migrate_to__ == "secrets_create"
+
+    assert not hasattr(TangleApiClient.resolve_digest, "__tangle_migrate_to__")
+    assert not hasattr(TangleApiClient.get_run_details, "__tangle_migrate_to__")
+    assert not hasattr(TangleApiClient.find_existing_components, "__tangle_migrate_to__")
+    assert not hasattr(TangleApiClient._enrich_execution_tree, "__tangle_migrate_to__")
 
 
 def test_secret_helpers_use_static_generated_endpoint_shapes() -> None:

@@ -225,3 +225,104 @@ def test_generate_writes_support_modules_to_custom_out(tmp_path) -> None:
     assert "class GeneratedOperationsMixin" in operations
     assert "def published_components_list" in operations
     assert "name_substring" in operations
+
+
+def test_generate_operations_uses_concrete_return_annotations() -> None:
+    operations = codegen.generate_operations({
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/arrays": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"$ref": "#/components/schemas/FooResponse"},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/api/maps": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "additionalProperties": {"type": "string"},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/api/nullable": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "anyOf": [
+                                            {"$ref": "#/components/schemas/FooResponse"},
+                                            {"type": "null"},
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/api/status": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {"schema": {"type": "string"}}
+                            }
+                        }
+                    }
+                }
+            },
+            "/api/things/{id}": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/FooResponse"}
+                                }
+                            }
+                        }
+                    }
+                },
+                "delete": {"responses": {"204": {"description": "deleted"}}},
+            },
+            "/api/unknown": {"get": {}},
+        },
+        "components": {
+            "schemas": {
+                "FooResponse": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                }
+            }
+        },
+    })
+
+    assert "from .models import FooResponse" in operations
+    assert "def arrays_list(self) -> list[FooResponse]:" in operations
+    assert "def maps_list(self) -> dict[str, Any]:" in operations
+    assert "def nullable_list(self) -> FooResponse | None:" in operations
+    assert "def status_list(self) -> str:" in operations
+    assert "def things_get(self, id: Any) -> FooResponse:" in operations
+    assert "def things_delete(self, id: Any) -> None:" in operations
+    assert "def unknown_list(self) -> Any:" in operations

@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from tangle_cli import api_schema
-from tangle_cli.api_client import TangleOpenApiClient
+from tangle_cli.dynamic_discovery_client import TangleDynamicDiscoveryClient
 
 
 SCHEMA = {
@@ -125,7 +125,7 @@ def test_from_cache_loads_cached_schema_without_network(monkeypatch, tmp_path):
     monkeypatch.setattr(httpx, "get", fake_get)
     api_schema.write_cached_schema(SCHEMA, "https://api.test")
 
-    client = TangleOpenApiClient.from_cache(base_url="https://api.test")
+    client = TangleDynamicDiscoveryClient.from_cache(base_url="https://api.test")
 
     assert client.operations == (
         "components.get",
@@ -146,10 +146,10 @@ def test_from_cache_or_refresh_fetches_on_miss_then_reuses_cache(monkeypatch, tm
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(httpx, "get", fake_get)
 
-    first = TangleOpenApiClient.from_cache_or_refresh(
+    first = TangleDynamicDiscoveryClient.from_cache_or_refresh(
         base_url="https://api.test/", headers={"Cloud-Auth": "cloud-token"}
     )
-    second = TangleOpenApiClient.from_cache_or_refresh(base_url="https://api.test")
+    second = TangleDynamicDiscoveryClient.from_cache_or_refresh(base_url="https://api.test")
 
     assert first.operations == second.operations
     assert len(gets) == 1
@@ -165,7 +165,7 @@ def test_request_call_and_dynamic_attribute_access(monkeypatch):
         return json_response(method, url, {"url": url})
 
     monkeypatch.setattr(httpx, "request", fake_request)
-    client = TangleOpenApiClient.from_schema(SCHEMA, base_url="https://api.test")
+    client = TangleDynamicDiscoveryClient.from_schema(SCHEMA, base_url="https://api.test")
 
     response = client.request("components.get", digest="sha256:abc")
     assert response.json() == {"url": "https://api.test/api/components/sha256%3Aabc"}
@@ -191,7 +191,7 @@ def test_pythonic_aliases_for_hyphenated_operations(monkeypatch):
         return json_response(method, url, {"ok": True})
 
     monkeypatch.setattr(httpx, "request", fake_request)
-    client = TangleOpenApiClient.from_schema(SCHEMA, base_url="https://api.test")
+    client = TangleDynamicDiscoveryClient.from_schema(SCHEMA, base_url="https://api.test")
 
     client.call("pipeline_runs.cancel", id="run/1")
     client.pipeline_runs.cancel(id="run/2")
@@ -208,7 +208,7 @@ def test_path_query_body_and_nested_ref_params(monkeypatch):
         return json_response(method, url, {"ok": True})
 
     monkeypatch.setattr(httpx, "request", fake_request)
-    client = TangleOpenApiClient.from_schema(SCHEMA, base_url="https://api.test")
+    client = TangleDynamicDiscoveryClient.from_schema(SCHEMA, base_url="https://api.test")
 
     client.call("published-components.create", name="demo", labels=["stable"])
 
@@ -230,7 +230,7 @@ def test_programmatic_string_body_does_not_read_at_file_reference(monkeypatch, t
     secret_path = tmp_path / "secret.json"
     secret_path.write_text('{"token":"secret"}', encoding="utf-8")
     monkeypatch.setattr(httpx, "request", fake_request)
-    client = TangleOpenApiClient.from_schema(SCHEMA, base_url="https://api.test")
+    client = TangleDynamicDiscoveryClient.from_schema(SCHEMA, base_url="https://api.test")
 
     client.call("published-components.create", body=f"@{secret_path}")
 
@@ -248,7 +248,7 @@ def test_auth_header_and_env_precedence(monkeypatch):
     monkeypatch.setenv("TANGLE_API_AUTH_HEADER", "Basic env-auth")
     monkeypatch.setattr(httpx, "request", fake_request)
 
-    client = TangleOpenApiClient.from_schema(
+    client = TangleDynamicDiscoveryClient.from_schema(
         SCHEMA,
         base_url="https://api.test",
         token="bearer-token",
@@ -273,7 +273,7 @@ def test_status_and_network_errors_are_httpx_errors(monkeypatch):
         return text_response(method, url, "not authorized", status_code=401)
 
     monkeypatch.setattr(httpx, "request", fake_http_error)
-    client = TangleOpenApiClient.from_schema(SCHEMA, base_url="https://api.test")
+    client = TangleDynamicDiscoveryClient.from_schema(SCHEMA, base_url="https://api.test")
 
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
         client.call("components.get", digest="abc")
@@ -300,8 +300,8 @@ def test_no_import_time_side_effects(monkeypatch, tmp_path):
     monkeypatch.setattr(httpx, "get", fake_get)
     monkeypatch.setattr(sys, "argv", ["tangle", "api", "components", "get", "abc"])
 
-    import tangle_cli.api_client as api_client
+    import tangle_cli.dynamic_discovery_client as dynamic_discovery_client
 
-    importlib.reload(api_client)
+    importlib.reload(dynamic_discovery_client)
 
     assert calls == []

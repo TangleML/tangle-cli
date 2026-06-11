@@ -1,4 +1,4 @@
-"""Programmatic dynamic OpenAPI client for Tangle backends."""
+"""Programmatic dynamic-discovery client for Tangle backends."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ from .api_transport import (
 )
 
 
-class TangleOpenApiClient:
-    """Dynamic client generated from a Tangle OpenAPI schema.
+class TangleDynamicDiscoveryClient:
+    """Dynamic-discovery client generated from a Tangle OpenAPI schema.
 
     The client intentionally reuses the same schema cache, operation naming,
     parameter mapping, URL construction, and auth/header handling as
@@ -66,7 +66,7 @@ class TangleOpenApiClient:
         auth_header: str | None = None,
         header: list[str] | str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
-    ) -> TangleOpenApiClient:
+    ) -> TangleDynamicDiscoveryClient:
         """Create a client from an already loaded OpenAPI schema."""
 
         return cls(
@@ -89,7 +89,7 @@ class TangleOpenApiClient:
         auth_header: str | None = None,
         header: list[str] | str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
-    ) -> TangleOpenApiClient:
+    ) -> TangleDynamicDiscoveryClient:
         """Create a client from the local schema cache without network access."""
 
         normalized_base_url = _normalize_base_url(base_url or default_base_url())
@@ -97,7 +97,7 @@ class TangleOpenApiClient:
         if schema is None:
             raise FileNotFoundError(
                 f"No cached OpenAPI schema for {normalized_base_url}; "
-                "call TangleOpenApiClient.from_cache_or_refresh(...) or run `tangle api refresh`."
+                "call TangleDynamicDiscoveryClient.from_cache_or_refresh(...) or run `tangle api refresh`."
             )
         return cls.from_schema(
             schema,
@@ -119,7 +119,7 @@ class TangleOpenApiClient:
         auth_header: str | None = None,
         header: list[str] | str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
-    ) -> TangleOpenApiClient:
+    ) -> TangleDynamicDiscoveryClient:
         """Fetch ``/openapi.json`` and create a client without writing the cache."""
 
         normalized_base_url = _normalize_base_url(base_url or default_base_url())
@@ -150,7 +150,7 @@ class TangleOpenApiClient:
         auth_header: str | None = None,
         header: list[str] | str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
-    ) -> TangleOpenApiClient:
+    ) -> TangleDynamicDiscoveryClient:
         """Create a client from cache, fetching and caching the schema on miss."""
 
         normalized_base_url = _normalize_base_url(base_url or default_base_url())
@@ -251,7 +251,7 @@ class TangleOpenApiClient:
 class _OperationGroup:
     """Dynamic operation namespace returned by ``client.<resource>``."""
 
-    def __init__(self, client: TangleOpenApiClient, group_name: str) -> None:
+    def __init__(self, client: TangleDynamicDiscoveryClient, group_name: str) -> None:
         self._client = client
         self._group_name = group_name
 

@@ -13,7 +13,7 @@ from .models import ComponentLibraryResponse, ComponentResponse, GetArtifactInfo
 class GeneratedOperationsMixin:
     """Mixin containing one checked-in method per OpenAPI operation."""
 
-    def admin_execution_node_status(self, id: Any, status: Any) -> Any:
+    def admin_execution_node_status(self, id: Any, status: Any) -> None:
         return self._request_json(
             'PUT',
             '/api/admin/execution_node/{id}/status',
@@ -23,7 +23,7 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-    def admin_set_read_only_model(self, read_only: Any) -> Any:
+    def admin_set_read_only_model(self, read_only: Any) -> None:
         return self._request_json(
             'PUT',
             '/api/admin/set_read_only_model',
@@ -33,7 +33,7 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-    def admin_sql_engine_connection_pool_status(self) -> Any:
+    def admin_sql_engine_connection_pool_status(self) -> str:
         return self._request_json(
             'GET',
             '/api/admin/sql_engine_connection_pool_status',
@@ -43,7 +43,7 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-    def artifacts_get(self, id: Any) -> Any:
+    def artifacts_get(self, id: Any) -> GetArtifactInfoResponse:
         return self._request_json(
             'GET',
             '/api/artifacts/{id}',
@@ -53,7 +53,7 @@ class GeneratedOperationsMixin:
             response_model=GetArtifactInfoResponse,
         )
 
-    def artifacts_signed_artifact_url(self, id: Any) -> Any:
+    def artifacts_signed_artifact_url(self, id: Any) -> GetArtifactSignedUrlResponse:
         return self._request_json(
             'GET',
             '/api/artifacts/{id}/signed_artifact_url',
@@ -63,7 +63,7 @@ class GeneratedOperationsMixin:
             response_model=GetArtifactSignedUrlResponse,
         )
 
-    def component_libraries_list(self, name_substring: Any = None) -> Any:
+    def component_libraries_list(self, name_substring: Any = None) -> ListComponentLibrariesResponse:
         return self._request_json(
             'GET',
             '/api/component_libraries/',
@@ -73,7 +73,7 @@ class GeneratedOperationsMixin:
             response_model=ListComponentLibrariesResponse,
         )
 
-    def component_libraries_create(self, name: Any, hide_from_search: Any = None) -> Any:
+    def component_libraries_create(self, name: Any, hide_from_search: Any = None) -> ComponentLibraryResponse:
         return self._request_json(
             'POST',
             '/api/component_libraries/',
@@ -83,7 +83,7 @@ class GeneratedOperationsMixin:
             response_model=ComponentLibraryResponse,
         )
 
-    def component_libraries_get(self, id: Any, include_component_texts: Any = None) -> Any:
+    def component_libraries_get(self, id: Any, include_component_texts: Any = None) -> ComponentLibraryResponse:
         return self._request_json(
             'GET',
             '/api/component_libraries/{id}',
@@ -93,7 +93,7 @@ class GeneratedOperationsMixin:
             response_model=ComponentLibraryResponse,
         )
 
-    def component_libraries_update(self, id: Any, name: Any, hide_from_search: Any = None) -> Any:
+    def component_libraries_update(self, id: Any, name: Any, hide_from_search: Any = None) -> ComponentLibraryResponse:
         return self._request_json(
             'PUT',
             '/api/component_libraries/{id}',
@@ -103,7 +103,7 @@ class GeneratedOperationsMixin:
             response_model=ComponentLibraryResponse,
         )
 
-    def component_library_pins_me(self) -> Any:
+    def component_library_pins_me(self) -> UserComponentLibraryPinsResponse:
         return self._request_json(
             'GET',
             '/api/component_library_pins/me/',
@@ -113,7 +113,7 @@ class GeneratedOperationsMixin:
             response_model=UserComponentLibraryPinsResponse,
         )
 
-    def component_library_pins_put_me(self, body: Any = None) -> Any:
+    def component_library_pins_put_me(self, body: Any = None) -> None:
         return self._request_json(
             'PUT',
             '/api/component_library_pins/me/',
@@ -123,7 +123,7 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-    def components_get(self, digest: Any) -> Any:
+    def components_get(self, digest: Any) -> ComponentResponse:
         return self._request_json(
             'GET',
             '/api/components/{digest}',
@@ -133,7 +133,7 @@ class GeneratedOperationsMixin:
             response_model=ComponentResponse,
         )
 
-    def executions_artifacts(self, id: Any) -> Any:
+    def executions_artifacts(self, id: Any) -> GetExecutionArtifactsResponse:
         return self._request_json(
             'GET',
             '/api/executions/{id}/artifacts',
@@ -143,7 +143,7 @@ class GeneratedOperationsMixin:
             response_model=GetExecutionArtifactsResponse,
         )
 
-    def executions_container_log(self, id: Any) -> Any:
+    def executions_container_log(self, id: Any) -> GetContainerExecutionLogResponse:
         return self._request_json(
             'GET',
             '/api/executions/{id}/container_log',
@@ -153,7 +153,7 @@ class GeneratedOperationsMixin:
             response_model=GetContainerExecutionLogResponse,
         )
 
-    def executions_container_state(self, id: Any, include_execution_nodes_linked_to_same_container_execution: Any = None) -> Any:
+    def executions_container_state(self, id: Any, include_execution_nodes_linked_to_same_container_execution: Any = None) -> GetContainerExecutionStateResponse:
         return self._request_json(
             'GET',
             '/api/executions/{id}/container_state',
@@ -163,7 +163,7 @@ class GeneratedOperationsMixin:
             response_model=GetContainerExecutionStateResponse,
         )
 
-    def executions_details(self, id: Any) -> Any:
+    def executions_details(self, id: Any) -> GetExecutionInfoResponse:
         return self._request_json(
             'GET',
             '/api/executions/{id}/details',
@@ -173,7 +173,7 @@ class GeneratedOperationsMixin:
             response_model=GetExecutionInfoResponse,
         )
 
-    def executions_graph_execution_state(self, id: Any) -> Any:
+    def executions_graph_execution_state(self, id: Any) -> GetGraphExecutionStateResponse:
         return self._request_json(
             'GET',
             '/api/executions/{id}/graph_execution_state',
@@ -183,7 +183,7 @@ class GeneratedOperationsMixin:
             response_model=GetGraphExecutionStateResponse,
         )
 
-    def executions_state(self, id: Any) -> Any:
+    def executions_state(self, id: Any) -> GetGraphExecutionStateResponse:
         return self._request_json(
             'GET',
             '/api/executions/{id}/state',
@@ -193,7 +193,7 @@ class GeneratedOperationsMixin:
             response_model=GetGraphExecutionStateResponse,
         )
 
-    def pipeline_runs_list(self, page_token: Any = None, filter: Any = None, filter_query: Any = None, include_pipeline_names: Any = None, include_execution_stats: Any = None) -> Any:
+    def pipeline_runs_list(self, page_token: Any = None, filter: Any = None, filter_query: Any = None, include_pipeline_names: Any = None, include_execution_stats: Any = None) -> ListPipelineJobsResponse:
         return self._request_json(
             'GET',
             '/api/pipeline_runs/',
@@ -203,7 +203,7 @@ class GeneratedOperationsMixin:
             response_model=ListPipelineJobsResponse,
         )
 
-    def pipeline_runs_create(self, body: Any = None) -> Any:
+    def pipeline_runs_create(self, body: Any = None) -> PipelineRunResponse:
         return self._request_json(
             'POST',
             '/api/pipeline_runs/',
@@ -213,7 +213,7 @@ class GeneratedOperationsMixin:
             response_model=PipelineRunResponse,
         )
 
-    def pipeline_runs_get(self, id: Any, include_execution_stats: Any = None) -> Any:
+    def pipeline_runs_get(self, id: Any, include_execution_stats: Any = None) -> PipelineRunResponse:
         return self._request_json(
             'GET',
             '/api/pipeline_runs/{id}',
@@ -223,7 +223,7 @@ class GeneratedOperationsMixin:
             response_model=PipelineRunResponse,
         )
 
-    def pipeline_runs_annotations(self, id: Any) -> Any:
+    def pipeline_runs_annotations(self, id: Any) -> dict[str, Any]:
         return self._request_json(
             'GET',
             '/api/pipeline_runs/{id}/annotations/',
@@ -233,7 +233,7 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-    def pipeline_runs_put_annotations(self, id: Any, key: Any, value: Any = None) -> Any:
+    def pipeline_runs_put_annotations(self, id: Any, key: Any, value: Any = None) -> None:
         return self._request_json(
             'PUT',
             '/api/pipeline_runs/{id}/annotations/{key}',
@@ -243,7 +243,7 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-    def pipeline_runs_delete_annotations(self, id: Any, key: Any) -> Any:
+    def pipeline_runs_delete_annotations(self, id: Any, key: Any) -> None:
         return self._request_json(
             'DELETE',
             '/api/pipeline_runs/{id}/annotations/{key}',
@@ -253,7 +253,7 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-    def pipeline_runs_cancel(self, id: Any) -> Any:
+    def pipeline_runs_cancel(self, id: Any) -> None:
         return self._request_json(
             'POST',
             '/api/pipeline_runs/{id}/cancel',
@@ -263,7 +263,7 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-    def published_components_list(self, include_deprecated: Any = None, name_substring: Any = None, published_by_substring: Any = None, digest: Any = None) -> Any:
+    def published_components_list(self, include_deprecated: Any = None, name_substring: Any = None, published_by_substring: Any = None, digest: Any = None) -> ListPublishedComponentsResponse:
         return self._request_json(
             'GET',
             '/api/published_components/',
@@ -273,7 +273,7 @@ class GeneratedOperationsMixin:
             response_model=ListPublishedComponentsResponse,
         )
 
-    def published_components_create(self, digest: Any = None, name: Any = None, tag: Any = None, text: Any = None, url: Any = None) -> Any:
+    def published_components_create(self, digest: Any = None, name: Any = None, tag: Any = None, text: Any = None, url: Any = None) -> PublishedComponentResponse:
         return self._request_json(
             'POST',
             '/api/published_components/',
@@ -283,7 +283,7 @@ class GeneratedOperationsMixin:
             response_model=PublishedComponentResponse,
         )
 
-    def published_components_update(self, digest: Any, deprecated: Any = None, superseded_by: Any = None) -> Any:
+    def published_components_update(self, digest: Any, deprecated: Any = None, superseded_by: Any = None) -> PublishedComponentResponse:
         return self._request_json(
             'PUT',
             '/api/published_components/{digest}',
@@ -293,7 +293,7 @@ class GeneratedOperationsMixin:
             response_model=PublishedComponentResponse,
         )
 
-    def secrets_list(self) -> Any:
+    def secrets_list(self) -> ListSecretsResponse:
         return self._request_json(
             'GET',
             '/api/secrets/',
@@ -303,7 +303,7 @@ class GeneratedOperationsMixin:
             response_model=ListSecretsResponse,
         )
 
-    def secrets_create(self, secret_name: Any, secret_value: Any, description: Any = None, expires_at: Any = None) -> Any:
+    def secrets_create(self, secret_name: Any, secret_value: Any, description: Any = None, expires_at: Any = None) -> SecretInfoResponse:
         return self._request_json(
             'POST',
             '/api/secrets/',
@@ -313,7 +313,7 @@ class GeneratedOperationsMixin:
             response_model=SecretInfoResponse,
         )
 
-    def secrets_update(self, secret_name: Any, secret_value: Any, description: Any = None, expires_at: Any = None) -> Any:
+    def secrets_update(self, secret_name: Any, secret_value: Any, description: Any = None, expires_at: Any = None) -> SecretInfoResponse:
         return self._request_json(
             'PUT',
             '/api/secrets/{secret_name}',
@@ -323,7 +323,7 @@ class GeneratedOperationsMixin:
             response_model=SecretInfoResponse,
         )
 
-    def secrets_delete(self, secret_name: Any) -> Any:
+    def secrets_delete(self, secret_name: Any) -> None:
         return self._request_json(
             'DELETE',
             '/api/secrets/{secret_name}',
@@ -333,7 +333,7 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-    def users_me(self) -> Any:
+    def users_me(self) -> GetUserResponse | None:
         return self._request_json(
             'GET',
             '/api/users/me',
@@ -343,7 +343,7 @@ class GeneratedOperationsMixin:
             response_model=GetUserResponse,
         )
 
-    def users_me_settings(self, setting_names: Any = None) -> Any:
+    def users_me_settings(self, setting_names: Any = None) -> UserSettingsResponse:
         return self._request_json(
             'GET',
             '/api/users/me/settings',
@@ -353,7 +353,7 @@ class GeneratedOperationsMixin:
             response_model=UserSettingsResponse,
         )
 
-    def users_patch_me_settings(self, body: Any = None) -> Any:
+    def users_patch_me_settings(self, body: Any = None) -> None:
         return self._request_json(
             'PATCH',
             '/api/users/me/settings',
@@ -363,7 +363,7 @@ class GeneratedOperationsMixin:
             response_model=None,
         )
 
-    def users_delete_me_settings(self, setting_names: Any) -> Any:
+    def users_delete_me_settings(self, setting_names: Any) -> None:
         return self._request_json(
             'DELETE',
             '/api/users/me/settings',
