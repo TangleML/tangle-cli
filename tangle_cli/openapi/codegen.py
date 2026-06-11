@@ -292,7 +292,8 @@ def generate_operations(
         "",
         "from __future__ import annotations",
         "",
-        "from typing import Any",
+        "from collections.abc import Mapping",
+        "from typing import TYPE_CHECKING, Any",
         "",
     ]
     if imports:
@@ -302,6 +303,18 @@ def generate_operations(
         "",
         f"class {operations_class_name}:",
         "    \"\"\"Generated checked-in methods for Tangle API operations.\"\"\"",
+        "",
+        "    if TYPE_CHECKING:",
+        "        def _request_json(",
+        "            self,",
+        "            method: str,",
+        "            path: str,",
+        "            *,",
+        "            path_params: Mapping[str, Any] | None = None,",
+        "            params: Mapping[str, Any] | None = None,",
+        "            json_data: Any = None,",
+        "            response_model: Any = None,",
+        "        ) -> Any: ...",
         "",
     ])
 

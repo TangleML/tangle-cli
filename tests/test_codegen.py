@@ -301,6 +301,8 @@ def test_generate_supports_custom_operations_class_name(tmp_path) -> None:
 
     operations = (out / "operations.py").read_text(encoding="utf-8")
     assert "class GeneratedTangleApiExtensions" in operations
+    assert "if TYPE_CHECKING:" in operations
+    assert "def _request_json(" in operations
     assert "__all__ = ['GeneratedTangleApiExtensions']" in operations
 
 
@@ -408,7 +410,12 @@ def test_generate_operations_uses_concrete_return_annotations() -> None:
         },
     })
 
+    assert "from collections.abc import Mapping" in operations
+    assert "from typing import TYPE_CHECKING, Any" in operations
     assert "class GeneratedTangleApiOperations" in operations
+    assert "if TYPE_CHECKING:" in operations
+    assert "path_params: Mapping[str, Any] | None = None" in operations
+    assert "def _request_json(" in operations
     assert "__all__ = ['GeneratedTangleApiOperations']" in operations
     assert "from .models import FooResponse" in operations
     assert "def arrays_list(self) -> list[FooResponse]:" in operations
