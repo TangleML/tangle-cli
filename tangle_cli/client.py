@@ -3,12 +3,12 @@
 ``TangleApiClient`` is the stable wrapper class consumed by downstream tools.
 Endpoint methods are generated offline into :mod:`tangle_cli.generated.operations`
 from the checked-in OpenAPI snapshot; handwritten methods in this file keep the
-higher-level compatibility helpers that downstream callers use.
+higher-level semantic helpers that downstream callers use.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, is_dataclass
 from typing import Any
 from urllib.parse import quote, urljoin
@@ -25,28 +25,14 @@ from .api_transport import (
 from .generated.operations import GeneratedOperationsMixin
 from .logger import Logger, _null_logger
 from .models import (
-    ArtifactInfo,
     ComponentInfo,
     ComponentSpec,
-    ContainerState,
     ExecutionDetails,
     GraphExecutionState,
     PipelineRun,
     RunDetails,
-    SecretInfo,
     TaskSpec,
-    UserInfo,
 )
-
-
-def migrate_to(native_method: str) -> Callable[[Any], Any]:
-    """Attach a machine-readable hint for compatibility wrapper migrations."""
-
-    def decorator(method: Any) -> Any:
-        method.__tangle_migrate_to__ = native_method
-        return method
-
-    return decorator
 
 
 class TangleApiClient(GeneratedOperationsMixin):
@@ -210,44 +196,12 @@ class TangleApiClient(GeneratedOperationsMixin):
         except ValueError:
             return response.text
 
-    # ---- Compatibility helpers consumed by tangle-deploy -----------------
-
-    @migrate_to("artifacts_get")
-    def get_artifact(self, artifact_id: str) -> ArtifactInfo:
-        return ArtifactInfo.from_dict(_to_plain(self.artifacts_get(artifact_id)))
-
-    @migrate_to("artifacts_signed_artifact_url")
-    def get_artifact_signed_url(self, artifact_id: str) -> str | dict[str, Any] | None:
-        data = _to_plain(self.artifacts_signed_artifact_url(artifact_id))
-        return data.get("signed_url") if isinstance(data, dict) else data
+    # ---- Handwritten semantic helpers consumed by tangle-deploy ----------
 
     def get_execution_details(self, execution_id: str) -> ExecutionDetails:
         details = ExecutionDetails.from_dict(_to_plain(self.executions_details(execution_id)))
         self._enrich_execution_tree(details)
         return details
-
-    @migrate_to("executions_graph_execution_state")
-    def get_execution_graph_state(self, execution_id: str) -> GraphExecutionState:
-        return GraphExecutionState.from_dict(_to_plain(self.executions_graph_execution_state(execution_id)))
-
-    @migrate_to("executions_state")
-    def get_execution_graph_state_alt(self, execution_id: str) -> GraphExecutionState:
-        return GraphExecutionState.from_dict(_to_plain(self.executions_state(execution_id)))
-
-    @migrate_to("executions_container_state")
-    def get_execution_container_state(self, execution_id: str) -> ContainerState:
-        return ContainerState.from_dict(_to_plain(self.executions_container_state(execution_id)))
-
-    @migrate_to("executions_artifacts")
-    def get_execution_artifacts(self, execution_id: str) -> dict[str, Any]:
-        return _to_plain(self.executions_artifacts(execution_id))
-
-    @migrate_to("executions_container_log")
-    def get_execution_container_log(self, execution_id: str) -> str | dict[str, Any] | None:
-        data = _to_plain(self.executions_container_log(execution_id))
-        if isinstance(data, dict) and "log_text" in data:
-            return data.get("log_text")
-        return data
 
     def stream_execution_container_log(self, execution_id: str) -> requests.Response:
         response = self._make_request(
@@ -261,84 +215,10 @@ class TangleApiClient(GeneratedOperationsMixin):
         response.raise_for_status()
         return response
 
-    @migrate_to("pipeline_runs_list")
-    def list_pipeline_runs(
-        self,
-        page_token: str | None = None,
-        filter: str | None = None,
-        filter_query: str | None = None,
-        include_pipeline_names: bool = False,
-        include_execution_stats: bool = False,
-    ) -> dict[str, Any]:
-        return _to_plain(
-            self.pipeline_runs_list(
-                page_token=page_token,
-                filter=filter,
-                filter_query=filter_query,
-                include_pipeline_names=include_pipeline_names,
-                include_execution_stats=include_execution_stats,
-            )
-        )
-
-    @migrate_to("pipeline_runs_create")
-    def create_pipeline_run(
-        self,
-        root_task: Any,
-        components: list[Any] | None = None,
-        annotations: dict[str, Any] | None = None,
-    ) -> PipelineRun:
-        body = {
-            "root_task": _to_plain(root_task),
-            "components": _to_plain(components),
-            "annotations": annotations,
-        }
-        return PipelineRun.from_dict(
-            self._request_json("POST", "/api/pipeline_runs/", json_data=self._clean_mapping(body))
-        )
-
-    @migrate_to("pipeline_runs_get")
-    def get_pipeline_run(self, run_id: str) -> PipelineRun:
-        return PipelineRun.from_dict(_to_plain(self.pipeline_runs_get(run_id)))
-
-    @migrate_to("pipeline_runs_cancel")
-    def cancel_pipeline_run(self, run_id: str) -> None:
-        self.pipeline_runs_cancel(run_id)
-        return None
-
-    @migrate_to("pipeline_runs_annotations")
-    def list_pipeline_run_annotations(self, run_id: str) -> dict[str, str | None]:
-        data = self.pipeline_runs_annotations(run_id)
-        return data if isinstance(data, dict) else {}
-
-    @migrate_to("pipeline_runs_put_annotations")
-    def set_pipeline_run_annotation(
-        self,
-        run_id: str,
-        key: str,
-        value: str | None = None,
-    ) -> None:
-        self.pipeline_runs_put_annotations(run_id, key, value=value)
-        return None
-
-    @migrate_to("pipeline_runs_delete_annotations")
-    def delete_pipeline_run_annotation(self, run_id: str, key: str) -> None:
-        self.pipeline_runs_delete_annotations(run_id, key)
-        return None
-
-    @migrate_to("users_me")
-    def get_current_user(self) -> UserInfo | None:
-        data = _to_plain(self.users_me())
-        if data is None:
-            return None
-        return UserInfo(id=data.get("id"), permissions=data.get("permissions", []))
-
-    @migrate_to("components_get")
-    def get_component(self, digest: str) -> ComponentSpec:
-        return ComponentSpec.from_dict(_to_plain(self.components_get(digest)))
-
-    @migrate_to("components_get")
     def get_component_spec(self, digest: str) -> ComponentSpec:
-        return self.get_component(digest)
+        """Return a parsed domain component spec from the generated component endpoint."""
+
+        return ComponentSpec.from_dict(_to_plain(self.components_get(digest)))
 
     def resolve_digest(self, digest: str) -> str:
         """Resolve a component digest/name, following deprecation successors."""
@@ -348,9 +228,9 @@ class TangleApiClient(GeneratedOperationsMixin):
 
         while current not in seen:
             seen.add(current)
-            matches = self.list_published_components(include_deprecated=True, digest=current)
+            matches = self._published_component_rows(include_deprecated=True, digest=current)
             if not matches:
-                matches = self.list_published_components(
+                matches = self._published_component_rows(
                     include_deprecated=True,
                     name_substring=current,
                 )
@@ -367,8 +247,7 @@ class TangleApiClient(GeneratedOperationsMixin):
 
         return current
 
-    @migrate_to("published_components_list")
-    def list_published_components(
+    def _published_component_rows(
         self,
         include_deprecated: bool = False,
         name_substring: str | None = None,
@@ -398,7 +277,7 @@ class TangleApiClient(GeneratedOperationsMixin):
     ) -> list[ComponentInfo]:
         infos = [
             ComponentInfo.from_dict(component)
-            for component in self.list_published_components(
+            for component in self._published_component_rows(
                 include_deprecated=include_deprecated,
                 name_substring=name_substring,
                 published_by_substring=published_by_substring,
@@ -459,31 +338,6 @@ class TangleApiClient(GeneratedOperationsMixin):
                     _index_component_info(found, info)
         return found
 
-    @migrate_to("published_components_create")
-    def publish_component(self, component_reference: dict[str, Any]) -> dict[str, Any]:
-        return _to_plain(
-            self._request_json(
-                "POST",
-                "/api/published_components/",
-                json_data=_to_plain(component_reference),
-            )
-        )
-
-    @migrate_to("published_components_update")
-    def update_published_component(
-        self,
-        digest: str,
-        deprecated: bool | None = None,
-        superseded_by: str | None = None,
-    ) -> dict[str, Any]:
-        return _to_plain(
-            self.published_components_update(
-                digest,
-                deprecated=deprecated,
-                superseded_by=superseded_by,
-            )
-        )
-
     def get_component_search_schema(self) -> dict[str, Any]:
         return _to_plain(
             self._request_json(
@@ -509,14 +363,17 @@ class TangleApiClient(GeneratedOperationsMixin):
         include_execution_state: bool = False,
         execution_id: str | None = None,
     ) -> RunDetails:
-        run = self.get_pipeline_run(run_id)
+        run = PipelineRun.from_dict(_to_plain(self.pipeline_runs_get(run_id)))
         root_execution_id = execution_id or run.root_execution_id
         execution = self.get_execution_details(root_execution_id) if root_execution_id else None
         if execution and not include_implementations:
             execution.strip_implementations()
-        annotations = self.list_pipeline_run_annotations(run_id) if include_annotations else None
+        raw_annotations = self.pipeline_runs_annotations(run_id) if include_annotations else None
+        annotations = raw_annotations if isinstance(raw_annotations, dict) else None
         execution_state = (
-            self.get_execution_graph_state(root_execution_id)
+            GraphExecutionState.from_dict(
+                _to_plain(self.executions_graph_execution_state(root_execution_id))
+            )
             if include_execution_state and root_execution_id
             else None
         )
@@ -530,55 +387,6 @@ class TangleApiClient(GeneratedOperationsMixin):
     def get_run_pipeline_spec(self, run_id: str) -> TaskSpec | None:
         details = self.get_run_details(run_id, include_implementations=True)
         return details.execution.task_spec if details.execution else None
-
-    @migrate_to("secrets_list")
-    def list_secrets(self) -> list[SecretInfo]:
-        data = _to_plain(self.secrets_list())
-        rows = data.get("secrets", []) if isinstance(data, dict) else data or []
-        return [SecretInfo.from_dict(row) for row in rows]
-
-    @migrate_to("secrets_create")
-    def create_secret(
-        self,
-        secret_name: str,
-        secret_value: str,
-        description: str | None = None,
-        expires_at: str | None = None,
-    ) -> SecretInfo:
-        return SecretInfo.from_dict(
-            _to_plain(
-                self.secrets_create(
-                    secret_name=secret_name,
-                    secret_value=secret_value,
-                    description=description,
-                    expires_at=expires_at,
-                )
-            )
-        )
-
-    @migrate_to("secrets_update")
-    def update_secret(
-        self,
-        secret_name: str,
-        secret_value: str,
-        description: str | None = None,
-        expires_at: str | None = None,
-    ) -> SecretInfo:
-        return SecretInfo.from_dict(
-            _to_plain(
-                self.secrets_update(
-                    secret_name=secret_name,
-                    secret_value=secret_value,
-                    description=description,
-                    expires_at=expires_at,
-                )
-            )
-        )
-
-    @migrate_to("secrets_delete")
-    def delete_secret(self, secret_name: str) -> None:
-        self.secrets_delete(secret_name)
-        return None
 
     def _enrich_execution_tree(self, execution: ExecutionDetails) -> None:
         child_ids = execution.raw.get("child_task_execution_ids") or {}
