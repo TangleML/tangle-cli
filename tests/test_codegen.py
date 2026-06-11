@@ -108,6 +108,7 @@ def test_codegen_main_no_args_uses_default_backend_and_prints_summary(
     assert calls[0][1]["backend_path"] == backend
     assert calls[1][0] == "generate"
     assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
+    assert calls[1][1]["model_extension_module"] == codegen.DEFAULT_MODEL_EXTENSION_MODULE
     output = capsys.readouterr().out
     assert f"Loaded OpenAPI from backend: {backend}" in output
     assert f"Wrote {tmp_path / 'openapi.json'}" in output
@@ -161,6 +162,7 @@ def test_codegen_main_from_snapshot_is_explicit(monkeypatch, tmp_path, capsys) -
 
     assert calls[0][0] == "generate"
     assert calls[0][1]["operations_class_name"] == "GeneratedTangleApiOperations"
+    assert calls[0][1]["model_extension_module"] == codegen.DEFAULT_MODEL_EXTENSION_MODULE
     output = capsys.readouterr().out
     assert f"Loaded OpenAPI from snapshot: {tmp_path / 'openapi.json'}" in output
     assert f"Wrote {tmp_path / 'openapi.json'}" not in output
@@ -195,6 +197,35 @@ def test_codegen_main_accepts_custom_operations_class_name(monkeypatch, tmp_path
 
     assert calls[0][0] == "generate"
     assert calls[0][1]["operations_class_name"] == "GeneratedTangleApiExtensions"
+    assert calls[0][1]["model_extension_module"] == codegen.DEFAULT_MODEL_EXTENSION_MODULE
+
+
+def test_codegen_main_accepts_empty_model_extension_module(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, object]] = []
+
+    def fake_generate(openapi_path, generated_dir, **kwargs):
+        calls.append((
+            "generate",
+            {
+                "openapi_path": openapi_path,
+                "generated_dir": generated_dir,
+                **kwargs,
+            },
+        ))
+        return _schema(), _generated_files(tmp_path)
+
+    monkeypatch.setattr(codegen, "generate", fake_generate)
+
+    codegen.main([
+        "--openapi",
+        str(tmp_path / "openapi.json"),
+        "--from-snapshot",
+        "--model-extension-module",
+        "",
+    ])
+
+    assert calls[0][0] == "generate"
+    assert calls[0][1]["model_extension_module"] == ""
 
 
 def test_codegen_main_fetches_from_openapi_url_before_generating(
@@ -240,6 +271,7 @@ def test_codegen_main_fetches_from_openapi_url_before_generating(
     )
     assert calls[1][0] == "generate"
     assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
+    assert calls[1][1]["model_extension_module"] == codegen.DEFAULT_MODEL_EXTENSION_MODULE
     output = capsys.readouterr().out
     assert "Loaded OpenAPI from URL: https://example.com/openapi.json" in output
     assert "Generated 1 operations from 1 paths" in output
@@ -279,6 +311,52 @@ def test_generate_writes_support_modules_to_custom_out(tmp_path) -> None:
     assert "class GeneratedTangleApiOperations" in operations
     assert "def published_components_list" in operations
     assert "name_substring" in operations
+
+
+def test_generate_models_uses_builtin_model_extension_module_by_default() -> None:
+    models = codegen.generate_models({
+        "openapi": "3.1.0",
+        "paths": {},
+        "components": {
+            "schemas": {
+                "GetGraphExecutionStateResponse": {
+                    "type": "object",
+                    "properties": {
+                        "child_execution_status_stats": {"type": "object"},
+                    },
+                }
+            }
+        },
+    })
+
+    assert (
+        "from tangle_cli.generated_model_extensions import "
+        "GetGraphExecutionStateResponseExtensions"
+    ) in models
+    assert (
+        "class GetGraphExecutionStateResponse("
+        "GetGraphExecutionStateResponseExtensions, TangleGeneratedModel):"
+    ) in models
+
+
+def test_generate_models_can_disable_builtin_model_extension_module() -> None:
+    models = codegen.generate_models({
+        "openapi": "3.1.0",
+        "paths": {},
+        "components": {
+            "schemas": {
+                "GetGraphExecutionStateResponse": {
+                    "type": "object",
+                    "properties": {
+                        "child_execution_status_stats": {"type": "object"},
+                    },
+                }
+            }
+        },
+    }, model_extension_module="")
+
+    assert "generated_model_extensions" not in models
+    assert "class GetGraphExecutionStateResponse(TangleGeneratedModel):" in models
 
 
 def test_generate_supports_model_extension_module(monkeypatch, tmp_path) -> None:

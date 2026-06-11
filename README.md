@@ -189,8 +189,7 @@ backend submodule, run:
 ```bash
 git submodule update --init --recursive
 uv sync --group codegen
-uv run --group codegen python -m tangle_cli.openapi.codegen \
-  --model-extension-module tangle_cli.generated_model_extensions
+uv run --group codegen python -m tangle_cli.openapi.codegen
 uv run pytest
 ```
 
@@ -207,8 +206,10 @@ with `git submodule update --init --recursive`.
 operations class name in `<out>/operations.py`; it defaults to
 `GeneratedTangleApiOperations`. `--model-extension-module` points codegen at an
 importable module with a `MODEL_EXTENSIONS` mapping from generated model class
-names to extension class names. Matching generated models inherit those
-extensions before `TangleGeneratedModel`, e.g.:
+names to extension class names. It defaults to
+`tangle_cli.generated_model_extensions`; pass an empty string (`--model-extension-module ""`)
+to disable extensions. Matching generated models inherit those extensions before
+`TangleGeneratedModel`, e.g.:
 
 ```python
 MODEL_EXTENSIONS = {
@@ -232,9 +233,7 @@ To regenerate from the already checked-in snapshot instead of the backend, pass
 `--from-snapshot` explicitly:
 
 ```bash
-uv run python -m tangle_cli.openapi.codegen \
-  --from-snapshot \
-  --model-extension-module tangle_cli.generated_model_extensions
+uv run python -m tangle_cli.openapi.codegen --from-snapshot
 ```
 
 If you already have a remote OpenAPI JSON document, fetch that directly instead:

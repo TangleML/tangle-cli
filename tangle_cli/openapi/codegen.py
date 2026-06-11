@@ -29,6 +29,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GENERATED_DIR = _REPO_ROOT / "tangle_cli" / "generated"
 DEFAULT_BACKEND_PATH = _REPO_ROOT / "third_party" / "tangle"
 DEFAULT_OPERATIONS_CLASS_NAME = "GeneratedTangleApiOperations"
+DEFAULT_MODEL_EXTENSION_MODULE = "tangle_cli.generated_model_extensions"
 
 
 def _safe_identifier(name: str) -> str:
@@ -161,6 +162,12 @@ def _schema_return_annotation(schema: dict[str, Any]) -> str:
 
 
 
+def _normalize_model_extension_module(module_name: str | None) -> str | None:
+    if module_name == "":
+        return None
+    return module_name
+
+
 def _validate_module_name(module_name: str) -> str:
     parts = module_name.split(".")
     if not parts or any(not re.fullmatch(r"[A-Za-z_]\w*", part) or keyword.iskeyword(part) for part in parts):
@@ -169,6 +176,7 @@ def _validate_module_name(module_name: str) -> str:
 
 
 def _model_extension_mapping(module_name: str | None) -> dict[str, str]:
+    module_name = _normalize_model_extension_module(module_name)
     if not module_name:
         return {}
     module_name = _validate_module_name(module_name)
@@ -199,9 +207,10 @@ def _model_extension_mapping(module_name: str | None) -> dict[str, str]:
 
 def generate_models(
     schema: dict[str, Any],
-    model_extension_module: str | None = None,
+    model_extension_module: str | None = DEFAULT_MODEL_EXTENSION_MODULE,
 ) -> str:
     schemas = schema.get("components", {}).get("schemas", {}) or {}
+    model_extension_module = _normalize_model_extension_module(model_extension_module)
     extension_mapping = _model_extension_mapping(model_extension_module)
     lines: list[str] = [
         '"""Generated Pydantic models for the checked-in Tangle OpenAPI schema.\n\nDo not edit by hand; run ``uv run python -m tangle_cli.openapi.codegen``.\n"""',
@@ -518,7 +527,7 @@ def generate(
     generated_dir: str | Path = _GENERATED_DIR,
     *,
     operations_class_name: str = DEFAULT_OPERATIONS_CLASS_NAME,
-    model_extension_module: str | None = None,
+    model_extension_module: str | None = DEFAULT_MODEL_EXTENSION_MODULE,
 ) -> tuple[dict[str, Any], list[Path]]:
     schema = load_openapi_schema(openapi_path)
     output_dir = Path(generated_dir)
@@ -585,10 +594,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--model-extension-module",
-        default=None,
+        default=DEFAULT_MODEL_EXTENSION_MODULE,
         help=(
-            "Optional importable module containing a MODEL_EXTENSIONS mapping "
-            "from generated model class names to extension class names."
+            "Importable module containing a MODEL_EXTENSIONS mapping from "
+            "generated model class names to extension class names; pass an "
+            "empty string to disable. "
+            f"(default: {DEFAULT_MODEL_EXTENSION_MODULE})."
         ),
     )
     parser.add_argument(
