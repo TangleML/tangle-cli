@@ -396,6 +396,23 @@ def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, 
     assert library_result == {"client_ok": True, "folders": []}
 
 
+def test_sdk_published_components_client_from_options_uses_static_client():
+    from tangle_cli.client import TangleApiClient
+
+    client = published_components_cli._client_from_options(
+        base_url="https://api.test",
+        token="token",
+        auth_header="Bearer auth",
+        header=["X-Test: yes"],
+    )
+
+    assert isinstance(client, TangleApiClient)
+    assert client.base_url == "https://api.test"
+    assert client.token == "token"
+    assert client.auth_header == "Bearer auth"
+    assert client.header == ["X-Test: yes"]
+
+
 def test_sdk_published_components_inspect_requires_name_or_digest():
     app = cli.build_app()
 

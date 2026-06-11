@@ -1,4 +1,4 @@
-"""Tests for generic OpenAPI-backed component inspection helpers."""
+"""Tests for static-client-backed component inspection helpers."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from tangle_cli.component_inspector import (
     search_components,
     transparency_check,
 )
-from tangle_cli.models import ComponentSpec
+from tangle_cli.models import ComponentInfo, ComponentSpec
 
 
 @dataclass
@@ -47,35 +47,33 @@ class FakeClient:
             },
         }
 
-    def components_get(self, digest: str) -> Any:
-        return self.component if digest == "abc123" else None
+    def get_component_spec(self, digest: str) -> ComponentSpec | None:
+        if digest != "abc123":
+            return None
+        return ComponentSpec.from_dict(self.component)
 
-    def published_components_list(self, **params: Any) -> Any:
+    def list_published_component_infos(self, **params: Any) -> list[ComponentInfo]:
         if params.get("digest") == "abc123" or params.get("name_substring") == "demo":
-            return {
-                "published_components": [
-                    {
-                        "name": "demo",
-                        "digest": "abc123",
-                        "version": "1.2.3",
-                        "published_by": "user@example.com",
-                        "description": "Demo component",
-                    }
-                ]
-            }
+            return [
+                ComponentInfo(
+                    name="demo",
+                    digest="abc123",
+                    version="1.2.3",
+                    published_by="user@example.com",
+                    description="Demo component",
+                )
+            ]
         if params.get("digest") == "old":
-            return {
-                "published_components": [
-                    {
-                        "name": "demo",
-                        "digest": "old",
-                        "version": "1.0.0",
-                        "deprecated": True,
-                        "superseded_by": "abc123",
-                    }
-                ]
-            }
-        return {"published_components": []}
+            return [
+                ComponentInfo(
+                    name="demo",
+                    digest="old",
+                    version="1.0.0",
+                    deprecated=True,
+                    superseded_by="abc123",
+                )
+            ]
+        return []
 
 
 class TestTransparencyCheck:
@@ -170,11 +168,11 @@ class TestComponentLibrary:
                 self.component_name = component_name
                 self.paths: list[str] = []
 
-            def components_get(self, digest: str) -> Any:
+            def get_component_spec(self, digest: str) -> ComponentSpec | None:
                 return None
 
-            def published_components_list(self, **params: Any) -> Any:
-                return {"published_components": []}
+            def list_published_component_infos(self, **params: Any) -> list[ComponentInfo]:
+                return []
 
             def request_path(self, path: str):
                 self.paths.append(path)
@@ -246,8 +244,8 @@ class TestInspectComponents:
 
     def test_search_components_handles_null_description(self):
         class NullDescriptionClient(FakeClient):
-            def published_components_list(self, **params: Any) -> Any:
-                return {"published_components": [{"name": "demo", "digest": "abc123", "description": None}]}
+            def list_published_component_infos(self, **params: Any) -> list[ComponentInfo]:
+                return [ComponentInfo(name="demo", digest="abc123", description=None)]
 
         result = search_components(NullDescriptionClient(), name="demo")
 

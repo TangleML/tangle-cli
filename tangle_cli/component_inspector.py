@@ -3,67 +3,36 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import Any, Protocol
+from typing import Any
 from urllib.parse import urljoin, urlparse
 from weakref import WeakKeyDictionary
 
-import httpx
 import yaml
 
-from tangle_cli.api_transport import _request_headers
+from tangle_cli.client import TangleApiClient
 from tangle_cli.models import ComponentInfo, ComponentSpec
 
 # ============================================================================
-# Client protocol helpers
+# Client helpers
 # ============================================================================
 
 
-class ComponentApiClient(Protocol):
-    """Small subset of Tangle API clients used by component inspection."""
-
-    base_url: str
-
-
-def _request_path(client: ComponentApiClient, path: str) -> httpx.Response:
+def _request_path(client: TangleApiClient, path: str) -> Any:
     """Fetch an API-origin path using the client's auth settings.
 
     ``component_library.yaml`` is not guaranteed to be represented as an
     OpenAPI operation, but it is served from the same origin as the API. This
-    helper preserves the client's base URL and auth/header precedence
-    without depending on the removed legacy hand-written client module.
+    helper preserves the static client's base URL, session, and auth/header
+    precedence even though the library YAML is outside the OpenAPI schema.
     """
 
     custom_request_path = getattr(client, "request_path", None)
     if callable(custom_request_path):
         response = custom_request_path(path)
-        if hasattr(response, "raise_for_status"):
-            response.raise_for_status()
-        return response
-
-    base_url = client.base_url.rstrip("/") + "/"
-    url = urljoin(base_url, path.lstrip("/"))
-    headers = _request_headers(
-        getattr(client, "token", None),
-        getattr(client, "header", None),
-        getattr(client, "auth_header", None),
-        getattr(client, "headers", None),
-    )
-    response = httpx.request(
-        "GET",
-        url,
-        headers=headers,
-        timeout=getattr(client, "timeout", 30.0),
-    )
+    else:
+        response = client._make_request("GET", path)
     response.raise_for_status()
     return response
-
-
-def _to_plain(value: Any) -> Any:
-    if hasattr(value, "to_dict") and callable(value.to_dict):
-        return value.to_dict()
-    if hasattr(value, "model_dump") and callable(value.model_dump):
-        return value.model_dump(by_alias=True)
-    return value
 
 
 def _is_not_found_error(exc: Exception) -> bool:
@@ -71,53 +40,23 @@ def _is_not_found_error(exc: Exception) -> bool:
     return getattr(response, "status_code", None) == 404
 
 
-def _component_response(client: ComponentApiClient, digest: str) -> dict[str, Any] | None:
-    try:
-        components_get = getattr(client, "components_get", None)
-        if callable(components_get):
-            data = components_get(digest)
-        else:
-            data = client.components.get(digest=digest)  # type: ignore[attr-defined]
-    except Exception as exc:
-        if _is_not_found_error(exc):
-            return None
-        raise
-    data = _to_plain(data)
-    return data if isinstance(data, dict) else None
-
-
 def _published_components(
-    client: ComponentApiClient,
+    client: TangleApiClient,
     *,
     include_deprecated: bool = False,
     name_substring: str | None = None,
     published_by_substring: str | None = None,
     digest: str | None = None,
-) -> list[dict[str, Any]]:
-    published_components_list = getattr(client, "published_components_list", None)
-    if callable(published_components_list):
-        result = published_components_list(
-            include_deprecated=include_deprecated,
-            name_substring=name_substring,
-            published_by_substring=published_by_substring,
-            digest=digest,
-        )
-    else:
-        result = client.published_components.list(  # type: ignore[attr-defined]
-            include_deprecated=include_deprecated,
-            name_substring=name_substring,
-            published_by_substring=published_by_substring,
-            digest=digest,
-        )
-    result = _to_plain(result)
-    if isinstance(result, dict) and isinstance(result.get("published_components"), list):
-        return result["published_components"]
-    if isinstance(result, list):
-        return result
-    return []
+) -> list[ComponentInfo]:
+    return client.list_published_component_infos(
+        include_deprecated=include_deprecated,
+        name_substring=name_substring,
+        published_by_substring=published_by_substring,
+        digest=digest,
+    )
 
 
-def _resolve_digest(client: ComponentApiClient, digest: str) -> str:
+def _resolve_digest(client: TangleApiClient, digest: str) -> str:
     current = digest
     seen: set[str] = set()
 
@@ -133,10 +72,10 @@ def _resolve_digest(client: ComponentApiClient, digest: str) -> str:
             break
 
         meta = published[0]
-        if not meta.get("deprecated", False):
+        if not meta.deprecated:
             break
 
-        superseded_by = meta.get("superseded_by")
+        superseded_by = meta.superseded_by
         if not superseded_by:
             break
 
@@ -158,7 +97,7 @@ _LibraryState = tuple[dict[str, Any], dict[str, dict[str, Any]]]
 _component_libraries_by_client: WeakKeyDictionary[Any, _LibraryState] = WeakKeyDictionary()
 
 
-def _library_fetch_path(client: ComponentApiClient, url: str) -> str | None:
+def _library_fetch_path(client: TangleApiClient, url: str) -> str | None:
     """Return a same-origin path for a component-library URL, or None.
 
     The component library is supplied by the Tangle API origin. Treat URLs
@@ -179,7 +118,7 @@ def _library_fetch_path(client: ComponentApiClient, url: str) -> str | None:
     return path
 
 
-def _fetch_library_component(client: ComponentApiClient, url: str) -> ComponentSpec:
+def _fetch_library_component(client: TangleApiClient, url: str) -> ComponentSpec:
     path = _library_fetch_path(client, url)
     if path is None:
         return ComponentSpec()
@@ -191,7 +130,7 @@ def _fetch_library_component(client: ComponentApiClient, url: str) -> ComponentS
         return ComponentSpec()
 
 
-def _parse_component_library(raw: dict[str, Any], client: ComponentApiClient) -> dict[str, Any]:
+def _parse_component_library(raw: dict[str, Any], client: TangleApiClient) -> dict[str, Any]:
     """Parse the component library YAML into entries with full specs.
 
     Each entry has ``url``, ``digest``, and ``spec`` (full, unstripped). Use
@@ -234,7 +173,7 @@ def _strip_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _ensure_library_loaded(client: ComponentApiClient) -> _LibraryState:
+def _ensure_library_loaded(client: TangleApiClient) -> _LibraryState:
     """Fetch and cache the component library for this client if needed."""
 
     cached = _component_libraries_by_client.get(client)
@@ -259,7 +198,7 @@ def _ensure_library_loaded(client: ComponentApiClient) -> _LibraryState:
     return state
 
 
-def get_standard_library(client: ComponentApiClient) -> dict[str, Any]:
+def get_standard_library(client: TangleApiClient) -> dict[str, Any]:
     """Return the standard component library organised by folders.
 
     Each component entry has a stripped spec (no implementation blocks), an
@@ -362,7 +301,7 @@ def _resolve_git_source(spec: ComponentSpec) -> dict[str, Any] | None:
 
 def _enrich_with_spec(
     info: ComponentInfo,
-    client: ComponentApiClient,
+    client: TangleApiClient,
 ) -> None:
     """Fetch the full component data and attach it to *info*."""
 
@@ -374,24 +313,24 @@ def _enrich_with_spec(
         info.spec_error = str(e)
 
 
-def _get_component_spec(client: ComponentApiClient, digest: str) -> ComponentSpec | None:
-    get_component_spec = getattr(client, "get_component_spec", None)
-    if callable(get_component_spec):
-        return get_component_spec(digest)
-    data = _component_response(client, digest)
-    return ComponentSpec.from_dict(data) if data is not None else None
+def _get_component_spec(client: TangleApiClient, digest: str) -> ComponentSpec | None:
+    try:
+        return client.get_component_spec(digest)
+    except Exception as exc:
+        if _is_not_found_error(exc):
+            return None
+        raise
 
 
 def inspect_by_digest(
-    client: ComponentApiClient,
+    client: TangleApiClient,
     digest: str,
     full_spec: bool = False,
     follow_deprecated: bool = False,
 ) -> dict[str, Any]:
     """Inspect a single component by digest.
 
-    Fetches the full spec via the ``components.get`` OpenAPI operation and
-    publication metadata via ``published-components.list``.
+    Fetches the full spec and publication metadata via static client helpers.
     """
 
     if follow_deprecated:
@@ -419,7 +358,7 @@ def inspect_by_digest(
     pub_info = published[0] if published else None
 
     if pub_info:
-        info = ComponentInfo.from_dict(pub_info)
+        info = pub_info
     else:
         info = ComponentInfo(digest=digest)
         info.version = comp.version if comp else None
@@ -443,7 +382,7 @@ def inspect_by_digest(
 
 
 def inspect_by_name(
-    client: ComponentApiClient,
+    client: TangleApiClient,
     name: str,
     include_all_versions: bool = False,
     include_deprecated: bool = False,
@@ -458,9 +397,7 @@ def inspect_by_name(
         include_deprecated=include_deprecated,
         published_by_substring=published_by,
     )
-    published = [
-        c for c in published if c.get("name", "").lower() == name.lower()
-    ]
+    published = [c for c in published if str(c.name or "").lower() == name.lower()]
 
     if not published:
         _, library_cache = _ensure_library_loaded(client)
@@ -481,10 +418,10 @@ def inspect_by_name(
             "message": f"No published component found with name: {name}",
         }
 
-    def _version_key(c: dict[str, Any]) -> tuple[int, ...]:
+    def _version_key(component: ComponentInfo) -> tuple[int, ...]:
         """Parse version string into numeric tuple for proper sorting."""
 
-        v = c.get("version") or "0.0.1"
+        v = str(component.version or "0.0.1")
         try:
             return tuple(int(p) for p in v.split("."))
         except ValueError:
@@ -496,8 +433,7 @@ def inspect_by_name(
         published = published[:1]
 
     versions: list[dict[str, Any]] = []
-    for pub in published:
-        info = ComponentInfo.from_dict(pub)
+    for info in published:
         _enrich_with_spec(info, client)
         entry = info.to_dict(strip_spec=not full_spec)
         if info.component_spec:
@@ -518,7 +454,7 @@ def inspect_by_name(
 
 
 def search_components(
-    client: ComponentApiClient,
+    client: TangleApiClient,
     name: str | None = None,
     include_deprecated: bool = False,
     published_by: str | None = None,
@@ -537,11 +473,11 @@ def search_components(
     results = []
     for comp in components:
         results.append({
-            "name": comp.get("name"),
-            "digest": comp.get("digest"),
-            "version": comp.get("version"),
-            "deprecated": comp.get("deprecated", False),
-            "description": (comp.get("description") or "")[:200],
+            "name": comp.name,
+            "digest": comp.digest,
+            "version": comp.version,
+            "deprecated": comp.deprecated,
+            "description": (comp.description or "")[:200],
         })
 
     return {
