@@ -1200,12 +1200,13 @@ def test_refresh_uses_config_with_cli_precedence(monkeypatch, tmp_path, capsys):
         encoding="utf-8",
     )
 
-    def fake_refresh_schema(base_url, token, header, auth_header):
+    def fake_refresh_schema(base_url, token, header, auth_header, **kwargs):
         calls.append({
             "base_url": base_url,
             "token": token,
             "header": header,
             "auth_header": auth_header,
+            **kwargs,
         })
         path = tmp_path / "cached.json"
         return SCHEMA, path
@@ -1229,8 +1230,63 @@ def test_refresh_uses_config_with_cli_precedence(monkeypatch, tmp_path, capsys):
         "token": "config-token",
         "header": ["X-Config: yes"],
         "auth_header": "Bearer config-auth",
+        "include_env_credentials": True,
     }]
     assert "Cached OpenAPI schema for https://cli.example" in capsys.readouterr().out
+
+
+def test_refresh_config_base_url_suppresses_env_credentials(monkeypatch, tmp_path):
+    requests = []
+    config = tmp_path / "refresh.yaml"
+    config.write_text("base_url: http://config.test\n", encoding="utf-8")
+
+    def fake_get(url, **kwargs):
+        requests.append({"url": url, **kwargs})
+        return json_response("GET", url, SCHEMA)
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("TANGLE_API_TOKEN", "env-token")
+    monkeypatch.setenv("TANGLE_API_AUTH_HEADER", "Bearer env-auth")
+    monkeypatch.setenv("TANGLE_API_HEADERS", "X-Env: secret")
+    monkeypatch.setattr(api_cli.httpx, "get", fake_get)
+    app = api_cli.build_app(SCHEMA)
+
+    run_app(app, ["refresh", "--config", str(config)])
+
+    assert requests[-1]["url"] == "http://config.test/openapi.json"
+    assert "Authorization" not in requests[-1]["headers"]
+    assert "X-Env" not in requests[-1]["headers"]
+
+
+def test_refresh_config_base_url_preserves_config_auth(monkeypatch, tmp_path):
+    requests = []
+    config = tmp_path / "refresh.yaml"
+    config.write_text(
+        "base_url: http://config.test\n"
+        "token: config-token\n"
+        "auth_header: Basic config-auth\n"
+        "header:\n"
+        "  - 'X-Config: yes'\n",
+        encoding="utf-8",
+    )
+
+    def fake_get(url, **kwargs):
+        requests.append({"url": url, **kwargs})
+        return json_response("GET", url, SCHEMA)
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("TANGLE_API_TOKEN", "env-token")
+    monkeypatch.setenv("TANGLE_API_AUTH_HEADER", "Bearer env-auth")
+    monkeypatch.setenv("TANGLE_API_HEADERS", "X-Env: secret")
+    monkeypatch.setattr(api_cli.httpx, "get", fake_get)
+    app = api_cli.build_app(SCHEMA)
+
+    run_app(app, ["refresh", "--config", str(config)])
+
+    assert requests[-1]["url"] == "http://config.test/openapi.json"
+    assert requests[-1]["headers"]["Authorization"] == "Basic config-auth"
+    assert requests[-1]["headers"]["X-Config"] == "yes"
+    assert "X-Env" not in requests[-1]["headers"]
 
 
 def test_reset_cache_uses_config_base_url(monkeypatch, tmp_path, capsys):
