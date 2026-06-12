@@ -28,6 +28,8 @@ uv run tangle sdk components annotations set
 uv run tangle sdk components generate from-python path/to/component.py --image python:3.12
 uv run tangle sdk components generate from-python-function path/to/component.py  # compatibility alias
 uv run tangle sdk components bump-version path/to/component.yaml
+uv run tangle sdk components publish path/to/component.yaml --base-url https://api.example
+uv run tangle sdk components deprecate sha256:... --superseded-by sha256:...
 uv run tangle sdk published-components --help
 uv run tangle sdk published-components search transformer
 uv run tangle sdk published-components inspect transformer
@@ -43,10 +45,50 @@ modules. The command accepts `--function`, `--output`, `--name`, `--image`,
 in YAML, and updates/regenerates a referenced Python source when the component
 contains `python_original_code_path` annotations.
 
-Both commands accept `--config` YAML/JSON files via `tangle_cli.args_container`.
-Use keys such as `python_file`, `image`, `function`, `mode`, `resolve_root`,
-`yaml_file`, `set_version`, and `update_timestamp`; explicit CLI values take
-precedence over config-file values.
+Generation and version-bump commands accept `--config` YAML/JSON files via
+`tangle_cli.args_container`. Use keys such as `python_file`, `image`,
+`function`, `mode`, `resolve_root`, `yaml_file`, `set_version`, and
+`update_timestamp`; explicit CLI values take precedence over config-file values.
+
+Local components can also be published to, or deprecated in, a Tangle component
+registry using the native generated/static API client:
+
+```bash
+uv run tangle sdk components publish components/my-component.yaml \
+  --base-url https://api.example \
+  --image python:3.12 \
+  --name "My component"
+
+uv run tangle sdk components publish components/my-component.yaml --dry-run
+uv run tangle sdk components deprecate sha256:old --superseded-by sha256:new
+```
+
+`publish` accepts `--image`, `--name`, `--description`, `--annotations` (JSON),
+`--dry-run`, generic git metadata fields, generic API auth fields (`--base-url`,
+`--token`, `--auth-header`, `-H/--header`), and `--config`. `deprecate` accepts
+`--superseded-by`, the same generic API auth fields, and `--config`. These are
+single-component OSS commands; batch `publish-all`, dbt generation,
+from-container generation, and backend-specific search-v2 workflows remain out
+of this lab CLI slice.
+
+Example publish config:
+
+```yaml
+component_path: components/my-component.yaml
+image: python:3.12
+name: My component
+annotations:
+  owner: platform
+base_url: https://api.example
+```
+
+Example deprecate config:
+
+```yaml
+digest: sha256:old
+superseded_by: sha256:new
+base_url: https://api.example
+```
 
 ## API commands
 
