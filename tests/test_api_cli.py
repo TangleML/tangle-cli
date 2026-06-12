@@ -715,6 +715,108 @@ def test_generated_command_with_ambient_auth_still_requires_explicit_base_url(mo
         app(["pipeline-runs", "list"])
 
 
+def test_cold_schema_bootstrap_forwards_cli_auth_flags(monkeypatch, tmp_path):
+    fetched = []
+
+    def fail_load_schema():
+        raise FileNotFoundError("missing tangle_api.schema")
+
+    def fake_load_or_fetch_schema(base_url, **kwargs):
+        fetched.append({"base_url": base_url, **kwargs})
+        return {
+            "openapi": "3.1.0",
+            "paths": {"/cached-extension": {"get": {"summary": "Cached extension"}}},
+            "components": {"schemas": {}},
+        }
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", fail_load_schema)
+    monkeypatch.setattr(api_cli, "load_or_fetch_schema", fake_load_or_fetch_schema)
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        [
+            "tangle",
+            "api",
+            "cached-extension",
+            "--base-url",
+            "http://api.test",
+            "--token",
+            "cli-token",
+            "--auth-header",
+            "Basic abc",
+            "-H",
+            "X-Trace: 1",
+            "--header",
+            "X-Other: 2",
+        ],
+    )
+
+    schema = api_cli._schema_for_current_invocation()
+
+    assert schema["paths"] == {"/cached-extension": {"get": {"summary": "Cached extension"}}}
+    assert fetched == [
+        {
+            "base_url": "http://api.test",
+            "token": "cli-token",
+            "auth_header": "Basic abc",
+            "header": ["X-Trace: 1", "X-Other: 2"],
+        }
+    ]
+
+
+def test_cold_schema_bootstrap_forwards_config_auth_flags(monkeypatch, tmp_path):
+    fetched = []
+    config = tmp_path / "api-config.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "base_url: http://api.test",
+                "token: config-token",
+                "auth_header: Basic config-auth",
+                "header:",
+                "  - 'X-Config: yes'",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_load_schema():
+        raise FileNotFoundError("missing tangle_api.schema")
+
+    def fake_load_or_fetch_schema(base_url, **kwargs):
+        fetched.append({"base_url": base_url, **kwargs})
+        return {
+            "openapi": "3.1.0",
+            "paths": {"/cached-extension": {"get": {"summary": "Cached extension"}}},
+            "components": {"schemas": {}},
+        }
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("TANGLE_API_TOKEN", "env-token")
+    monkeypatch.setenv("TANGLE_API_AUTH_HEADER", "Bearer env-auth")
+    monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", fail_load_schema)
+    monkeypatch.setattr(api_cli, "load_or_fetch_schema", fake_load_or_fetch_schema)
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "cached-extension", "--config", str(config)],
+    )
+
+    schema = api_cli._schema_for_current_invocation()
+
+    assert schema["paths"] == {"/cached-extension": {"get": {"summary": "Cached extension"}}}
+    assert fetched == [
+        {
+            "base_url": "http://api.test",
+            "token": "config-token",
+            "auth_header": "Basic config-auth",
+            "header": ["X-Config: yes"],
+        }
+    ]
+
+
 def test_official_static_command_without_schema_fails_with_actionable_error(monkeypatch, tmp_path):
     def fail_load_schema():
         raise FileNotFoundError("missing tangle_api.schema")
