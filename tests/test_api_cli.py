@@ -396,6 +396,111 @@ def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, 
     assert library_result == {"client_ok": True, "folders": []}
 
 
+def test_sdk_published_components_search_uses_config_with_cli_precedence(monkeypatch, tmp_path, capsys):
+    app = cli.build_app()
+    config = tmp_path / "published.yaml"
+    config.write_text(
+        "name: from-config\n"
+        "include_deprecated: true\n"
+        "published_by: config@example.com\n"
+        "digest: sha256:config\n"
+        "base_url: https://config.example\n"
+        "header:\n"
+        "  - 'X-Config: yes'\n",
+        encoding="utf-8",
+    )
+    fake_client = object()
+    client_calls = []
+
+    def fake_client_from_options(**kwargs):
+        client_calls.append(kwargs)
+        return fake_client
+
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(
+        published_components_cli,
+        "search_components",
+        lambda client, **kwargs: {"client_ok": client is fake_client, "search": kwargs},
+    )
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "published-components",
+            "search",
+            "from-cli",
+            "--config",
+            str(config),
+            "--digest",
+            "sha256:cli",
+        ],
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["search"] == {
+        "name": "from-cli",
+        "include_deprecated": True,
+        "published_by": "config@example.com",
+        "digest": "sha256:cli",
+    }
+    assert client_calls[-1]["base_url"] == "https://config.example"
+    assert client_calls[-1]["header"] == ["X-Config: yes"]
+
+
+def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tmp_path, capsys):
+    app = cli.build_app()
+    inspect_config = tmp_path / "inspect.yaml"
+    inspect_config.write_text(
+        "digest: sha256:config\n"
+        "follow_deprecated: true\n"
+        "full_spec: true\n"
+        "base_url: https://inspect.example\n",
+        encoding="utf-8",
+    )
+    library_config = tmp_path / "library.json"
+    library_config.write_text(json.dumps({"base_url": "https://library.example"}), encoding="utf-8")
+    fake_client = object()
+    client_calls = []
+
+    def fake_client_from_options(**kwargs):
+        client_calls.append(kwargs)
+        return fake_client
+
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(
+        published_components_cli,
+        "inspect_by_digest",
+        lambda client, digest, **kwargs: {
+            "client_ok": client is fake_client,
+            "digest": digest,
+            "inspect": kwargs,
+        },
+    )
+    monkeypatch.setattr(
+        published_components_cli,
+        "get_standard_library",
+        lambda client: {"client_ok": client is fake_client},
+    )
+
+    run_app(
+        app,
+        ["sdk", "published-components", "inspect", "--config", str(inspect_config)],
+    )
+    inspect_result = json.loads(capsys.readouterr().out)
+    assert inspect_result["digest"] == "sha256:config"
+    assert inspect_result["inspect"] == {"full_spec": True, "follow_deprecated": True}
+    assert client_calls[-1]["base_url"] == "https://inspect.example"
+
+    run_app(
+        app,
+        ["sdk", "published-components", "library", "--config", str(library_config)],
+    )
+    library_result = json.loads(capsys.readouterr().out)
+    assert library_result == {"client_ok": True}
+    assert client_calls[-1]["base_url"] == "https://library.example"
+
+
 def test_sdk_published_components_client_from_options_uses_static_client():
     from tangle_cli.client import TangleApiClient
 
@@ -813,6 +918,100 @@ def test_reset_cache_reports_noop_when_cache_absent(monkeypatch, tmp_path, capsy
     assert str(path) in output
 
 
+def test_refresh_uses_config_with_cli_precedence(monkeypatch, tmp_path, capsys):
+    calls = []
+    config = tmp_path / "refresh.yaml"
+    config.write_text(
+        "base_url: https://config.example\n"
+        "token: config-token\n"
+        "auth_header: Bearer config-auth\n"
+        "header:\n"
+        "  - 'X-Config: yes'\n",
+        encoding="utf-8",
+    )
+
+    def fake_refresh_schema(base_url, token, header, auth_header):
+        calls.append({
+            "base_url": base_url,
+            "token": token,
+            "header": header,
+            "auth_header": auth_header,
+        })
+        path = tmp_path / "cached.json"
+        return SCHEMA, path
+
+    monkeypatch.setattr(api_cli, "refresh_schema", fake_refresh_schema)
+    app = api_cli.build_app(SCHEMA)
+
+    run_app(
+        app,
+        [
+            "refresh",
+            "--config",
+            str(config),
+            "--base-url",
+            "https://cli.example",
+        ],
+    )
+
+    assert calls == [{
+        "base_url": "https://cli.example",
+        "token": "config-token",
+        "header": ["X-Config: yes"],
+        "auth_header": "Bearer config-auth",
+    }]
+    assert "Cached OpenAPI schema for https://cli.example" in capsys.readouterr().out
+
+
+def test_reset_cache_uses_config_base_url(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    config = tmp_path / "reset.yaml"
+    config.write_text("base_url: https://config.example\n", encoding="utf-8")
+    api_cli.write_cached_schema(SCHEMA, "https://config.example")
+    path = api_cli.cache_path("https://config.example")
+    assert path.exists()
+
+    app = api_cli.build_app(SCHEMA)
+    run_app(app, ["reset-cache", "--config", str(config)])
+
+    output = capsys.readouterr().out
+    assert not path.exists()
+    assert "Deleted cached OpenAPI schema for https://config.example" in output
+
+
+def test_config_can_select_cache_schema_at_build_time(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    config = tmp_path / "schema-source.yaml"
+    config.write_text(
+        "base_url: http://api.test\n"
+        "schema_source: cache\n",
+        encoding="utf-8",
+    )
+    api_cli.write_cached_schema(
+        _oasis_like_schema_with_published_component_extensions(),
+        "http://api.test",
+    )
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        [
+            "tangle",
+            "api",
+            "published-components",
+            "list",
+            "--config",
+            str(config),
+            "--help",
+        ],
+    )
+
+    app = api_cli.build_app()
+    run_app(app, ["published-components", "list", "--config", str(config), "--help"])
+
+    output = capsys.readouterr().out
+    assert "--cached-only" in output
+
+
 def test_reset_cache_returns_auto_mode_to_official_only(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
@@ -942,6 +1141,77 @@ def test_body_json_can_satisfy_required_simple_body_fields(monkeypatch):
 
     assert requests[-1]["url"] == "http://api.test/api/pipeline_runs/"
     assert json.loads(requests[-1]["content"].decode()) == {"name": "demo"}
+
+
+def test_dynamic_command_uses_config_with_cli_precedence(monkeypatch, tmp_path):
+    requests = []
+    config = tmp_path / "operation.yaml"
+    config.write_text(
+        "base_url: http://config.test\n"
+        "token: config-token\n"
+        "filter: active\n"
+        "limit: 9\n"
+        "include_stats: true\n"
+        "tag:\n"
+        "  - config-tag\n",
+        encoding="utf-8",
+    )
+
+    def fake_request(method, url, **kwargs):
+        requests.append({"method": method, "url": url, **kwargs})
+        return json_response(method, url, {"ok": True})
+
+    monkeypatch.setattr(api_cli.httpx, "request", fake_request)
+    app = api_cli.build_app(SCHEMA)
+
+    run_app(
+        app,
+        [
+            "pipeline-runs",
+            "list",
+            "--config",
+            str(config),
+            "--limit",
+            "3",
+        ],
+    )
+
+    assert (
+        requests[-1]["url"]
+        == "http://config.test/api/pipeline_runs/?limit=3&filter=active&include_stats=True&tag=config-tag"
+    )
+    assert requests[-1]["headers"]["Authorization"] == "Bearer config-token"
+
+
+def test_dynamic_command_required_path_and_body_can_come_from_config(monkeypatch, tmp_path):
+    requests = []
+    get_config = tmp_path / "get.yaml"
+    get_config.write_text(
+        "base_url: http://config.test\n"
+        "id: run/1\n",
+        encoding="utf-8",
+    )
+    create_config = tmp_path / "create.yaml"
+    create_config.write_text(
+        "base_url: http://config.test\n"
+        "body:\n"
+        "  name: from-config\n",
+        encoding="utf-8",
+    )
+
+    def fake_request(method, url, **kwargs):
+        requests.append({"method": method, "url": url, **kwargs})
+        return json_response(method, url, {"ok": True})
+
+    monkeypatch.setattr(api_cli.httpx, "request", fake_request)
+    app = api_cli.build_app(SCHEMA)
+
+    run_app(app, ["pipeline-runs", "get", "--config", str(get_config)])
+    assert requests[-1]["url"] == "http://config.test/api/pipeline_runs/run%2F1"
+
+    run_app(app, ["pipeline-runs", "create", "--config", str(create_config)])
+    assert requests[-1]["url"] == "http://config.test/api/pipeline_runs/"
+    assert json.loads(requests[-1]["content"].decode()) == {"name": "from-config"}
 
 
 def test_dynamic_command_invocation_maps_path_query_and_body(monkeypatch, capsys):
