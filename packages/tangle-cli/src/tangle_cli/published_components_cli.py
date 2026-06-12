@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 from typing import Annotated, Any
 
 from cyclopts import App, Parameter
@@ -86,6 +87,10 @@ def _load_args(config: str | None, **kwargs: Any) -> list[ArgsContainer]:
         raise SystemExit(f"Config error: {exc}") from exc
 
 
+def _optional_path(value: str | pathlib.Path | None) -> pathlib.Path | None:
+    return pathlib.Path(value) if value is not None else None
+
+
 def _api_arg_specs(
     *,
     base_url: str | None = None,
@@ -123,6 +128,18 @@ def get_standard_library(*args: Any, **kwargs: Any) -> Any:
     from .component_inspector import get_standard_library as _get_standard_library
 
     return _get_standard_library(*args, **kwargs)
+
+
+def publish_component(*args: Any, **kwargs: Any) -> Any:
+    from .component_publisher import publish_component as _publish_component
+
+    return _publish_component(*args, **kwargs)
+
+
+def deprecate_component(*args: Any, **kwargs: Any) -> Any:
+    from .component_publisher import deprecate_component as _deprecate_component
+
+    return _deprecate_component(*args, **kwargs)
 
 
 @app.command(name="search")
@@ -259,3 +276,112 @@ def published_components_library(
             header=args.header,
         )
         _print_json(get_standard_library(client))
+
+
+@app.command(name="publish")
+def published_components_publish(
+    component_path: pathlib.Path | None = None,
+    *,
+    image: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+    annotations: Annotated[
+        str | None,
+        Parameter(help="Custom annotations as a JSON object."),
+    ] = None,
+    dry_run: bool | None = None,
+    git_remote_sha: str | None = None,
+    git_remote_branch: str | None = None,
+    git_remote_url: str | None = None,
+    git_root: pathlib.Path | None = None,
+    base_url: BaseUrlOption = None,
+    token: TokenOption = None,
+    auth_header: AuthHeaderOption = None,
+    header: HeaderOption = None,
+    config: ConfigOption = None,
+) -> None:
+    """Publish one component YAML file to a Tangle component registry."""
+
+    for args in _load_args(
+        config,
+        component_path=("component_path", component_path, None, False, True, _optional_path),
+        image=(image, None),
+        name=(name, None),
+        description=(description, None),
+        annotations=("annotations", annotations, None, True),
+        dry_run=(dry_run, None),
+        git_remote_sha=(git_remote_sha, None),
+        git_remote_branch=(git_remote_branch, None),
+        git_remote_url=(git_remote_url, None),
+        git_root=(git_root, None, _optional_path),
+        **_api_arg_specs(
+            base_url=base_url,
+            token=token,
+            auth_header=auth_header,
+            header=header,
+        ),
+    ):
+        client = None if args.dry_run else _client_from_options(
+            base_url=args.base_url,
+            token=args.token,
+            auth_header=args.auth_header,
+            header=args.header,
+        )
+        result = publish_component(
+            client,
+            args.component_path,
+            image=args.image,
+            name=args.name,
+            description=args.description,
+            annotations=args.annotations,
+            dry_run=bool(args.dry_run),
+            git_remote_sha=args.git_remote_sha,
+            git_remote_branch=args.git_remote_branch,
+            git_remote_url=args.git_remote_url,
+            git_root=args.git_root,
+        )
+        result_dict = result.to_dict() if hasattr(result, "to_dict") else result
+        _print_json(result_dict)
+        if isinstance(result_dict, dict) and result_dict.get("status") == "failed":
+            raise SystemExit(1)
+
+
+@app.command(name="deprecate")
+def published_components_deprecate(
+    digest: str | None = None,
+    *,
+    superseded_by: str | None = None,
+    base_url: BaseUrlOption = None,
+    token: TokenOption = None,
+    auth_header: AuthHeaderOption = None,
+    header: HeaderOption = None,
+    config: ConfigOption = None,
+) -> None:
+    """Deprecate a published component by digest."""
+
+    for args in _load_args(
+        config,
+        digest=("digest", digest, None, False, True),
+        superseded_by=(superseded_by, None),
+        **_api_arg_specs(
+            base_url=base_url,
+            token=token,
+            auth_header=auth_header,
+            header=header,
+        ),
+    ):
+        client = _client_from_options(
+            base_url=args.base_url,
+            token=args.token,
+            auth_header=args.auth_header,
+            header=args.header,
+        )
+        result = deprecate_component(
+            client,
+            args.digest,
+            superseded_by=args.superseded_by,
+        )
+        result_dict = result.to_dict() if hasattr(result, "to_dict") else result
+        _print_json(result_dict)
+        if isinstance(result_dict, dict) and result_dict.get("status") == "failed":
+            raise SystemExit(1)
