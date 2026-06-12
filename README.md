@@ -64,12 +64,20 @@ uv run tangle sdk published-components deprecate sha256:old --superseded-by sha2
 ```
 
 `publish` accepts `--image`, `--name`, `--description`, `--annotations` (JSON),
-`--dry-run`, generic git metadata fields, generic API auth fields (`--base-url`,
-`--token`, `--auth-header`, `-H/--header`), and `--config`. `deprecate` accepts
-`--superseded-by`, the same generic API auth fields, and `--config`. These are
-single-component OSS commands; batch `publish-all`, dbt generation,
-from-container generation, and backend-specific search-v2 workflows remain out
-of this lab CLI slice.
+`--dry-run`, `--published-by`, generic git metadata fields, generic API auth
+fields (`--base-url`, `--token`, `--auth-header`, `-H/--header`), and
+`--config`. By default it scopes version checks and automatic old-version
+deprecation to the current authenticated user via `users_me()`; use
+`--published-by` to supply an explicit owner/publisher filter. Publishing fails
+closed if no owner can be determined. `deprecate` accepts `--superseded-by`, the
+same generic API auth fields, and `--config`.
+
+There is no separate OSS `publish-all` command. To publish multiple components,
+pass a YAML/JSON config list, or `_defaults` + `configs`, to the same
+`published-components publish` command; the command aggregates results and exits
+nonzero if any component errors. Batch `publish-all`, Slack notification flags,
+dbt generation, from-container generation, and backend-specific search-v2
+workflows remain out of this lab CLI slice.
 
 Example publish config:
 
@@ -80,6 +88,19 @@ name: My component
 annotations:
   owner: platform
 base_url: https://api.example
+```
+
+Example multi-component publish config:
+
+```yaml
+_defaults:
+  base_url: https://api.example
+  image: python:3.12
+configs:
+  - component_path: components/first.yaml
+    name: First component
+  - component_path: components/second.yaml
+    name: Second component
 ```
 
 Example deprecate config:
