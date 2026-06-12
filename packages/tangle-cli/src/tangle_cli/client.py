@@ -485,7 +485,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
                 published_by_substring=publisher_filter,
                 name_substring=name,
             ):
-                if info.name == name:
+                if info.name.lower() == name.lower():
                     add(info)
         return list(found.values())
 
@@ -537,8 +537,18 @@ class TangleApiClient(GeneratedTangleApiOperations):
         )
 
     def get_run_pipeline_spec(self, run_id: str) -> TaskSpec | None:
-        details = self.get_run_details(run_id, include_implementations=True)
-        return details.execution.task_spec if details.execution else None
+        try:
+            run = PipelineRun.from_dict(_to_plain(self.pipeline_runs_get(run_id)))
+            root_execution_id = run.root_execution_id
+        except requests.HTTPError as exc:
+            if exc.response is None or exc.response.status_code != 404:
+                raise
+            root_execution_id = run_id
+
+        if not root_execution_id:
+            return None
+        execution = self.executions_details(root_execution_id)
+        return execution.task_spec
 
     def _enrich_execution_tree(self, execution: GetExecutionInfoResponse) -> None:
         child_ids = execution.raw.get("child_task_execution_ids") or {}
