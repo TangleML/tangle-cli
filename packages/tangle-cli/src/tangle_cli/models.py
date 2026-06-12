@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from tangle_cli.generated.models import ComponentSpec, GetExecutionInfoResponse
+from tangle_api.generated.models import ComponentSpec, GetExecutionInfoResponse
 
 
 # ---- Helpers ---------------------------------------------------------------

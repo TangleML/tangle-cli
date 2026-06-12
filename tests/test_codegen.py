@@ -329,6 +329,7 @@ def test_generate_models_uses_builtin_model_extension_module_by_default() -> Non
         },
     })
 
+    assert "from tangle_cli.generated_runtime import TangleGeneratedModel" in models
     assert (
         "from tangle_cli.generated_model_extensions import "
         "GetGraphExecutionStateResponseExtensions"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tangle_cli.generated.models import (
+from tangle_api.generated.models import (
     ComponentSpec as GeneratedComponentSpec,
     GetExecutionInfoResponse,
 )

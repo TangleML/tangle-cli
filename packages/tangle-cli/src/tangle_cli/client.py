@@ -1,7 +1,7 @@
 """Static public Tangle API client.
 
 ``TangleApiClient`` is the stable wrapper class consumed by downstream tools.
-Endpoint methods are generated offline into :mod:`tangle_cli.generated.operations`
+Endpoint methods are generated offline into :mod:`tangle_api.generated.operations`
 from the checked-in OpenAPI snapshot; handwritten methods in this file keep the
 higher-level semantic helpers that downstream callers use.
 """
@@ -22,8 +22,8 @@ from .api_transport import (
     default_base_url,
     default_token,
 )
-from .generated.models import ComponentSpec, GetExecutionInfoResponse
-from .generated.operations import GeneratedTangleApiOperations
+from tangle_api.generated.models import ComponentSpec, GetExecutionInfoResponse
+from tangle_api.generated.operations import GeneratedTangleApiOperations
 from .logger import Logger, _null_logger
 from .models import (
     ComponentInfo,

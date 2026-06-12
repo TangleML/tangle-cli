@@ -8,8 +8,14 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-04T01:22:41.228517Z"
+exclude-newer = "2026-06-05T03:12:22.361582Z"
 exclude-newer-span = "P7D"
+
+[manifest]
+members = [
+    "tangle-api",
+    "tangle-cli",
+]
 
 [[package]]
 name = "alembic"
@@ -1768,6 +1774,21 @@ wheels = [
 ]
 
 [[package]]
+name = "tangle-api"
+version = "0.0.1"
+source = { editable = "packages/tangle-api" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "tangle-cli" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "tangle-cli", editable = "." },
+]
+
+[[package]]
 name = "tangle-cli"
 version = "0.0.1"
 source = { editable = "." }
@@ -1780,6 +1801,11 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "requests" },
+]
+
+[package.optional-dependencies]
+native = [
+    { name = "tangle-api" },
 ]
 
 [package.dev-dependencies]
@@ -1798,6 +1824,7 @@ codegen = [
 ]
 dev = [
     { name = "pytest" },
+    { name = "tangle-api" },
 ]
 
 [package.metadata]
@@ -1810,7 +1837,9 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32.0" },
+    { name = "tangle-api", marker = "extra == 'native'", editable = "packages/tangle-api" },
 ]
+provides-extras = ["native"]
 
 [package.metadata.requires-dev]
 codegen = [
@@ -1826,7 +1855,10 @@ codegen = [
     { name = "opentelemetry-sdk", specifier = ">=1.39.1" },
     { name = "sqlalchemy", specifier = ">=2.0.49" },
 ]
-dev = [{ name = "pytest", specifier = ">=9.0.2" }]
+dev = [
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "tangle-api", editable = "packages/tangle-api" },
+]
 
 [[package]]
 name = "tomli"
