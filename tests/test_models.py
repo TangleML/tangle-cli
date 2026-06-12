@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from tangle_cli.generated.models import ComponentSpec as GeneratedComponentSpec
+from tangle_cli.generated.models import (
+    ComponentSpec as GeneratedComponentSpec,
+    GetExecutionInfoResponse,
+)
 from tangle_cli.models import (
     ComponentInfo,
     ComponentSpec,
     ContainerState,
-    ExecutionDetails,
     GraphExecutionState,
     PipelineRun,
     SecretInfo,
@@ -191,9 +193,12 @@ class TestHelpers:
         assert add_official_prefix("") == ""
 
 
-class TestExecutionDetails:
+class TestGetExecutionInfoResponse:
+    def test_execution_details_generated_model_has_extensions(self):
+        assert GetExecutionInfoResponse.__mro__[1].__name__ == "GetExecutionInfoResponseExtensions"
+
     def test_from_dict_parses_artifacts(self):
-        ed = ExecutionDetails.from_dict({
+        ed = GetExecutionInfoResponse.from_dict({
             "id": "exec-1",
             "task_spec": {"componentRef": {"spec": {"name": "task"}}},
             "input_artifacts": {"in1": {"id": "art-1"}},
@@ -203,3 +208,5 @@ class TestExecutionDetails:
         assert ed.input_artifacts == {"in1": "art-1"}
         # Entries without an "id" key are dropped.
         assert ed.output_artifacts == {"out1": "art-2"}
+        assert ed.raw["id"] == "exec-1"
+        assert ed.child_executions == {}

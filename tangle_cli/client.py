@@ -22,12 +22,11 @@ from .api_transport import (
     default_base_url,
     default_token,
 )
+from .generated.models import ComponentSpec, GetExecutionInfoResponse
 from .generated.operations import GeneratedTangleApiOperations
 from .logger import Logger, _null_logger
 from .models import (
     ComponentInfo,
-    ComponentSpec,
-    ExecutionDetails,
     GraphExecutionState,
     PipelineRun,
     RunDetails,
@@ -198,8 +197,8 @@ class TangleApiClient(GeneratedTangleApiOperations):
 
     # ---- Handwritten semantic helpers consumed by tangle-deploy ----------
 
-    def get_execution_details(self, execution_id: str) -> ExecutionDetails:
-        details = ExecutionDetails.from_dict(_to_plain(self.executions_details(execution_id)))
+    def get_execution_details(self, execution_id: str) -> GetExecutionInfoResponse:
+        details = self.executions_details(execution_id)
         self._enrich_execution_tree(details)
         return details
 
@@ -389,14 +388,14 @@ class TangleApiClient(GeneratedTangleApiOperations):
         details = self.get_run_details(run_id, include_implementations=True)
         return details.execution.task_spec if details.execution else None
 
-    def _enrich_execution_tree(self, execution: ExecutionDetails) -> None:
+    def _enrich_execution_tree(self, execution: GetExecutionInfoResponse) -> None:
         child_ids = execution.raw.get("child_task_execution_ids") or {}
         if not isinstance(child_ids, dict):
             return
         for task_name, child_execution_id in child_ids.items():
             if not child_execution_id:
                 continue
-            child = ExecutionDetails.from_dict(_to_plain(self.executions_details(child_execution_id)))
+            child = self.executions_details(child_execution_id)
             self._enrich_execution_tree(child)
             execution.child_executions[task_name] = child
             task = execution.task_spec.graph_tasks.get(task_name)
