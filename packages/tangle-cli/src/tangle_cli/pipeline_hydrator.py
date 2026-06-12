@@ -496,7 +496,7 @@ class PipelineHydrator:
         base_dir: Path | None = None,
     ) -> tuple[str, dict[str, Any]] | None:
         """Resolve the primary source from a resolve-config entry."""
-        for kind in ("digest", "url", "name"):
+        for kind in ("digest", "url"):
             if kind not in entry:
                 continue
             value = entry[kind]
@@ -505,6 +505,8 @@ class PipelineHydrator:
             elif kind == "url":
                 self.log.info(f"   Resolve: trying url={value}")
             return self._resolve_registered_component(kind, value, path, base_dir)
+        if "name" in entry:
+            return self._resolve_by_name_with_filters(entry)
         if any(kind in entry for kind in self._resolve_entry_kinds()):
             return None
         self.log.warn(

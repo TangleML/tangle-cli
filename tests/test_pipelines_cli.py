@@ -439,6 +439,70 @@ def test_pipelines_hydrate_name_refs_use_api_without_env_credentials_for_config_
     assert created_clients[0]["include_env_credentials"] is False
 
 
+def test_pipeline_hydrator_resolve_config_name_uses_filters(tmp_path: Path):
+    from tangle_cli.pipeline_hydrator import PipelineHydrator
+
+    specs = {
+        "sha256:old": {
+            "name": "Thing",
+            "metadata": {"annotations": {"version": "1.0", "team": "x"}},
+            "implementation": {"container": {"image": "old"}},
+        },
+        "sha256:wrong-team": {
+            "name": "Thing",
+            "metadata": {"annotations": {"version": "3.0", "team": "y"}},
+            "implementation": {"container": {"image": "wrong-team"}},
+        },
+        "sha256:match-low": {
+            "name": "Thing",
+            "metadata": {"annotations": {"version": "2.1", "team": "x"}},
+            "implementation": {"container": {"image": "match-low"}},
+        },
+        "sha256:match-high": {
+            "name": "Thing",
+            "metadata": {"annotations": {"version": "2.4", "team": "x"}},
+            "implementation": {"container": {"image": "match-high"}},
+        },
+    }
+    calls = []
+
+    class FakeClient:
+        def find_existing_components(self, components, **kwargs):
+            calls.append({"components": components, **kwargs})
+            return [
+                SimpleNamespace(digest="sha256:old", version="1.0"),
+                SimpleNamespace(digest="sha256:wrong-team", version="3.0"),
+                SimpleNamespace(digest="sha256:match-low", version="2.1"),
+                SimpleNamespace(digest="sha256:match-high", version="2.4"),
+            ]
+
+        def get_component_spec(self, digest):
+            return SimpleNamespace(data=specs[digest])
+
+    hydrator = PipelineHydrator(client=FakeClient())
+
+    digest, spec = hydrator._resolve_from_config(
+        {
+            "name": "Thing",
+            "publisher": "alice@example.com",
+            "version": ">=2",
+            "annotations": {"team": "x"},
+        },
+        "Pipeline.task",
+        tmp_path,
+    )
+
+    assert digest == "sha256:match-high"
+    assert spec["implementation"]["container"]["image"] == "match-high"
+    assert calls == [
+        {
+            "components": ["Thing", "[Official] Thing"],
+            "verbose": False,
+            "published_by": "alice@example.com",
+        }
+    ]
+
+
 def test_pipeline_hydrator_unsupported_resolver_lists_available_resolvers(tmp_path: Path):
     from tangle_cli.pipeline_hydrator import PipelineHydrator, UnsupportedHydrationFeatureError
 
