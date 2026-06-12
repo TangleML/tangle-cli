@@ -13,6 +13,11 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     from tangle_cli.args_container import ArgsContainer, ConfigFileError
     from tangle_cli.component_from_func import generate_component_yaml
     from tangle_cli.component_generator import regenerate_yaml
+    from tangle_cli.component_publisher import (
+        deprecate_component,
+        prepare_component_for_publish,
+        publish_component,
+    )
     from tangle_cli.module_bundler import ModuleBundler
     from tangle_cli.version_manager import bump_version
     from tangle_cli.component_inspector import (
@@ -101,6 +106,9 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     assert ArgsContainer and ConfigFileError
     assert callable(generate_component_yaml)
     assert callable(regenerate_yaml)
+    assert callable(prepare_component_for_publish)
+    assert callable(publish_component)
+    assert callable(deprecate_component)
     assert callable(bump_version)
     assert ModuleBundler is not None
     assert callable(get_standard_library)
