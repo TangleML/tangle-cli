@@ -109,6 +109,7 @@ def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
 
     requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
     assert not any(name.startswith("tangle_api/") for name in names)
+    assert "tangle_cli/openapi/openapi.json" not in names
     assert "Requires-Dist: tangle-api==0.0.1" not in requires_dist
     assert "Requires-Dist: tangle-api==0.0.1 ; extra == 'native'" in requires_dist
 
@@ -231,6 +232,9 @@ def test_codegen_output_imports_as_consumer_local_tangle_api(tmp_path) -> None:
 def test_native_wheels_provide_static_client_binding(tmp_path) -> None:
     cli_wheel = _build_wheel(tmp_path / "cli")
     api_wheel = _build_wheel(tmp_path / "api", "--package", "tangle-api")
+    with zipfile.ZipFile(api_wheel) as archive:
+        assert "tangle_api/schema/__init__.py" in archive.namelist()
+        assert "tangle_api/schema/openapi.json" in archive.namelist()
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(cli_wheel), str(api_wheel)])}
 
     subprocess.run(
@@ -238,7 +242,9 @@ def test_native_wheels_provide_static_client_binding(tmp_path) -> None:
             sys.executable,
             "-c",
             "from tangle_cli.client import TangleApiClient; "
-            "assert TangleApiClient.__name__ == 'TangleApiClient'",
+            "from tangle_cli.openapi.parser import load_openapi_schema; "
+            "assert TangleApiClient.__name__ == 'TangleApiClient'; "
+            "assert 'paths' in load_openapi_schema()",
         ],
         cwd=tmp_path,
         env=env,

@@ -28,7 +28,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .parser import DEFAULT_OPENAPI_PATH, load_openapi_schema, parsed_operations
+from .parser import (
+    DEFAULT_OPENAPI_PATH,
+    DEFAULT_OPENAPI_RESOURCE_NAME,
+    DEFAULT_OPENAPI_RESOURCE_PACKAGE,
+    load_openapi_schema,
+    parsed_operations,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 _GENERATED_DIR = _REPO_ROOT / "packages" / "tangle-api" / "src" / "tangle_api" / "generated"
@@ -844,7 +850,7 @@ def write_openapi_schema(schema: dict[str, Any], destination: str | Path = DEFAU
 
 
 def generate(
-    openapi_path: str | Path = DEFAULT_OPENAPI_PATH,
+    openapi_path: str | Path | None = None,
     generated_dir: str | Path = _GENERATED_DIR,
     *,
     operations_class_name: str = DEFAULT_OPERATIONS_CLASS_NAME,
@@ -884,6 +890,12 @@ def generate(
     return schema, generated_files
 
 
+def _default_snapshot_source() -> str:
+    if DEFAULT_OPENAPI_PATH.exists():
+        return f"snapshot: {_display_path(DEFAULT_OPENAPI_PATH)}"
+    return f"snapshot: {DEFAULT_OPENAPI_RESOURCE_PACKAGE}/{DEFAULT_OPENAPI_RESOURCE_NAME}"
+
+
 def _display_path(path: str | Path) -> str:
     resolved = Path(path).resolve()
     try:
@@ -910,7 +922,15 @@ def _print_summary(
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--openapi", default=str(DEFAULT_OPENAPI_PATH), help="Path to openapi.json")
+    parser.add_argument(
+        "--openapi",
+        default=None,
+        help=(
+            "Path to openapi.json. Defaults to the official snapshot in "
+            "packages/tangle-api/src/tangle_api/schema/openapi.json, or the "
+            "packaged tangle_api.schema snapshot when installed."
+        ),
+    )
     parser.add_argument(
         "--out",
         default=str(_GENERATED_DIR),
@@ -989,7 +1009,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--from-snapshot",
         action="store_true",
-        help="Regenerate support modules from the existing local openapi.json snapshot.",
+        help="Regenerate support modules from the official API-package openapi.json snapshot.",
     )
     args = parser.parse_args(argv)
     try:
@@ -1006,13 +1026,15 @@ def main(argv: list[str] | None = None) -> None:
     if source_count > 1:
         parser.error("choose only one OpenAPI source: --openapi-url, --backend-path, or --from-snapshot")
 
+    openapi_path = args.openapi or DEFAULT_OPENAPI_PATH
     wrote_openapi = False
     if args.openapi_url:
-        update_openapi_from_url(args.openapi_url, destination=args.openapi)
+        update_openapi_from_url(args.openapi_url, destination=openapi_path)
         source = f"URL: {args.openapi_url}"
         wrote_openapi = True
     elif args.from_snapshot:
-        source = f"snapshot: {_display_path(args.openapi)}"
+        openapi_path = args.openapi
+        source = f"snapshot: {_display_path(openapi_path)}" if openapi_path else _default_snapshot_source()
     else:
         backend_path = Path(args.backend_path) if args.backend_path else DEFAULT_BACKEND_PATH
         if not (backend_path / "api_server_main.py").exists():
@@ -1024,14 +1046,14 @@ def main(argv: list[str] | None = None) -> None:
             )
         update_openapi_from_backend(
             backend_path=backend_path,
-            destination=args.openapi,
+            destination=openapi_path,
             database_uri=args.backend_database_uri,
         )
         source = f"backend: {_display_path(backend_path)}"
         wrote_openapi = True
 
     schema, generated_files = generate(
-        args.openapi,
+        openapi_path,
         args.out,
         operations_class_name=args.operations_class_name,
         model_extension_module=args.model_extension_module,
@@ -1040,7 +1062,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     _print_summary(
         source=source,
-        openapi_path=args.openapi,
+        openapi_path=openapi_path or DEFAULT_OPENAPI_PATH,
         generated_files=generated_files,
         schema=schema,
         wrote_openapi=wrote_openapi,
