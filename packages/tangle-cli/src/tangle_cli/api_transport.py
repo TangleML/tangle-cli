@@ -18,7 +18,27 @@ _MISSING = object()
 
 
 def default_base_url() -> str:
-    return _normalize_base_url(os.environ.get("TANGLE_API_URL") or DEFAULT_API_URL)
+    configured_url = os.environ.get("TANGLE_API_URL")
+    if configured_url:
+        return _normalize_base_url(configured_url)
+    if _ambient_auth_env_present():
+        raise SystemExit(
+            "TANGLE_API_URL is required when Tangle auth environment variables "
+            f"are set; refusing to send credentials to default {DEFAULT_API_URL}"
+        )
+    return _normalize_base_url(DEFAULT_API_URL)
+
+
+def _ambient_auth_env_present() -> bool:
+    return any(
+        os.environ.get(name)
+        for name in (
+            "TANGLE_API_AUTH_HEADER",
+            "TANGLE_AUTH_HEADER",
+            "TANGLE_API_HEADERS",
+            "TANGLE_API_TOKEN",
+        )
+    )
 
 
 def default_token() -> str | None:
