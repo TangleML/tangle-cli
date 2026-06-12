@@ -761,6 +761,7 @@ def test_cold_schema_bootstrap_forwards_cli_auth_flags(monkeypatch, tmp_path):
             "token": "cli-token",
             "auth_header": "Basic abc",
             "header": ["X-Trace: 1", "X-Other: 2"],
+            "include_env_credentials": True,
         }
     ]
 
@@ -813,6 +814,49 @@ def test_cold_schema_bootstrap_forwards_config_auth_flags(monkeypatch, tmp_path)
             "token": "config-token",
             "auth_header": "Basic config-auth",
             "header": ["X-Config: yes"],
+            "include_env_credentials": False,
+        }
+    ]
+
+
+def test_cold_schema_bootstrap_suppresses_env_auth_for_config_base_url(monkeypatch, tmp_path):
+    fetched = []
+    config = tmp_path / "api-config.yaml"
+    config.write_text("base_url: http://api.test\n", encoding="utf-8")
+
+    def fail_load_schema():
+        raise FileNotFoundError("missing tangle_api.schema")
+
+    def fake_load_or_fetch_schema(base_url, **kwargs):
+        fetched.append({"base_url": base_url, **kwargs})
+        return {
+            "openapi": "3.1.0",
+            "paths": {"/cached-extension": {"get": {"summary": "Cached extension"}}},
+            "components": {"schemas": {}},
+        }
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("TANGLE_API_TOKEN", "env-token")
+    monkeypatch.setenv("TANGLE_API_AUTH_HEADER", "Bearer env-auth")
+    monkeypatch.setenv("TANGLE_API_HEADERS", "X-Env: secret")
+    monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", fail_load_schema)
+    monkeypatch.setattr(api_cli, "load_or_fetch_schema", fake_load_or_fetch_schema)
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "cached-extension", "--config", str(config)],
+    )
+
+    schema = api_cli._schema_for_current_invocation()
+
+    assert schema["paths"] == {"/cached-extension": {"get": {"summary": "Cached extension"}}}
+    assert fetched == [
+        {
+            "base_url": "http://api.test",
+            "token": None,
+            "auth_header": None,
+            "header": [],
+            "include_env_credentials": False,
         }
     ]
 
@@ -1438,6 +1482,34 @@ def test_dynamic_command_required_path_and_body_can_come_from_config(monkeypatch
     run_app(app, ["pipeline-runs", "create", "--config", str(create_config)])
     assert requests[-1]["url"] == "http://config.test/api/pipeline_runs/"
     assert json.loads(requests[-1]["content"].decode()) == {"name": "from-config"}
+
+
+def test_config_body_at_file_reference_is_literal_and_suppresses_env_auth(monkeypatch, tmp_path):
+    requests = []
+    body_path = tmp_path / "body.json"
+    body_path.write_text('{"name":"from-file"}', encoding="utf-8")
+    config = tmp_path / "create.yaml"
+    config.write_text(
+        f"base_url: http://config.test\nbody: '@{body_path}'\n",
+        encoding="utf-8",
+    )
+
+    def fake_request(method, url, **kwargs):
+        requests.append({"method": method, "url": url, **kwargs})
+        return json_response(method, url, {"ok": True})
+
+    monkeypatch.setenv("TANGLE_API_TOKEN", "env-token")
+    monkeypatch.setenv("TANGLE_API_AUTH_HEADER", "Bearer env-auth")
+    monkeypatch.setenv("TANGLE_API_HEADERS", "X-Env: secret")
+    monkeypatch.setattr(api_cli.httpx, "request", fake_request)
+    app = api_cli.build_app(SCHEMA)
+
+    run_app(app, ["pipeline-runs", "create", "--config", str(config)])
+
+    assert requests[-1]["url"] == "http://config.test/api/pipeline_runs/"
+    assert json.loads(requests[-1]["content"].decode()) == f"@{body_path}"
+    assert "Authorization" not in requests[-1]["headers"]
+    assert "X-Env" not in requests[-1]["headers"]
 
 
 def test_dynamic_command_invocation_maps_path_query_and_body(monkeypatch, capsys):
