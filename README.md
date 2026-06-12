@@ -227,10 +227,11 @@ package used by the public `tangle_cli/client.py` wrapper. `--operations-class-n
 operations class name in `<out>/operations.py`; it defaults to
 `GeneratedTangleApiOperations`. `--model-extension-module` points codegen at an
 importable module with a `MODEL_EXTENSIONS` mapping from generated model class
-names to extension class names. It defaults to
-`tangle_cli.generated_model_extensions`; pass an empty string (`--model-extension-module ""`)
-to disable extensions. Matching generated models inherit those extensions before
-`TangleGeneratedModel`, e.g.:
+names to extension class names. The built-in `tangle_cli.generated_model_extensions`
+module is applied first by default, and repeated `--model-extension-module`
+values are applied after it in order. Pass an empty string
+(`--model-extension-module ""`) to disable the default module. Generated object
+models are emitted as private schema-derived bases plus public model classes, e.g.:
 
 ```python
 MODEL_EXTENSIONS = {
@@ -238,8 +239,23 @@ MODEL_EXTENSIONS = {
 }
 ```
 
-The extension classes must be importable from that module and should not import
-generated model classes. Codegen writes exactly these support files:
+```python
+class _ComponentSpecGenerated(TangleGeneratedModel):
+    name: Any = None
+
+class ComponentSpec(ComponentSpecExtensions, _ComponentSpecGenerated):
+    pass
+```
+
+For models without extensions, codegen still emits a public subclass such as
+`class OtherResponse(_OtherResponseGenerated): pass` so the exported class keeps
+its public OpenAPI name. When multiple extension modules target the same model,
+later/downstream extensions are leftmost in the public class MRO and override
+earlier/default extensions while schema-derived data remains available via
+`to_dict()`. Duplicate extension class names from different modules are imported
+with deterministic aliases. Extension classes must be importable from their
+modules and should not import generated model classes. Codegen writes exactly
+these support files:
 
 ```text
 <out>/__init__.py
