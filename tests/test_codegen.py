@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tangle_cli.openapi import codegen
+from tangle_cli.openapi import codegen, parser
 
 
 def _schema(paths: dict | None = None) -> dict:
@@ -29,6 +29,23 @@ def test_generate_operations_rejects_absolute_url_paths() -> None:
 def test_generate_operations_rejects_network_path_references() -> None:
     with pytest.raises(ValueError, match="must be relative"):
         codegen.generate_operations(_schema({"//attacker.example/collect": {"get": {}}}))
+
+
+def test_default_openapi_snapshot_lives_in_api_package() -> None:
+    assert parser.DEFAULT_OPENAPI_PATH.match(
+        "*/packages/tangle-api/src/tangle_api/schema/openapi.json"
+    )
+    schema = parser.load_openapi_schema()
+    assert "paths" in schema
+
+
+def test_explicit_openapi_path_does_not_require_default_snapshot(tmp_path) -> None:
+    openapi = tmp_path / "custom-openapi.json"
+    openapi.write_text(json.dumps(_schema()), encoding="utf-8")
+
+    schema = parser.load_openapi_schema(openapi)
+
+    assert schema["paths"] == {"/services/ping": {"get": {}}}
 
 
 def test_codegen_update_from_openapi_url_writes_snapshot(tmp_path) -> None:
@@ -83,7 +100,9 @@ def test_codegen_main_no_args_uses_default_backend_and_prints_summary(
     monkeypatch, tmp_path, capsys
 ) -> None:
     backend = tmp_path / "third_party" / "tangle"
+    default_snapshot = tmp_path / "packages" / "tangle-api" / "src" / "tangle_api" / "schema" / "openapi.json"
     backend.mkdir(parents=True)
+    default_snapshot.parent.mkdir(parents=True)
     (backend / "api_server_main.py").write_text("app = object()\n", encoding="utf-8")
     calls: list[tuple[str, object]] = []
 
@@ -105,25 +124,26 @@ def test_codegen_main_no_args_uses_default_backend_and_prints_summary(
         return _schema(), _generated_files(tmp_path)
 
     monkeypatch.setattr(codegen, "DEFAULT_BACKEND_PATH", backend)
+    monkeypatch.setattr(codegen, "DEFAULT_OPENAPI_PATH", default_snapshot)
     monkeypatch.setattr(codegen, "update_openapi_from_backend", fake_update_openapi_from_backend)
     monkeypatch.setattr(codegen, "generate", fake_generate)
 
     codegen.main([
-        "--openapi",
-        str(tmp_path / "openapi.json"),
         "--out",
         str(tmp_path / "generated"),
     ])
 
     assert calls[0][0] == "update"
     assert calls[0][1]["backend_path"] == backend
+    assert calls[0][1]["destination"] == default_snapshot
     assert calls[1][0] == "generate"
+    assert calls[1][1]["openapi_path"] == default_snapshot
     assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
     assert calls[1][1]["model_extension_module"] is None
     assert calls[1][1]["model_aliases"] is None
     output = capsys.readouterr().out
     assert f"Loaded OpenAPI from backend: {backend}" in output
-    assert f"Wrote {tmp_path / 'openapi.json'}" in output
+    assert f"Wrote {default_snapshot}" in output
     assert f"Wrote {tmp_path / 'generated' / 'models.py'}" in output
     assert "Generated 1 operations from 1 paths" in output
 
@@ -179,6 +199,35 @@ def test_codegen_main_from_snapshot_is_explicit(monkeypatch, tmp_path, capsys) -
     output = capsys.readouterr().out
     assert f"Loaded OpenAPI from snapshot: {tmp_path / 'openapi.json'}" in output
     assert f"Wrote {tmp_path / 'openapi.json'}" not in output
+    assert "Generated 1 operations from 1 paths" in output
+
+
+def test_codegen_main_from_default_snapshot_uses_bundled_resolution(monkeypatch, tmp_path, capsys) -> None:
+    calls: list[tuple[str, object]] = []
+    default_snapshot = tmp_path / "packages" / "tangle-api" / "src" / "tangle_api" / "schema" / "openapi.json"
+    default_snapshot.parent.mkdir(parents=True)
+    default_snapshot.write_text(json.dumps(_schema()), encoding="utf-8")
+
+    def fake_generate(openapi_path, generated_dir, **kwargs):
+        calls.append((
+            "generate",
+            {
+                "openapi_path": openapi_path,
+                "generated_dir": generated_dir,
+                **kwargs,
+            },
+        ))
+        return _schema(), _generated_files(tmp_path)
+
+    monkeypatch.setattr(codegen, "DEFAULT_OPENAPI_PATH", default_snapshot)
+    monkeypatch.setattr(codegen, "generate", fake_generate)
+
+    codegen.main(["--from-snapshot", "--out", str(tmp_path / "generated")])
+
+    assert calls[0][0] == "generate"
+    assert calls[0][1]["openapi_path"] is None
+    output = capsys.readouterr().out
+    assert f"Loaded OpenAPI from snapshot: {default_snapshot}" in output
     assert "Generated 1 operations from 1 paths" in output
 
 
@@ -243,14 +292,68 @@ def test_codegen_main_accepts_empty_model_extension_module(monkeypatch, tmp_path
     assert calls[0][1]["model_aliases"] is None
 
 
-def test_codegen_main_fetches_from_openapi_url_before_generating(
+def test_codegen_main_openapi_url_writes_default_snapshot_before_generating(
     monkeypatch, tmp_path, capsys
 ) -> None:
     calls: list[tuple[str, object]] = []
+    default_snapshot = tmp_path / "packages" / "tangle-api" / "src" / "tangle_api" / "schema" / "openapi.json"
 
     def fake_update_openapi_from_url(openapi_url, **kwargs):
         calls.append(("update-url", {"openapi_url": openapi_url, **kwargs}))
-        openapi_path = tmp_path / "openapi.json"
+        openapi_path = Path(kwargs["destination"])
+        openapi_path.parent.mkdir(parents=True)
+        openapi_path.write_text(json.dumps(_schema()), encoding="utf-8")
+        return openapi_path
+
+    def fake_generate(openapi_path, generated_dir, **kwargs):
+        calls.append((
+            "generate",
+            {
+                "openapi_path": openapi_path,
+                "generated_dir": generated_dir,
+                **kwargs,
+            },
+        ))
+        return _schema(), _generated_files(tmp_path)
+
+    monkeypatch.setattr(codegen, "DEFAULT_OPENAPI_PATH", default_snapshot)
+    monkeypatch.setattr(codegen, "update_openapi_from_url", fake_update_openapi_from_url)
+    monkeypatch.setattr(codegen, "generate", fake_generate)
+
+    codegen.main([
+        "--out",
+        str(tmp_path / "generated"),
+        "--openapi-url",
+        "https://example.com/openapi.json",
+    ])
+
+    assert calls[0] == (
+        "update-url",
+        {
+            "openapi_url": "https://example.com/openapi.json",
+            "destination": default_snapshot,
+        },
+    )
+    assert calls[1][0] == "generate"
+    assert calls[1][1]["openapi_path"] == default_snapshot
+    assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
+    assert calls[1][1]["model_extension_module"] is None
+    assert calls[1][1]["model_aliases"] is None
+    output = capsys.readouterr().out
+    assert "Loaded OpenAPI from URL: https://example.com/openapi.json" in output
+    assert f"Wrote {default_snapshot}" in output
+    assert "Generated 1 operations from 1 paths" in output
+
+
+def test_codegen_main_openapi_url_respects_explicit_openapi_destination(
+    monkeypatch, tmp_path
+) -> None:
+    calls: list[tuple[str, object]] = []
+    explicit_snapshot = tmp_path / "custom-openapi.json"
+
+    def fake_update_openapi_from_url(openapi_url, **kwargs):
+        calls.append(("update-url", {"openapi_url": openapi_url, **kwargs}))
+        openapi_path = Path(kwargs["destination"])
         openapi_path.write_text(json.dumps(_schema()), encoding="utf-8")
         return openapi_path
 
@@ -270,7 +373,7 @@ def test_codegen_main_fetches_from_openapi_url_before_generating(
 
     codegen.main([
         "--openapi",
-        str(tmp_path / "openapi.json"),
+        str(explicit_snapshot),
         "--out",
         str(tmp_path / "generated"),
         "--openapi-url",
@@ -281,16 +384,11 @@ def test_codegen_main_fetches_from_openapi_url_before_generating(
         "update-url",
         {
             "openapi_url": "https://example.com/openapi.json",
-            "destination": str(tmp_path / "openapi.json"),
+            "destination": str(explicit_snapshot),
         },
     )
     assert calls[1][0] == "generate"
-    assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
-    assert calls[1][1]["model_extension_module"] is None
-    assert calls[1][1]["model_aliases"] is None
-    output = capsys.readouterr().out
-    assert "Loaded OpenAPI from URL: https://example.com/openapi.json" in output
-    assert "Generated 1 operations from 1 paths" in output
+    assert calls[1][1]["openapi_path"] == str(explicit_snapshot)
 
 
 def test_generate_writes_support_modules_to_custom_out(tmp_path) -> None:
