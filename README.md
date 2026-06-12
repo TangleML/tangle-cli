@@ -231,7 +231,7 @@ names to extension class names. The built-in `tangle_cli.generated_model_extensi
 module is applied first by default, and repeated `--model-extension-module`
 values are applied after it in order. Pass an empty string
 (`--model-extension-module ""`) to disable the default module. Generated object
-models are emitted as private schema-derived bases plus public model classes, e.g.:
+models are emitted as private schema-derived bases plus public model classes. Codegen also applies a built-in model alias so FastAPI schemas such as `ComponentSpecOutput` or `ComponentSpecInput` are additionally exposed as the stable public `ComponentSpec` class when `ComponentSpec` is absent from the schema. Add or override aliases with `--model-alias PublicModel=SourceSchema[,OtherSourceSchema]`; pass `--model-alias ""` to disable built-in aliases. For example:
 
 ```python
 MODEL_EXTENSIONS = {
@@ -254,8 +254,23 @@ later/downstream extensions are leftmost in the public class MRO and override
 earlier/default extensions while schema-derived data remains available via
 `to_dict()`. Duplicate extension class names from different modules are imported
 with deterministic aliases. Extension classes must be importable from their
-modules and should not import generated model classes. Codegen writes exactly
-these support files:
+modules and should not import generated model classes.
+
+Downstream generators can explicitly override a specific operation's JSON request-body schema without mutating the fetched OpenAPI document. This is useful when a backend schema is too specific or recursive for generated keyword arguments and the operation should accept an open-ended raw body. Use the OpenAPI `operationId`, generated method name, or `group.command` name:
+
+```bash
+uv run python -m tangle_cli.openapi.codegen \
+  --request-body-schema 'search_create={"type":"object","additionalProperties":true,"title":"SearchQuery"}'
+```
+
+For larger schemas, use a JSON file:
+
+```bash
+uv run python -m tangle_cli.openapi.codegen \
+  --request-body-schema-file search_create=search_query.json
+```
+
+These request-body overrides are generic and opt-in; OSS codegen has no built-in behavior for experimental downstream endpoints. Codegen writes exactly these support files:
 
 ```text
 <out>/__init__.py
@@ -293,7 +308,8 @@ uv run python -m tangle_cli.openapi.codegen \
   --openapi-url https://oasis.shopify.io/openapi.json \
   --out src/tangle_api/generated \
   --operations-class-name GeneratedTangleApiExtensions \
-  --model-extension-module tangle_deploy.tangle_api_model_extensions
+  --model-extension-module tangle_deploy.tangle_api_model_extensions \
+  --request-body-schema 'search_create={"type":"object","additionalProperties":true,"title":"SearchQuery"}'
 ```
 
 At the time of writing the official repository does not commit that raw

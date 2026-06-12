@@ -125,6 +125,11 @@ class ComponentSpecExtensions:
         text = data.get("text")
         if spec is None and text:
             spec = yaml.safe_load(text)
+        if spec is None and any(
+            key in data
+            for key in ("name", "description", "metadata", "inputs", "outputs", "implementation")
+        ):
+            spec = data
         spec = spec or {}
         annotations = spec.get("metadata", {}).get("annotations", {})
         return cls(
