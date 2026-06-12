@@ -232,7 +232,7 @@ def build_operation_request(
         names = ", ".join(sorted(remaining))
         raise TypeError(f"Unexpected parameter(s) for {operation.group_name}.{operation.command_name}: {names}")
 
-    url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+    url = _join_operation_url(base_url, path)
     if query:
         url = f"{url}?{_urlencode_query(query)}"
 
@@ -259,6 +259,15 @@ def build_operation_request(
     if content is not None and "Content-Type" not in request_headers:
         request_headers["Content-Type"] = "application/json"
     return operation.method, url, request_headers, content
+
+
+def _join_operation_url(base_url: str, path: str) -> str:
+    """Join a schema path to ``base_url`` without allowing origin changes."""
+
+    parsed_path = urllib.parse.urlparse(path)
+    if parsed_path.scheme or parsed_path.netloc:
+        raise ValueError(f"OpenAPI operation path must be relative: {path!r}")
+    return urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
 
 
 def _urlencode_query(query: dict[str, Any]) -> str:

@@ -21,6 +21,16 @@ def _generated_files(tmp_path: Path) -> list[Path]:
     ]
 
 
+def test_generate_operations_rejects_absolute_url_paths() -> None:
+    with pytest.raises(ValueError, match="must be relative"):
+        codegen.generate_operations(_schema({"https://attacker.example/collect": {"get": {}}}))
+
+
+def test_generate_operations_rejects_network_path_references() -> None:
+    with pytest.raises(ValueError, match="must be relative"):
+        codegen.generate_operations(_schema({"//attacker.example/collect": {"get": {}}}))
+
+
 def test_codegen_update_from_openapi_url_writes_snapshot(tmp_path) -> None:
     source = tmp_path / "official-openapi.json"
     destination = tmp_path / "openapi.json"
