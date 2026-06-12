@@ -19,7 +19,6 @@ from .api_transport import (
     _openapi_url,
     _request_headers,
     default_base_url,
-    default_token,
 )
 
 SUPPORTED_METHODS = {"get", "post", "put", "patch", "delete"}
@@ -122,13 +121,20 @@ def fetch_schema(
     header: list[str] | str | None = None,
     auth_header: str | None = None,
     headers: dict[str, str] | None = None,
+    include_env_credentials: bool = True,
 ) -> dict[str, Any]:
     """Fetch ``/openapi.json``, applying bearer and custom auth headers."""
 
     base_url = _normalize_base_url(base_url or default_base_url())
     response = httpx.get(
         _openapi_url(base_url),
-        headers=_request_headers(token or default_token(), header, auth_header, headers),
+        headers=_request_headers(
+            token,
+            header,
+            auth_header,
+            headers,
+            include_env_credentials=include_env_credentials,
+        ),
         timeout=DEFAULT_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
@@ -145,11 +151,19 @@ def refresh_schema(
     header: list[str] | str | None = None,
     auth_header: str | None = None,
     headers: dict[str, str] | None = None,
+    include_env_credentials: bool = True,
 ) -> tuple[dict[str, Any], Path]:
     """Fetch and cache the latest schema for a backend."""
 
     base_url = _normalize_base_url(base_url or default_base_url())
-    schema = fetch_schema(base_url, token, header, auth_header, headers)
+    schema = fetch_schema(
+        base_url,
+        token,
+        header,
+        auth_header,
+        headers,
+        include_env_credentials=include_env_credentials,
+    )
     path = write_cached_schema(schema, base_url)
     return schema, path
 
@@ -160,13 +174,21 @@ def load_or_fetch_schema(
     header: list[str] | str | None = None,
     auth_header: str | None = None,
     headers: dict[str, str] | None = None,
+    include_env_credentials: bool = True,
 ) -> dict[str, Any]:
     """Use a cached schema when available, otherwise fetch once and cache it."""
 
     cached = load_cached_schema(base_url)
     if cached is not None:
         return cached
-    schema, _ = refresh_schema(base_url, token, header, auth_header, headers)
+    schema, _ = refresh_schema(
+        base_url,
+        token,
+        header,
+        auth_header,
+        headers,
+        include_env_credentials=include_env_credentials,
+    )
     return schema
 
 

@@ -419,8 +419,17 @@ def _invoke_operation(operation: OperationCommand, values: dict[str, Any]) -> No
     """Turn parsed CLI values into an HTTP request and print the response."""
 
     config = values.pop("config", None)
+    cli_body = values.get("body") if operation.has_request_body else None
+    cli_base_url = values.get("base_url")
     for args in _operation_args_from_config(operation, values, config):
-        _invoke_operation_once(operation, args.to_dict())
+        body_from_config = operation.has_request_body and cli_body is None and "body" in args._config
+        base_url_from_config = cli_base_url is None and "base_url" in args._config
+        _invoke_operation_once(
+            operation,
+            args.to_dict(),
+            allow_body_file_references=not body_from_config,
+            include_env_credentials=not base_url_from_config,
+        )
 
 
 def _operation_args_from_config(
@@ -463,10 +472,18 @@ def _operation_args_from_config(
     return resolved
 
 
-def _invoke_operation_once(operation: OperationCommand, values: dict[str, Any]) -> None:
+def _invoke_operation_once(
+    operation: OperationCommand,
+    values: dict[str, Any],
+    *,
+    allow_body_file_references: bool = True,
+    include_env_credentials: bool = True,
+) -> None:
     _validate_schema_source(values.pop("schema_source", "official"))
     base_url = _normalize_base_url(values.pop("base_url", None) or default_base_url())
-    token = values.pop("token", None) or default_token()
+    token = values.pop("token", None)
+    if token is None and include_env_credentials:
+        token = default_token()
     auth_header = values.pop("auth_header", None)
     header_entries = values.pop("header", None)
     body_arg = values.pop("body", None) if operation.has_request_body else None
@@ -481,7 +498,8 @@ def _invoke_operation_once(operation: OperationCommand, values: dict[str, Any]) 
             header_entries=header_entries,
             body=body_arg,
             timeout=DEFAULT_TIMEOUT_SECONDS,
-            allow_body_file_references=True,
+            allow_body_file_references=allow_body_file_references,
+            include_env_credentials=include_env_credentials,
         )
     except httpx.HTTPStatusError as exc:
         message = exc.response.text or exc.response.reason_phrase
@@ -522,11 +540,12 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
     help_requested = _api_tail_requests_help(api_tail)
 
     schema_source = _schema_source_from_argv(api_tail)
-    token = _token_from_argv(api_tail)
-    auth_header = _auth_header_from_argv(api_tail)
+    base_url_arg, base_url_source = _base_url_with_source_from_argv(api_tail)
+    configured_base_url = base_url_arg or os.environ.get("TANGLE_API_URL")
+    include_env_credentials = base_url_source != "config"
+    token = _token_from_argv(api_tail, include_env_credentials=include_env_credentials)
+    auth_header = _auth_header_from_argv(api_tail, include_env_credentials=include_env_credentials)
     header = _headers_from_argv(api_tail)
-    explicit_base_url = _base_url_from_argv(api_tail)
-    configured_base_url = explicit_base_url or os.environ.get("TANGLE_API_URL")
     if schema_source == "cache":
         base_url = configured_base_url or default_base_url()
         cached = load_cached_schema(base_url)
@@ -552,6 +571,7 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
                     token=token,
                     header=header,
                     auth_header=auth_header,
+                    include_env_credentials=include_env_credentials,
                 )
             except (httpx.HTTPError, RuntimeError, ValueError, json.JSONDecodeError) as fetch_exc:
                 raise SystemExit(_missing_official_schema_message()) from fetch_exc
@@ -727,27 +747,34 @@ def _schema_fetch_failure_message(base_url: str, exc: Exception) -> str:
 
 
 def _base_url_from_argv(argv: list[str]) -> str | None:
-    return (
-        _option_from_argv(argv, "--base-url")
-        or _option_from_argv(argv, "--api-url")
-        or _optional_str(_config_value_from_argv(argv, "base_url"))
+    value, _source = _base_url_with_source_from_argv(argv)
+    return value
+
+
+def _base_url_with_source_from_argv(argv: list[str]) -> tuple[str | None, str | None]:
+    cli_value = _option_from_argv(argv, "--base-url") or _option_from_argv(argv, "--api-url")
+    if cli_value is not None:
+        return cli_value, "cli"
+    config_value = _optional_str(_config_value_from_argv(argv, "base_url"))
+    if config_value is not None:
+        return config_value, "config"
+    return None, None
+
+
+def _token_from_argv(argv: list[str], *, include_env_credentials: bool = True) -> str | None:
+    token = _option_from_argv(argv, "--token") or _optional_str(_config_value_from_argv(argv, "token"))
+    if token is None and include_env_credentials:
+        token = default_token()
+    return token
+
+
+def _auth_header_from_argv(argv: list[str], *, include_env_credentials: bool = True) -> str | None:
+    auth_header = _option_from_argv(argv, "--auth-header") or _optional_str(
+        _config_value_from_argv(argv, "auth_header")
     )
-
-
-def _token_from_argv(argv: list[str]) -> str | None:
-    return (
-        _option_from_argv(argv, "--token")
-        or _optional_str(_config_value_from_argv(argv, "token"))
-        or default_token()
-    )
-
-
-def _auth_header_from_argv(argv: list[str]) -> str | None:
-    return (
-        _option_from_argv(argv, "--auth-header")
-        or _optional_str(_config_value_from_argv(argv, "auth_header"))
-        or default_auth_header()
-    )
+    if auth_header is None and include_env_credentials:
+        auth_header = default_auth_header()
+    return auth_header
 
 
 def _config_value_from_argv(argv: list[str], key: str) -> Any:

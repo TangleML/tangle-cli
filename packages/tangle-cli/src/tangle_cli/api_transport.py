@@ -68,6 +68,8 @@ def _request_headers(
     cli_header_entries: list[str] | str | None,
     cli_auth_header: str | None,
     extra_headers: dict[str, str] | None = None,
+    *,
+    include_env_credentials: bool = True,
 ) -> dict[str, str]:
     """Build request headers without printing or otherwise exposing secrets.
 
@@ -77,13 +79,14 @@ def _request_headers(
     """
 
     headers = {"Accept": "application/json"}
-    headers.update(_headers_from_env())
-    env_auth_header = default_auth_header()
-    if env_auth_header:
-        headers["Authorization"] = _normalize_auth_header(
-            env_auth_header, "TANGLE_API_AUTH_HEADER"
-        )
-    token = token or default_token()
+    if include_env_credentials:
+        headers.update(_headers_from_env())
+        env_auth_header = default_auth_header()
+        if env_auth_header:
+            headers["Authorization"] = _normalize_auth_header(
+                env_auth_header, "TANGLE_API_AUTH_HEADER"
+            )
+        token = token or default_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     if cli_auth_header:
@@ -172,6 +175,7 @@ def request_operation(
     body: Any = _MISSING,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     allow_body_file_references: bool = False,
+    include_env_credentials: bool = True,
 ) -> httpx.Response:
     """Dispatch one normalized OpenAPI operation as an HTTP request.
 
@@ -190,6 +194,7 @@ def request_operation(
         headers=headers,
         body=body,
         allow_body_file_references=allow_body_file_references,
+        include_env_credentials=include_env_credentials,
     )
     response = httpx.request(
         method,
@@ -213,6 +218,7 @@ def build_operation_request(
     headers: dict[str, str] | None = None,
     body: Any = _MISSING,
     allow_body_file_references: bool = False,
+    include_env_credentials: bool = True,
 ) -> tuple[str, str, dict[str, str], bytes | None]:
     """Build method, URL, headers, and body bytes for an operation."""
 
@@ -274,7 +280,13 @@ def build_operation_request(
             raise TypeError("body must be a JSON object when body field parameters are used")
         request_body.update(body_fields)
 
-    request_headers = _request_headers(token, header_entries, auth_header, headers)
+    request_headers = _request_headers(
+        token,
+        header_entries,
+        auth_header,
+        headers,
+        include_env_credentials=include_env_credentials,
+    )
     content = _body_to_content(request_body)
     if content is not None and "Content-Type" not in request_headers:
         request_headers["Content-Type"] = "application/json"
