@@ -405,6 +405,8 @@ def test_sdk_published_components_search_uses_config_with_cli_precedence(monkeyp
         "published_by: config@example.com\n"
         "digest: sha256:config\n"
         "base_url: https://config.example\n"
+        "token: config-token\n"
+        "auth_header: Bearer config-auth\n"
         "header:\n"
         "  - 'X-Config: yes'\n",
         encoding="utf-8",
@@ -444,8 +446,13 @@ def test_sdk_published_components_search_uses_config_with_cli_precedence(monkeyp
         "published_by": "config@example.com",
         "digest": "sha256:cli",
     }
-    assert client_calls[-1]["base_url"] == "https://config.example"
-    assert client_calls[-1]["header"] == ["X-Config: yes"]
+    assert client_calls[-1] == {
+        "base_url": "https://config.example",
+        "token": "config-token",
+        "auth_header": "Bearer config-auth",
+        "header": ["X-Config: yes"],
+        "include_env_credentials": False,
+    }
 
 
 def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tmp_path, capsys):
@@ -491,6 +498,7 @@ def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tm
     assert inspect_result["digest"] == "sha256:config"
     assert inspect_result["inspect"] == {"full_spec": True, "follow_deprecated": True}
     assert client_calls[-1]["base_url"] == "https://inspect.example"
+    assert client_calls[-1]["include_env_credentials"] is False
 
     run_app(
         app,
@@ -499,6 +507,7 @@ def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tm
     library_result = json.loads(capsys.readouterr().out)
     assert library_result == {"client_ok": True}
     assert client_calls[-1]["base_url"] == "https://library.example"
+    assert client_calls[-1]["include_env_credentials"] is False
 
 
 def test_sdk_published_components_client_from_options_uses_static_client():
@@ -509,6 +518,7 @@ def test_sdk_published_components_client_from_options_uses_static_client():
         token="token",
         auth_header="Bearer auth",
         header=["X-Test: yes"],
+        include_env_credentials=False,
     )
 
     assert isinstance(client, TangleApiClient)
@@ -516,6 +526,7 @@ def test_sdk_published_components_client_from_options_uses_static_client():
     assert client.token == "token"
     assert client.auth_header == "Bearer auth"
     assert client.header == ["X-Test: yes"]
+    assert client.include_env_credentials is False
 
 
 def test_sdk_published_components_inspect_requires_name_or_digest():

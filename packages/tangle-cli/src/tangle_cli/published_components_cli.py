@@ -53,6 +53,7 @@ def _client_from_options(
     token: str | None = None,
     auth_header: str | None = None,
     header: list[str] | None = None,
+    include_env_credentials: bool = True,
 ) -> Any:
     """Create the static client used by published-component commands."""
 
@@ -73,6 +74,7 @@ def _client_from_options(
         auth_header=auth_header,
         header=header,
         timeout=DEFAULT_TIMEOUT_SECONDS,
+        include_env_credentials=include_env_credentials,
     )
 
 
@@ -89,6 +91,11 @@ def _load_args(config: str | None, **kwargs: Any) -> list[ArgsContainer]:
 
 def _optional_path(value: str | pathlib.Path | None) -> pathlib.Path | None:
     return pathlib.Path(value) if value is not None else None
+
+
+def _include_env_credentials(args: ArgsContainer, cli_base_url: str | None) -> bool:
+    config_base_url = getattr(args, "_config", {}).get("base_url")
+    return not (cli_base_url is None and config_base_url is not None)
 
 
 def _api_arg_specs(
@@ -175,6 +182,7 @@ def published_components_search(
             token=args.token,
             auth_header=args.auth_header,
             header=args.header,
+            include_env_credentials=_include_env_credentials(args, base_url),
         )
         _print_json(
             search_components(
@@ -229,6 +237,7 @@ def published_components_inspect(
             token=args.token,
             auth_header=args.auth_header,
             header=args.header,
+            include_env_credentials=_include_env_credentials(args, base_url),
         )
         if args.digest:
             result = inspect_by_digest(
@@ -274,6 +283,7 @@ def published_components_library(
             token=args.token,
             auth_header=args.auth_header,
             header=args.header,
+            include_env_credentials=_include_env_credentials(args, base_url),
         )
         _print_json(get_standard_library(client))
 
@@ -323,47 +333,44 @@ def published_components_publish(
             header=header,
         ),
     )
-    first_args = all_args[0]
-    client = None if first_args.dry_run else _client_from_options(
-        base_url=first_args.base_url,
-        token=first_args.token,
-        auth_header=first_args.auth_header,
-        header=first_args.header,
-    )
-    publisher = ComponentPublisher(
-        dry_run=bool(first_args.dry_run),
-        git_remote_sha=first_args.git_remote_sha,
-        git_remote_branch=first_args.git_remote_branch,
-        git_remote_url=first_args.git_remote_url,
-        git_root=first_args.git_root,
-        published_by=first_args.published_by,
-        client=client,
-    )
-    component_configs = [
-        {
-            "component_path": args.component_path,
-            "image": args.image,
-            "name": args.name,
-            "description": args.description,
-            "annotations": args.annotations,
-        }
-        for args in all_args
-    ]
-    exit_code = publisher.publish_components(component_configs)
-    results = [
-        {"component_path": path, **result.to_dict()}
-        for path, result in getattr(publisher, "results", [])
-    ]
-    error_count = sum(1 for result in results if result.get("status") == "error")
+    results: list[dict[str, Any]] = []
+    for args in all_args:
+        client = None if args.dry_run else _client_from_options(
+            base_url=args.base_url,
+            token=args.token,
+            auth_header=args.auth_header,
+            header=args.header,
+            include_env_credentials=_include_env_credentials(args, base_url),
+        )
+        publisher = ComponentPublisher(
+            dry_run=bool(args.dry_run),
+            git_remote_sha=args.git_remote_sha,
+            git_remote_branch=args.git_remote_branch,
+            git_remote_url=args.git_remote_url,
+            git_root=args.git_root,
+            published_by=args.published_by,
+            client=client,
+        )
+        result = publisher.publish_component(
+            args.component_path,
+            image=args.image,
+            name=args.name,
+            description=args.description,
+            annotations=args.annotations,
+        )
+        result_dict = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+        results.append({"component_path": str(args.component_path), **result_dict})
+
+    error_count = sum(1 for result in results if result.get("status") in {"error", "failed"})
     summary = {
-        "status": "failed" if exit_code else "success",
+        "status": "failed" if error_count else "success",
         "components_count": len(results),
         "error_count": error_count,
         "results": results,
     }
     _print_json(summary)
-    if exit_code != 0:
-        raise SystemExit(exit_code)
+    if error_count:
+        raise SystemExit(1)
 
 
 @app.command(name="deprecate")
@@ -395,6 +402,7 @@ def published_components_deprecate(
             token=args.token,
             auth_header=args.auth_header,
             header=args.header,
+            include_env_credentials=_include_env_credentials(args, base_url),
         )
         result = deprecate_component(
             client,
