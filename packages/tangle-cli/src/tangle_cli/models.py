@@ -9,41 +9,19 @@ etc. They are used by wrapper packages and OpenAPI-backed client helpers.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tangle_api.generated.models import ComponentSpec, GetExecutionInfoResponse
 
+from .utils import (
+    _optional_str,
+    _strip_text_from_graph,
+    _value_from_mapping_or_object,
+    add_official_prefix,
+)
 
-# ---- Helpers ---------------------------------------------------------------
-
-
-def _strip_text_from_graph(implementation: dict[str, Any]) -> None:
-    """Recursively remove ``text`` from ``componentRef`` objects in a graph implementation."""
-    graph = implementation.get("graph", {})
-    for task_data in graph.get("tasks", {}).values():
-        ref = task_data.get("componentRef")
-        if not ref:
-            continue
-        ref.pop("text", None)
-        spec = ref.get("spec", {})
-        nested_impl = spec.get("implementation")
-        if nested_impl and "graph" in nested_impl:
-            _strip_text_from_graph(nested_impl)
-
-
-def add_official_prefix(name):
-    """
-    Add the [Official] prefix to a component name if not already present.
-
-    Args:
-        name: The original component name
-
-    Returns:
-        The name with [Official] prefix
-    """
-    if name and not name.startswith("[Official]"):
-        return f"[Official] {name}"
-    return name
+if TYPE_CHECKING:
+    from tangle_api.generated.models import GetArtifactInfoResponse
 
 
 # ---- Execution / Run dataclasses -------------------------------------------
@@ -322,12 +300,34 @@ class ArtifactInfo:
         ad = data.get("artifact_data", {})
         return cls(
             id=data.get("id", ""),
-            uri=ad.get("uri", ""),
+            uri=_value_from_mapping_or_object(ad, "uri", ""),
             key=key,
-            total_size=ad.get("total_size", 0),
-            is_dir=ad.get("is_dir", False),
-            hash=ad.get("hash"),
-            created_at=ad.get("created_at"),
+            total_size=_value_from_mapping_or_object(ad, "total_size", 0),
+            is_dir=_value_from_mapping_or_object(ad, "is_dir", False),
+            hash=_optional_str(_value_from_mapping_or_object(ad, "hash")),
+            created_at=_optional_str(_value_from_mapping_or_object(ad, "created_at")),
+        )
+
+    @classmethod
+    def from_response(
+        cls,
+        response: GetArtifactInfoResponse,
+        *,
+        key: str = "",
+    ) -> ArtifactInfo:
+        """Create a flattened artifact DTO from a generated artifact response."""
+
+        artifact_data = getattr(response, "artifact_data", None)
+        total_size = _value_from_mapping_or_object(artifact_data, "total_size", 0)
+        is_dir = _value_from_mapping_or_object(artifact_data, "is_dir", False)
+        return cls(
+            id=str(getattr(response, "id", "") or ""),
+            uri=str(_value_from_mapping_or_object(artifact_data, "uri", "") or ""),
+            key=key,
+            total_size=total_size if isinstance(total_size, int) else 0,
+            is_dir=is_dir if isinstance(is_dir, bool) else False,
+            hash=_optional_str(_value_from_mapping_or_object(artifact_data, "hash")),
+            created_at=_optional_str(_value_from_mapping_or_object(artifact_data, "created_at")),
         )
 
 

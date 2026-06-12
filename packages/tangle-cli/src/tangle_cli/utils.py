@@ -10,13 +10,66 @@ import os
 import re
 import subprocess
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from tangle_cli.logger import Logger, get_default_logger
+
+# =============================================================================
+# Generic Data Helpers
+# =============================================================================
+
+
+def _strip_text_from_graph(implementation: dict[str, Any]) -> None:
+    """Recursively remove raw component text from graph component references."""
+
+    graph = implementation.get("graph", {})
+    for task_data in graph.get("tasks", {}).values():
+        ref = task_data.get("componentRef")
+        if not ref:
+            continue
+        ref.pop("text", None)
+        spec = ref.get("spec", {})
+        nested_impl = spec.get("implementation")
+        if nested_impl and "graph" in nested_impl:
+            _strip_text_from_graph(nested_impl)
+
+
+def add_official_prefix(name: str | None) -> str | None:
+    """Return the official component name variant used by registry searches."""
+
+    if name and not name.startswith("[Official]"):
+        return f"[Official] {name}"
+    return name
+
+
+def _value_from_mapping_or_object(value: object, key: str, default: Any = None) -> Any:
+    """Read a field from a mapping, generated model, or attribute object."""
+
+    if isinstance(value, Mapping):
+        return value.get(key, default)
+
+    get = getattr(value, "get", None)
+    if callable(get):
+        return get(key, default)
+
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        data = to_dict()
+        if isinstance(data, Mapping):
+            return data.get(key, default)
+
+    return getattr(value, key, default)
+
+
+def _optional_str(value: Any) -> str | None:
+    """Return *value* only when it is already a string."""
+
+    return value if isinstance(value, str) else None
+
 
 # =============================================================================
 # Numeric Helpers

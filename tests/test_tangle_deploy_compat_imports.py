@@ -44,8 +44,6 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
         SecretInfo,
         TaskSpec,
         UserInfo,
-        _strip_text_from_graph,
-        add_official_prefix,
     )
     from tangle_cli.utils import (
         _CI_BRANCH_VARS,
@@ -54,6 +52,8 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
         _CI_SHA_VARS,
         OrderedDict,
         TaskProcessor,
+        _strip_text_from_graph,
+        add_official_prefix,
         UnsetVarError,
         _extract_recursive_params,
         _extract_source_dir,

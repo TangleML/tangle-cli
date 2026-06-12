@@ -45,6 +45,19 @@ def _write_runtime_stubs(path: Path) -> None:
     path.mkdir(exist_ok=True)
     (path / "httpx.py").write_text("", encoding="utf-8")
     (path / "platformdirs.py").write_text("", encoding="utf-8")
+    (path / "yaml.py").write_text(
+        "class ScalarNode:\n"
+        "    pass\n"
+        "\n"
+        "class SafeDumper:\n"
+        "    @classmethod\n"
+        "    def add_representer(cls, *args, **kwargs): pass\n"
+        "\n"
+        "def add_representer(*args, **kwargs): pass\n"
+        "def safe_load(*args, **kwargs): return None\n"
+        "def dump(*args, **kwargs): return ''\n",
+        encoding="utf-8",
+    )
     (path / "requests.py").write_text(
         "class Session:\n"
         "    def request(self, *args, **kwargs):\n"

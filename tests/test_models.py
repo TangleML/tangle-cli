@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from tangle_api.generated.models import (
+    ArtifactData,
     ComponentSpec as GeneratedComponentSpec,
+    GetArtifactInfoResponse,
     GetExecutionInfoResponse,
 )
 from tangle_cli.models import (
+    ArtifactInfo,
     ComponentInfo,
     ComponentSpec,
     ContainerState,
@@ -14,8 +17,8 @@ from tangle_cli.models import (
     PipelineRun,
     SecretInfo,
     UserInfo,
-    add_official_prefix,
 )
+from tangle_cli.utils import add_official_prefix
 
 
 class TestPipelineRun:
@@ -183,6 +186,84 @@ class TestContainerState:
             },
         })
         assert state.pod_name == "job-abc"
+
+
+class TestArtifactInfo:
+    def test_from_response_accepts_mapping_artifact_data(self):
+        response = GetArtifactInfoResponse.from_dict({
+            "id": "artifact-1",
+            "artifact_data": {
+                "uri": "gs://bucket/path",
+                "total_size": 42,
+                "is_dir": False,
+                "hash": "sha256:abc",
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+        })
+
+        info = ArtifactInfo.from_response(response, key="output")
+
+        assert info == ArtifactInfo(
+            id="artifact-1",
+            uri="gs://bucket/path",
+            key="output",
+            total_size=42,
+            is_dir=False,
+            hash="sha256:abc",
+            created_at="2026-01-01T00:00:00Z",
+        )
+
+    def test_from_response_accepts_generated_artifact_data_model(self):
+        response = GetArtifactInfoResponse(
+            id="artifact-2",
+            artifact_data=ArtifactData(
+                uri="gs://bucket/model",
+                total_size=128,
+                is_dir=True,
+                hash="sha256:def",
+                created_at="2026-01-02T00:00:00Z",
+            ),
+        )
+
+        info = ArtifactInfo.from_response(response)
+
+        assert info.id == "artifact-2"
+        assert info.uri == "gs://bucket/model"
+        assert info.total_size == 128
+        assert info.is_dir is True
+        assert info.hash == "sha256:def"
+        assert info.created_at == "2026-01-02T00:00:00Z"
+
+    def test_from_response_accepts_attribute_artifact_data_object(self):
+        class ArtifactDataObject:
+            uri = "gs://bucket/object"
+            total_size = 7
+            is_dir = False
+            hash = "sha256:ghi"
+            created_at = "2026-01-03T00:00:00Z"
+
+        class ResponseObject:
+            id = "artifact-3"
+            artifact_data = ArtifactDataObject()
+
+        info = ArtifactInfo.from_response(ResponseObject())
+
+        assert info.id == "artifact-3"
+        assert info.uri == "gs://bucket/object"
+        assert info.total_size == 7
+        assert info.is_dir is False
+        assert info.hash == "sha256:ghi"
+        assert info.created_at == "2026-01-03T00:00:00Z"
+
+    def test_from_dict_keeps_existing_mapping_behavior(self):
+        info = ArtifactInfo.from_dict({
+            "id": "artifact-4",
+            "artifact_data": {"uri": "gs://bucket/from-dict", "total_size": 1},
+        })
+
+        assert info.id == "artifact-4"
+        assert info.uri == "gs://bucket/from-dict"
+        assert info.total_size == 1
 
 
 class TestUserAndSecret:
