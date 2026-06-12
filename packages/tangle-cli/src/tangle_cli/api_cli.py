@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import sys
 from typing import Annotated, Any
@@ -519,9 +520,11 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
         return None
 
     schema_source = _schema_source_from_argv(api_tail)
-    base_url = _base_url_from_argv(api_tail) or default_base_url()
-    cached = load_cached_schema(base_url)
+    explicit_base_url = _base_url_from_argv(api_tail)
+    configured_base_url = explicit_base_url or os.environ.get("TANGLE_API_URL")
     if schema_source == "cache":
+        base_url = configured_base_url or default_base_url()
+        cached = load_cached_schema(base_url)
         if cached is None:
             raise SystemExit(
                 f"No cached OpenAPI schema for {_normalize_base_url(base_url)}. "
@@ -530,6 +533,7 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
             )
         return cached
 
+    cached = load_cached_schema(configured_base_url) if configured_base_url else None
     try:
         official = load_bundled_openapi_schema()
     except FileNotFoundError as exc:

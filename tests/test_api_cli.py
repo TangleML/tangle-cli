@@ -591,6 +591,40 @@ def test_api_help_without_official_schema_keeps_static_commands_unregistered(mon
     assert "published-components" not in output
 
 
+def test_api_help_with_ambient_auth_does_not_probe_implicit_localhost(
+    monkeypatch, tmp_path, capsys
+):
+    def fail_load_cached_schema(base_url):  # pragma: no cover - assertion helper
+        raise AssertionError(f"must not inspect cache for implicit base URL {base_url}")
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TANGLE_API_TOKEN", "secret-token")
+    monkeypatch.delenv("TANGLE_API_URL", raising=False)
+    monkeypatch.setattr(api_cli, "load_cached_schema", fail_load_cached_schema)
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", "--help"])
+
+    app = api_cli.build_app()
+    run_app(app, ["--help"])
+
+    output = capsys.readouterr().out
+    assert "refresh" in output
+    assert "published-components" in output
+
+
+def test_generated_command_with_ambient_auth_still_requires_explicit_base_url(monkeypatch):
+    monkeypatch.setenv("TANGLE_API_TOKEN", "secret-token")
+    monkeypatch.delenv("TANGLE_API_URL", raising=False)
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "pipeline-runs", "list"],
+    )
+
+    app = api_cli.build_app(SCHEMA)
+    with pytest.raises(SystemExit, match="refusing to send credentials to default"):
+        app(["pipeline-runs", "list"])
+
+
 def test_official_static_command_without_schema_fails_with_actionable_error(monkeypatch, tmp_path):
     def fail_load_schema():
         raise FileNotFoundError("missing tangle_api.schema")
