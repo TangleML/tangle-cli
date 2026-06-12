@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tangle_cli.generated.models import ComponentSpec as GeneratedComponentSpec
 from tangle_cli.models import (
     ComponentInfo,
     ComponentSpec,
@@ -54,6 +55,10 @@ class TestGraphExecutionState:
 
 
 class TestComponentSpec:
+    def test_component_spec_is_generated_model_with_extensions(self):
+        assert ComponentSpec is GeneratedComponentSpec
+        assert ComponentSpec.__mro__[1].__name__ == "ComponentSpecExtensions"
+
     def test_from_yaml_basic(self):
         yaml_text = """\
 name: my-component

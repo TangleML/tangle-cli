@@ -14,7 +14,7 @@ try:
 except ImportError:  # pragma: no cover - pydantic v1 fallback
     ConfigDict = None  # type: ignore[assignment]
 
-from tangle_cli.generated_model_extensions import GetGraphExecutionStateResponseExtensions
+from tangle_cli.generated_model_extensions import ComponentSpecExtensions, GetGraphExecutionStateResponseExtensions
 
 
 class TangleGeneratedModel(BaseModel):
@@ -122,7 +122,7 @@ class ComponentResponse(TangleGeneratedModel):
     digest: Any = None
     text: Any = None
 
-class ComponentSpec(TangleGeneratedModel):
+class ComponentSpec(ComponentSpecExtensions, TangleGeneratedModel):
     description: Any = None
     implementation: Any = None
     inputs: Any = None

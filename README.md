@@ -189,6 +189,8 @@ OpenAPI schema. Handwritten semantic helpers such as
 `find_existing_components(...)` return domain models; that helper accepts
 component specs, mapping references, or plain names plus optional names/digests
 and publisher filters, and returns a de-duplicated `list[ComponentInfo]`.
+`ComponentSpec` is the generated OpenAPI model extended with YAML parsing and
+legacy convenience helpers, and remains re-exported from `tangle_cli.models`.
 
 To refresh the checked-in generated methods/models from the official Tangle
 backend submodule, run:
