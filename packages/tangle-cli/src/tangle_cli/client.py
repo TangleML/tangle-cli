@@ -538,8 +538,10 @@ class TangleApiClient(GeneratedTangleApiOperations):
 
     def get_run_pipeline_spec(self, run_id: str) -> TaskSpec | None:
         try:
-            run = PipelineRun.from_dict(_to_plain(self.pipeline_runs_get(run_id)))
-            root_execution_id = run.root_execution_id
+            run = self.pipeline_runs_get(run_id)
+            root_execution_id = getattr(run, "root_execution_id", None)
+            if root_execution_id is None and isinstance(run, dict):
+                root_execution_id = run.get("root_execution_id")
         except requests.HTTPError as exc:
             if exc.response is None or exc.response.status_code != 404:
                 raise
