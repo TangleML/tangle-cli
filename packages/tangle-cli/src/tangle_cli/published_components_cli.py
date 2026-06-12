@@ -3,18 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated
+from typing import Annotated, Any
 
 from cyclopts import App, Parameter
 
 from .api_transport import DEFAULT_TIMEOUT_SECONDS
-from .client import TangleApiClient
-from .component_inspector import (
-    get_standard_library,
-    inspect_by_digest,
-    inspect_by_name,
-    search_components,
-)
 
 BaseUrlOption = Annotated[
     str | None,
@@ -54,8 +47,19 @@ def _client_from_options(
     token: str | None = None,
     auth_header: str | None = None,
     header: list[str] | None = None,
-) -> TangleApiClient:
+) -> Any:
     """Create the static client used by published-component commands."""
+
+    try:
+        from .client import TangleApiClient
+    except ModuleNotFoundError as exc:
+        if exc.name == "tangle_api":
+            raise SystemExit(
+                "Native generated Tangle API bindings are required for "
+                "published-component commands. Install tangle-cli[native] "
+                "or provide a local tangle_api.generated package."
+            ) from exc
+        raise
 
     return TangleApiClient(
         base_url=base_url,
@@ -68,6 +72,30 @@ def _client_from_options(
 
 def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def search_components(*args: Any, **kwargs: Any) -> Any:
+    from .component_inspector import search_components as _search_components
+
+    return _search_components(*args, **kwargs)
+
+
+def inspect_by_digest(*args: Any, **kwargs: Any) -> Any:
+    from .component_inspector import inspect_by_digest as _inspect_by_digest
+
+    return _inspect_by_digest(*args, **kwargs)
+
+
+def inspect_by_name(*args: Any, **kwargs: Any) -> Any:
+    from .component_inspector import inspect_by_name as _inspect_by_name
+
+    return _inspect_by_name(*args, **kwargs)
+
+
+def get_standard_library(*args: Any, **kwargs: Any) -> Any:
+    from .component_inspector import get_standard_library as _get_standard_library
+
+    return _get_standard_library(*args, **kwargs)
 
 
 @app.command(name="search")

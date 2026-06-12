@@ -25,6 +25,9 @@ Documentation = "https://tangleml.com/docs/"
 Repository = "https://github.com/TangleML/tangle-cli"
 Issues = "https://github.com/TangleML/tangle-cli/issues"
 
+[project.optional-dependencies]
+native = ["tangle-api==0.0.1"]
+
 [project.scripts]
 tangle = "tangle_cli.cli:main"
 
@@ -33,11 +36,15 @@ requires = ["uv_build>=0.11.2,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-# Set the module-root to an empty string for a flat layout
-module-root = ""
+module-root = "packages/tangle-cli/src"
 
 [tool.uv.sources]
 cloud-pipelines-backend = { git = "https://github.com/TangleML/tangle", rev = "stable_cli" }
+tangle-api = { workspace = true }
+tangle-cli = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/tangle-api"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -45,6 +52,7 @@ testpaths = ["tests"]
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "tangle-api",
 ]
 codegen = [
     # Mirrors third_party/tangle backend import requirements used by

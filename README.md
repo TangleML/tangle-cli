@@ -184,14 +184,25 @@ existing = client.find_existing_components(
 ```
 
 `TangleApiClient` uses checked-in endpoint methods generated offline from
-`tangle_cli/openapi/openapi.json`, so normal imports do not fetch or parse the
-OpenAPI schema. Handwritten semantic helpers such as
+`tangle_cli/openapi/openapi.json` into the native `tangle_api.generated` package,
+so normal imports do not fetch or parse the OpenAPI schema. Handwritten semantic
+helpers such as
 `find_existing_components(...)` return domain models; that helper accepts
 component specs, mapping references, or plain names plus optional names/digests
 and publisher filters, and returns a de-duplicated `list[ComponentInfo]`.
 `ComponentSpec` is a generated OpenAPI model extended with legacy convenience
 helpers, and remains re-exported from `tangle_cli.models`. Execution detail
-helpers use the generated `GetExecutionInfoResponse` model directly.
+helpers use the generated `GetExecutionInfoResponse` model directly. The top-level
+`import tangle_cli` is lightweight and does not import native static bindings;
+install the `native` extra or otherwise provide a local `tangle_api.generated`
+package before importing `tangle_cli.client`.
+
+The repository is split into two import packages: `tangle_cli` contains the CLI,
+business helpers, dynamic discovery, codegen, runtime base classes, and default
+model extensions; `tangle_api` contains only the native checked-in generated
+models and operation proxies for the official OSS API. Downstream consumers that
+vendor `tangle_cli` can generate their own local `tangle_api.generated` package
+from their schema without vendoring cli-lab's native generated package.
 
 To refresh the checked-in generated methods/models from the official Tangle
 backend submodule, run:
@@ -205,14 +216,14 @@ uv run pytest
 
 With no source flags, codegen loads OpenAPI from the default official backend
 submodule at `third_party/tangle`, writes `tangle_cli/openapi/openapi.json`, and
-regenerates `tangle_cli/generated`. The backend import creates a database engine
+regenerates `packages/tangle-api/src/tangle_api/generated`. The backend import creates a database engine
 at import time; codegen points it at a temporary SQLite database unless
 `--backend-database-uri` is provided. If the submodule is missing, initialize it
 with `git submodule update --init --recursive`.
 
 `--out` controls where generated support modules are written. It defaults to
-`tangle_cli/generated`, which is the package support module used by the public
-`tangle_cli/client.py` wrapper. `--operations-class-name` controls the generated
+`packages/tangle-api/src/tangle_api/generated`, which is the native generated
+package used by the public `tangle_cli/client.py` wrapper. `--operations-class-name` controls the generated
 operations class name in `<out>/operations.py`; it defaults to
 `GeneratedTangleApiOperations`. `--model-extension-module` points codegen at an
 importable module with a `MODEL_EXTENSIONS` mapping from generated model class
@@ -236,6 +247,7 @@ generated model classes. Codegen writes exactly these support files:
 <out>/operations.py
 ```
 
+The generated models import shared runtime helpers from `tangle_cli.generated_runtime`.
 The public client remains handwritten at `tangle_cli/client.py`; codegen does not
 create a default generated public client wrapper.
 
@@ -249,7 +261,7 @@ uv run python -m tangle_cli.openapi.codegen --from-snapshot
 If you already have a remote OpenAPI JSON document, fetch that directly instead:
 
 ```bash
-uv run python -m tangle_cli.openapi.codegen --openapi-url https://example.com/openapi.json --out tangle_cli/generated
+uv run python -m tangle_cli.openapi.codegen --openapi-url https://example.com/openapi.json --out src/tangle_api/generated
 ```
 
 For example, the raw GitHub snapshot form is expressible as:
@@ -263,7 +275,7 @@ Downstream tools can point `--out` at their own generated support package, e.g.:
 ```bash
 uv run python -m tangle_cli.openapi.codegen \
   --openapi-url https://oasis.shopify.io/openapi.json \
-  --out src/tangle_deploy/generated_api \
+  --out src/tangle_api/generated \
   --operations-class-name GeneratedTangleApiExtensions \
   --model-extension-module tangle_deploy.tangle_api_model_extensions
 ```

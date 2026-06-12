@@ -5,9 +5,9 @@ from typing import Any
 
 import requests
 
-from tangle_cli import TangleApiClient
+from tangle_cli.client import TangleApiClient
 from tangle_cli.logger import CaptureLogger
-from tangle_cli.generated.models import (
+from tangle_api.generated.models import (
     GetExecutionInfoResponse,
     GetGraphExecutionStateResponse,
     ListPublishedComponentsResponse,

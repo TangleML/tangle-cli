@@ -25,8 +25,8 @@ from typing import Any
 
 from .parser import DEFAULT_OPENAPI_PATH, load_openapi_schema, parsed_operations
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_GENERATED_DIR = _REPO_ROOT / "tangle_cli" / "generated"
+_REPO_ROOT = Path(__file__).resolve().parents[5]
+_GENERATED_DIR = _REPO_ROOT / "packages" / "tangle-api" / "src" / "tangle_api" / "generated"
 DEFAULT_BACKEND_PATH = _REPO_ROOT / "third_party" / "tangle"
 DEFAULT_OPERATIONS_CLASS_NAME = "GeneratedTangleApiOperations"
 DEFAULT_MODEL_EXTENSION_MODULE = "tangle_cli.generated_model_extensions"
@@ -223,12 +223,9 @@ def generate_models(
         "",
         "from typing import Any",
         "",
-        "from pydantic import BaseModel, Field",
+        "from pydantic import Field",
         "",
-        "try:",
-        "    from pydantic import ConfigDict",
-        "except ImportError:  # pragma: no cover - pydantic v1 fallback",
-        "    ConfigDict = None  # type: ignore[assignment]",
+        "from tangle_cli.generated_runtime import TangleGeneratedModel",
         "",
     ]
 
@@ -247,38 +244,7 @@ def generate_models(
         imports = ", ".join(sorted(set(used_extensions.values())))
         lines.extend([f"from {model_extension_module} import {imports}", ""])
 
-    lines.extend([
-        "",
-        "class TangleGeneratedModel(BaseModel):",
-        "    \"\"\"Base for generated response models with dict-like conveniences.\"\"\"",
-        "",
-        "    if ConfigDict is not None:",
-        "        model_config = ConfigDict(extra=\"allow\", populate_by_name=True)",
-        "    else:  # pragma: no cover - pydantic v1 fallback",
-        "        class Config:",
-        "            extra = \"allow\"",
-        "            allow_population_by_field_name = True",
-        "",
-        "    def get(self, key: str, default: Any = None) -> Any:",
-        "        return self.to_dict().get(key, default)",
-        "",
-        "    def __getitem__(self, key: str) -> Any:",
-        "        return self.to_dict()[key]",
-        "",
-        "    def to_dict(self) -> dict[str, Any]:",
-        "        if hasattr(self, \"model_dump\"):",
-        "            return self.model_dump(by_alias=True)",
-        "        return self.dict(by_alias=True)",
-        "",
-        "    @classmethod",
-        "    def from_dict(cls, data: dict[str, Any]) -> Any:",
-        "        if hasattr(cls, \"model_validate\"):",
-        "            return cls.model_validate(data)",
-        "        return cls.parse_obj(data)",
-        "",
-    ])
-
-    exports = ["TangleGeneratedModel"]
+    exports: list[str] = []
     for schema_name, schema_def in sorted(schemas.items(), key=lambda item: _class_name(item[0])):
         class_name = _class_name(schema_name)
         exports.append(class_name)
@@ -590,7 +556,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--out",
         default=str(_GENERATED_DIR),
-        help="Generated support module directory (default: tangle_cli/generated).",
+        help="Generated support module directory (default: packages/tangle-api/src/tangle_api/generated).",
     )
     parser.add_argument(
         "--operations-class-name",
