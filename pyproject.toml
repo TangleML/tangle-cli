@@ -12,11 +12,13 @@ dependencies = [
     "cloud-pipelines>=0.26.3.12",
     "cloud-pipelines-backend",
     "cyclopts>=4.16.1",
+    "docstring-parser>=0.16",
     "httpx>=0.28.1",
     "platformdirs>=4.10.0",
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "requests>=2.32.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.urls]
