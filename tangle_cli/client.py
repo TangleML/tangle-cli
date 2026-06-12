@@ -367,6 +367,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         root_execution_id = execution_id or run.root_execution_id
         execution = self.get_execution_details(root_execution_id) if root_execution_id else None
         if execution and not include_implementations:
+            self._strip_execution_raw_tasks_for_run_details(execution)
             execution.strip_implementations()
         raw_annotations = self.pipeline_runs_annotations(run_id) if include_annotations else None
         annotations = raw_annotations if isinstance(raw_annotations, dict) else None
@@ -392,17 +393,90 @@ class TangleApiClient(GeneratedTangleApiOperations):
         child_ids = execution.raw.get("child_task_execution_ids") or {}
         if not isinstance(child_ids, dict):
             return
+
+        raw_tasks = self._execution_graph_tasks(execution)
         for task_name, child_execution_id in child_ids.items():
             if not child_execution_id:
                 continue
             child = self.executions_details(child_execution_id)
             self._enrich_execution_tree(child)
             execution.child_executions[task_name] = child
+
             task = execution.task_spec.graph_tasks.get(task_name)
+            raw_task = raw_tasks.get(task_name) if isinstance(raw_tasks, dict) else None
+            if raw_task is None and task is not None:
+                raw_task = task.raw
+
+            context = {
+                "execution_id": child.id,
+                "input_artifacts": child.input_artifacts,
+                "output_artifacts": child.output_artifacts,
+            }
+            if child.raw.get("state") is not None:
+                context["state"] = child.raw["state"]
+
             if task is not None:
-                task.raw["execution_id"] = child.id
-                task.raw["input_artifacts"] = child.input_artifacts
-                task.raw["output_artifacts"] = child.output_artifacts
+                task.raw.update(context)
+            if isinstance(raw_task, dict):
+                raw_task.update(context)
+                child_impl = (
+                    child.task_spec.component_spec.implementation
+                    if child.task_spec.component_spec
+                    else None
+                )
+                raw_spec = raw_task.get("componentRef", {}).get("spec")
+                if isinstance(raw_spec, dict) and child_impl:
+                    raw_spec["implementation"] = child_impl
+
+    @staticmethod
+    def _execution_graph_tasks(execution: GetExecutionInfoResponse) -> dict[str, Any]:
+        implementation = (
+            execution.task_spec.component_spec.implementation
+            if execution.task_spec.component_spec
+            else None
+        )
+        if not isinstance(implementation, dict):
+            return {}
+        graph = implementation.get("graph")
+        if not isinstance(graph, dict):
+            return {}
+        tasks = graph.get("tasks")
+        return tasks if isinstance(tasks, dict) else {}
+
+    def _strip_execution_raw_tasks_for_run_details(
+        self,
+        execution: GetExecutionInfoResponse,
+    ) -> None:
+        for raw_task in self._execution_graph_tasks(execution).values():
+            if isinstance(raw_task, dict):
+                self._strip_raw_task_for_run_details(raw_task)
+        for child in execution.child_executions.values():
+            self._strip_execution_raw_tasks_for_run_details(child)
+
+    def _strip_raw_task_for_run_details(self, task: dict[str, Any]) -> None:
+        component_ref = task.get("componentRef")
+        if not isinstance(component_ref, dict):
+            return
+        component_ref.pop("text", None)
+        spec = component_ref.get("spec")
+        if not isinstance(spec, dict):
+            return
+
+        annotations = spec.get("metadata", {}).get("annotations")
+        if isinstance(annotations, dict):
+            for key in ComponentSpec._STRIP_ANNOTATION_KEYS:
+                annotations.pop(key, None)
+
+        implementation = spec.get("implementation")
+        if not isinstance(implementation, dict):
+            return
+        graph = implementation.get("graph")
+        if isinstance(graph, dict) and isinstance(graph.get("tasks"), dict):
+            for child_task in graph["tasks"].values():
+                if isinstance(child_task, dict):
+                    self._strip_raw_task_for_run_details(child_task)
+        else:
+            spec.pop("implementation", None)
 
 
 def _to_plain(value: Any) -> Any:

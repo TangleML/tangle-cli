@@ -168,6 +168,126 @@ def test_get_run_details_uses_native_operations_for_retained_semantic_helper() -
     ]
 
 
+def graph_execution_payload() -> dict[str, Any]:
+    return {
+        "id": "exec-parent",
+        "pipeline_run_id": "run-1",
+        "task_spec": {
+            "componentRef": {
+                "spec": {
+                    "name": "root",
+                    "implementation": {
+                        "graph": {
+                            "tasks": {
+                                "child": {
+                                    "componentRef": {
+                                        "digest": "sha256:child",
+                                        "text": "name: child\nimplementation: bulky\n",
+                                        "spec": {
+                                            "name": "child-placeholder",
+                                            "metadata": {
+                                                "annotations": {
+                                                    "python_original_code": "print('x')",
+                                                    "keep": "yes",
+                                                }
+                                            },
+                                            "implementation": {
+                                                "container": {"image": "placeholder"}
+                                            },
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        },
+        "child_task_execution_ids": {"child": "exec-child"},
+        "input_artifacts": {},
+        "output_artifacts": {},
+    }
+
+
+def child_execution_payload() -> dict[str, Any]:
+    return {
+        "id": "exec-child",
+        "pipeline_run_id": "run-1",
+        "state": "SUCCEEDED",
+        "task_spec": {
+            "componentRef": {
+                "spec": {
+                    "name": "child-real",
+                    "implementation": {
+                        "container": {"image": "python:3.12-slim"}
+                    },
+                }
+            }
+        },
+        "child_task_execution_ids": {},
+        "input_artifacts": {"input": {"id": "artifact-in"}},
+        "output_artifacts": {"output": {"id": "artifact-out"}},
+    }
+
+
+def test_get_run_details_enriches_raw_graph_tasks_and_strips_compact_output() -> None:
+    session = FakeSession([
+        response({"id": "run-1", "root_execution_id": "exec-parent"}),
+        response(graph_execution_payload()),
+        response(child_execution_payload()),
+    ])
+    client = TangleApiClient("https://api.test", session=session)
+
+    details = client.get_run_details("run-1")
+
+    execution = details.execution
+    assert isinstance(execution, GetExecutionInfoResponse)
+    task = execution.tasks["child"]
+    raw_task = execution.raw["task_spec"]["componentRef"]["spec"]["implementation"]["graph"]["tasks"]["child"]
+
+    expected_context = {
+        "execution_id": "exec-child",
+        "input_artifacts": {"input": "artifact-in"},
+        "output_artifacts": {"output": "artifact-out"},
+        "state": "SUCCEEDED",
+    }
+    for key, value in expected_context.items():
+        assert task.raw[key] == value
+        assert raw_task[key] == value
+
+    assert "text" not in raw_task["componentRef"]
+    raw_spec = raw_task["componentRef"]["spec"]
+    assert "implementation" not in raw_spec
+    assert raw_spec["metadata"]["annotations"] == {"keep": "yes"}
+    assert "text" not in task.raw["componentRef"]
+    assert "implementation" not in task.raw["componentRef"]["spec"]
+    assert execution.child_executions["child"].id == "exec-child"
+
+
+def test_get_run_details_preserves_raw_graph_implementations_when_requested() -> None:
+    session = FakeSession([
+        response({"id": "run-1", "root_execution_id": "exec-parent"}),
+        response(graph_execution_payload()),
+        response(child_execution_payload()),
+    ])
+    client = TangleApiClient("https://api.test", session=session)
+
+    details = client.get_run_details("run-1", include_implementations=True)
+
+    execution = details.execution
+    assert isinstance(execution, GetExecutionInfoResponse)
+    raw_task = execution.raw["task_spec"]["componentRef"]["spec"]["implementation"]["graph"]["tasks"]["child"]
+    raw_spec = raw_task["componentRef"]["spec"]
+
+    assert raw_task["componentRef"]["text"] == "name: child\nimplementation: bulky\n"
+    assert raw_spec["implementation"] == {"container": {"image": "python:3.12-slim"}}
+    assert raw_task["execution_id"] == "exec-child"
+    assert raw_task["input_artifacts"] == {"input": "artifact-in"}
+    assert raw_task["output_artifacts"] == {"output": "artifact-out"}
+    assert raw_task["state"] == "SUCCEEDED"
+    assert execution.tasks["child"].raw["execution_id"] == "exec-child"
+
+
 def test_secret_native_operation_uses_static_generated_endpoint_shape() -> None:
     session = FakeSession([
         response({
