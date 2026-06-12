@@ -1744,6 +1744,9 @@ def generate_component_yaml(
         if deps:
             annotations["python_dependencies"] = json.dumps(deps)
 
+        annotations["tangle_cli_generation_function_name"] = resolved_func_name
+        annotations["tangle_cli_generation_mode"] = mode
+
         # Use the common ancestor of source and output so both paths are clean
         # forward references (no ".."). This lets later local maintenance
         # commands find the source even when YAML is generated into a separate
@@ -1751,12 +1754,23 @@ def generate_component_yaml(
         resolved_source = file_path.resolve()
         resolved_output = output_path.resolve()
         common_dir = Path(os.path.commonpath([resolved_source, resolved_output]))
+
+        def _generation_path_annotation(path: Path) -> str:
+            try:
+                return str(path.resolve().relative_to(common_dir))
+            except ValueError:
+                return str(path)
+
         try:
             if not strip_source_path:
                 annotations["python_original_code_path"] = str(resolved_source.relative_to(common_dir))
             annotations["component_yaml_path"] = str(resolved_output.relative_to(common_dir))
         except ValueError:
             annotations["component_yaml_path"] = output_path.name
+        if dependencies_from:
+            annotations["tangle_cli_generation_dependencies_from"] = _generation_path_annotation(dependencies_from)
+        if resolve_root:
+            annotations["tangle_cli_generation_resolve_root"] = _generation_path_annotation(resolve_root)
 
         # Git info — use the same common ancestor as git_relative_dir.
         git_root = get_git_root(directory)
