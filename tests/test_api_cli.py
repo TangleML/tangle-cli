@@ -591,6 +591,46 @@ def test_api_help_without_official_schema_keeps_static_commands_unregistered(mon
     assert "published-components" not in output
 
 
+@pytest.mark.parametrize("api_tail", [["cached-extension"], ["--help"]])
+def test_auto_schema_loads_default_cache_without_ambient_auth(monkeypatch, api_tail):
+    for name in (
+        "TANGLE_API_AUTH_HEADER",
+        "TANGLE_AUTH_HEADER",
+        "TANGLE_API_HEADERS",
+        "TANGLE_API_TOKEN",
+        "TANGLE_API_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    loaded_cache_urls = []
+    official_schema = {
+        "openapi": "3.1.0",
+        "paths": {"/official": {"get": {"summary": "Official"}}},
+        "components": {"schemas": {}},
+    }
+    cached_schema = {
+        "openapi": "3.1.0",
+        "paths": {"/cached-extension": {"get": {"summary": "Cached extension"}}},
+        "components": {"schemas": {"CachedOnly": {"type": "object"}}},
+    }
+
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", *api_tail])
+    monkeypatch.setattr(api_cli, "default_base_url", lambda: "http://localhost:8000")
+    monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", lambda: official_schema)
+
+    def load_cached_schema(base_url):
+        loaded_cache_urls.append(base_url)
+        return cached_schema
+
+    monkeypatch.setattr(api_cli, "load_cached_schema", load_cached_schema)
+
+    schema = api_cli._schema_for_current_invocation()
+
+    assert loaded_cache_urls == ["http://localhost:8000"]
+    assert schema is not None
+    assert "/official" in schema["paths"]
+    assert "/cached-extension" in schema["paths"]
+
+
 def test_api_help_with_ambient_auth_does_not_probe_implicit_localhost(
     monkeypatch, tmp_path, capsys
 ):
@@ -609,6 +649,56 @@ def test_api_help_with_ambient_auth_does_not_probe_implicit_localhost(
     output = capsys.readouterr().out
     assert "refresh" in output
     assert "published-components" in output
+
+
+@pytest.mark.parametrize(
+    ("api_tail", "app_args", "expected"),
+    [
+        (["published-components", "--help"], ["published-components", "--help"], "list"),
+        (["published-components", "list", "--help"], ["published-components", "list", "--help"], "--name-substring"),
+        (
+            ["published-components", "--schema-source", "official", "--help"],
+            ["published-components", "--schema-source", "official", "--help"],
+            "list",
+        ),
+    ],
+)
+def test_nested_api_help_with_ambient_auth_does_not_probe_implicit_localhost(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    api_tail,
+    app_args,
+    expected,
+):
+    def fail_load_cached_schema(base_url):  # pragma: no cover - assertion helper
+        raise AssertionError(f"must not inspect cache for implicit base URL {base_url}")
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TANGLE_API_TOKEN", "secret-token")
+    monkeypatch.delenv("TANGLE_API_URL", raising=False)
+    monkeypatch.setattr(api_cli, "load_cached_schema", fail_load_cached_schema)
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", *api_tail])
+
+    app = api_cli.build_app()
+    run_app(app, app_args)
+
+    assert expected in capsys.readouterr().out
+
+
+def test_real_auto_api_command_with_ambient_auth_uses_transport_guard(monkeypatch):
+    monkeypatch.setenv("TANGLE_API_TOKEN", "secret-token")
+    monkeypatch.delenv("TANGLE_API_URL", raising=False)
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", "cached-extension"])
+    monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", lambda: SCHEMA)
+
+    def fail_load_cached_schema(base_url):  # pragma: no cover - assertion helper
+        raise AssertionError(f"cache should not load before auth guard, got {base_url}")
+
+    monkeypatch.setattr(api_cli, "load_cached_schema", fail_load_cached_schema)
+
+    with pytest.raises(SystemExit, match="TANGLE_API_URL is required"):
+        api_cli._schema_for_current_invocation()
 
 
 def test_generated_command_with_ambient_auth_still_requires_explicit_base_url(monkeypatch):

@@ -58,6 +58,7 @@ from .api_schema import (
 from .api_transport import (
     DEFAULT_API_URL,
     DEFAULT_TIMEOUT_SECONDS,
+    _ambient_auth_env_present,
     _env_header_entries,
     _headers_from_env,
     _load_body_argument,
@@ -518,6 +519,7 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
     first_command = _api_first_command(api_tail)
     if first_command in {"refresh", "reset-cache"}:
         return None
+    help_requested = _api_tail_requests_help(api_tail)
 
     schema_source = _schema_source_from_argv(api_tail)
     explicit_base_url = _base_url_from_argv(api_tail)
@@ -533,7 +535,8 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
             )
         return cached
 
-    cached = load_cached_schema(configured_base_url) if configured_base_url else None
+    cache_base_url = _auto_cache_base_url(configured_base_url, first_command, help_requested)
+    cached = load_cached_schema(cache_base_url) if cache_base_url else None
     try:
         official = load_bundled_openapi_schema()
     except FileNotFoundError as exc:
@@ -546,6 +549,29 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
     if cached is None:
         return official
     return _merge_official_with_cached_extensions(official, cached)
+
+
+def _auto_cache_base_url(
+    configured_base_url: str | None,
+    first_command: str | None,
+    help_requested: bool,
+) -> str | None:
+    if configured_base_url:
+        return configured_base_url
+    if not _ambient_auth_env_present():
+        return default_base_url()
+    if help_requested:
+        return None
+    if first_command is not None:
+        # Preserve the actionable transport guard for real generated command
+        # dispatch while avoiding an implicit localhost probe for help-only
+        # invocations with ambient credentials.
+        return default_base_url()
+    return None
+
+
+def _api_tail_requests_help(api_tail: list[str]) -> bool:
+    return any(arg in {"--help", "-h"} for arg in api_tail)
 
 
 def _missing_official_schema_message() -> str:
