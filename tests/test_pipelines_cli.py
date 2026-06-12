@@ -1,4 +1,7 @@
 import json
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -225,6 +228,59 @@ def test_pipelines_hydrate_writes_output_when_requested(tmp_path: Path, capsys):
     hydrated = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     local_ref = hydrated["implementation"]["graph"]["tasks"]["local"]["componentRef"]
     assert local_ref["spec"]["name"] == "Local Component"
+
+
+def test_pipelines_hydrate_local_file_refs_do_not_import_native_api(tmp_path: Path):
+    component_path = _write_pipeline(
+        tmp_path / "component.yaml",
+        {
+            "name": "Local Only Component",
+            "implementation": {"container": {"image": "python:3.12"}},
+        },
+    )
+    pipeline_path = _write_pipeline(
+        tmp_path / "pipeline.yaml",
+        {
+            "name": "Pipeline",
+            "implementation": {
+                "graph": {
+                    "tasks": {
+                        "local": {
+                            "componentRef": {"url": f"file://{component_path.name}"}
+                        }
+                    }
+                }
+            },
+        },
+    )
+    script = textwrap.dedent(
+        f"""
+        import builtins
+        import sys
+        from pathlib import Path
+
+        for name in list(sys.modules):
+            if name == "tangle_api" or name.startswith("tangle_api."):
+                del sys.modules[name]
+
+        original_import = builtins.__import__
+
+        def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "tangle_api" or name.startswith("tangle_api."):
+                raise AssertionError(f"unexpected native API import: {{name}}")
+            return original_import(name, globals, locals, fromlist, level)
+
+        builtins.__import__ = guarded_import
+
+        from tangle_cli.pipelines import hydrate_pipeline_file
+
+        result = hydrate_pipeline_file(Path({str(pipeline_path)!r}))
+        assert "Local Only Component" in result.content
+        assert "tangle_api" not in sys.modules
+        """
+    )
+
+    subprocess.run([sys.executable, "-c", script], check=True, text=True)
 
 
 def test_pipelines_hydrate_nested_file_refs_use_loaded_component_source_dir(
