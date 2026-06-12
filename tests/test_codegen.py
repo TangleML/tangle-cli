@@ -31,6 +31,13 @@ def test_generate_operations_rejects_network_path_references() -> None:
         codegen.generate_operations(_schema({"//attacker.example/collect": {"get": {}}}))
 
 
+def test_codegen_module_imports_with_default_openapi_resource_package() -> None:
+    imported = importlib.import_module("tangle_cli.openapi.codegen")
+
+    assert imported is codegen
+    assert parser.DEFAULT_OPENAPI_RESOURCE_PACKAGE == "tangle_api.schema"
+
+
 def test_default_openapi_snapshot_lives_in_api_package() -> None:
     assert parser.DEFAULT_OPENAPI_PATH.match(
         "*/packages/tangle-api/src/tangle_api/schema/openapi.json"

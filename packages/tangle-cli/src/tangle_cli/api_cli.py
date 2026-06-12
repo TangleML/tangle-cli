@@ -522,6 +522,9 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
     help_requested = _api_tail_requests_help(api_tail)
 
     schema_source = _schema_source_from_argv(api_tail)
+    token = _token_from_argv(api_tail)
+    auth_header = _auth_header_from_argv(api_tail)
+    header = _headers_from_argv(api_tail)
     explicit_base_url = _base_url_from_argv(api_tail)
     configured_base_url = explicit_base_url or os.environ.get("TANGLE_API_URL")
     if schema_source == "cache":
@@ -542,6 +545,16 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
     except FileNotFoundError as exc:
         if first_command is None:
             return None
+        if schema_source == "auto" and cache_base_url:
+            try:
+                return load_or_fetch_schema(
+                    cache_base_url,
+                    token=token,
+                    header=header,
+                    auth_header=auth_header,
+                )
+            except (httpx.HTTPError, RuntimeError, ValueError, json.JSONDecodeError) as fetch_exc:
+                raise SystemExit(_missing_official_schema_message()) from fetch_exc
         raise SystemExit(_missing_official_schema_message()) from exc
 
     if schema_source == "official":
@@ -722,11 +735,19 @@ def _base_url_from_argv(argv: list[str]) -> str | None:
 
 
 def _token_from_argv(argv: list[str]) -> str | None:
-    return _option_from_argv(argv, "--token") or default_token()
+    return (
+        _option_from_argv(argv, "--token")
+        or _optional_str(_config_value_from_argv(argv, "token"))
+        or default_token()
+    )
 
 
 def _auth_header_from_argv(argv: list[str]) -> str | None:
-    return _option_from_argv(argv, "--auth-header") or default_auth_header()
+    return (
+        _option_from_argv(argv, "--auth-header")
+        or _optional_str(_config_value_from_argv(argv, "auth_header"))
+        or default_auth_header()
+    )
 
 
 def _config_value_from_argv(argv: list[str], key: str) -> Any:
@@ -753,7 +774,15 @@ def _headers_from_argv(argv: list[str]) -> list[str]:
             entries.append(argv[index + 1])
         elif arg.startswith("--header="):
             entries.append(arg.split("=", 1)[1])
-    return entries
+    if entries:
+        return entries
+
+    config_header = _config_value_from_argv(argv, "header")
+    if isinstance(config_header, list):
+        return [str(entry) for entry in config_header]
+    if isinstance(config_header, str):
+        return [config_header]
+    return []
 
 
 def _option_from_argv(argv: list[str], option: str) -> str | None:

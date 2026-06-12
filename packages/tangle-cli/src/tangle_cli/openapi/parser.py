@@ -18,6 +18,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[5]
 DEFAULT_OPENAPI_PATH = _REPO_ROOT / "packages" / "tangle-api" / "src" / "tangle_api" / "schema" / "openapi.json"
 DEFAULT_OPENAPI_RESOURCE_PACKAGE = "tangle_api.schema"
 DEFAULT_OPENAPI_RESOURCE_NAME = "openapi.json"
+_FALLBACK_OPENAPI_RESOURCE_PACKAGES = (DEFAULT_OPENAPI_RESOURCE_PACKAGE, "tangle_cli.openapi")
 
 
 def _load_json_file(schema_path: Path) -> dict[str, Any]:
@@ -32,23 +33,31 @@ def _load_default_openapi_schema() -> dict[str, Any]:
     if DEFAULT_OPENAPI_PATH.exists():
         return _load_json_file(DEFAULT_OPENAPI_PATH)
 
-    try:
-        schema_text = (
-            resources.files(DEFAULT_OPENAPI_RESOURCE_PACKAGE)
-            .joinpath(DEFAULT_OPENAPI_RESOURCE_NAME)
-            .read_text(encoding="utf-8")
-        )
-    except ModuleNotFoundError as exc:
+    schema_text = None
+    schema_package = DEFAULT_OPENAPI_RESOURCE_PACKAGE
+    last_error: Exception | None = None
+    for package in _FALLBACK_OPENAPI_RESOURCE_PACKAGES:
+        try:
+            schema_text = (
+                resources.files(package)
+                .joinpath(DEFAULT_OPENAPI_RESOURCE_NAME)
+                .read_text(encoding="utf-8")
+            )
+            schema_package = package
+            break
+        except (FileNotFoundError, ModuleNotFoundError) as exc:
+            last_error = exc
+    if schema_text is None:
         raise FileNotFoundError(
             "Default OpenAPI snapshot not found. Install tangle-api, run from a "
             "source checkout with packages/tangle-api/src/tangle_api/schema/openapi.json, "
             "or pass --openapi PATH explicitly."
-        ) from exc
+        ) from last_error
 
     schema = json.loads(schema_text)
     if not isinstance(schema, dict) or "paths" not in schema:
         raise ValueError(
-            f"{DEFAULT_OPENAPI_RESOURCE_PACKAGE}/{DEFAULT_OPENAPI_RESOURCE_NAME} "
+            f"{schema_package}/{DEFAULT_OPENAPI_RESOURCE_NAME} "
             "does not look like an OpenAPI schema"
         )
     return schema
