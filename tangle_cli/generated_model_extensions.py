@@ -322,6 +322,49 @@ class ComponentSpecExtensions:
 
 
 
+class GetExecutionInfoResponseExtensions:
+    """Legacy execution-detail conveniences for generated execution responses."""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Any:
+        """Create a normalized execution details model from API response data."""
+
+        from tangle_cli.models import TaskSpec
+
+        return cls(
+            id=data.get("id", ""),
+            task_spec=TaskSpec.from_dict(data.get("task_spec", {})),
+            pipeline_run_id=data.get("pipeline_run_id"),
+            parent_execution_id=data.get("parent_execution_id"),
+            child_task_execution_ids=data.get("child_task_execution_ids"),
+            input_artifacts={
+                key: value["id"]
+                for key, value in data.get("input_artifacts", {}).items()
+                if "id" in value
+            },
+            output_artifacts={
+                key: value["id"]
+                for key, value in data.get("output_artifacts", {}).items()
+                if "id" in value
+            },
+            child_executions={},
+            raw=data,
+        )
+
+    def strip_implementations(self) -> None:
+        """Remove implementation blocks from this execution tree in-place."""
+
+        self.task_spec.strip_implementations()
+        for child in self.child_executions.values():
+            child.strip_implementations()
+
+    @property
+    def tasks(self) -> dict[str, Any]:
+        """Shortcut to the root task spec's graph tasks."""
+
+        return self.task_spec.graph_tasks
+
+
 class GetGraphExecutionStateResponseExtensions:
     """Convenience properties for graph execution state responses."""
 
@@ -352,5 +395,6 @@ class GetGraphExecutionStateResponseExtensions:
 
 MODEL_EXTENSIONS = {
     "ComponentSpec": "ComponentSpecExtensions",
+    "GetExecutionInfoResponse": "GetExecutionInfoResponseExtensions",
     "GetGraphExecutionStateResponse": "GetGraphExecutionStateResponseExtensions",
 }

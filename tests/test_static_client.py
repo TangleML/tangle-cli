@@ -8,6 +8,7 @@ import requests
 from tangle_cli import TangleApiClient
 from tangle_cli.logger import CaptureLogger
 from tangle_cli.generated.models import (
+    GetExecutionInfoResponse,
     GetGraphExecutionStateResponse,
     ListPublishedComponentsResponse,
     PipelineRunResponse,
@@ -154,6 +155,7 @@ def test_get_run_details_uses_native_operations_for_retained_semantic_helper() -
 
     assert details.run.id == "run-1"
     assert details.execution is not None
+    assert isinstance(details.execution, GetExecutionInfoResponse)
     assert details.execution.id == "exec-1"
     assert details.annotations == {"owner": "alice"}
     assert details.execution_state is not None

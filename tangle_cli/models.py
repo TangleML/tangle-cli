@@ -2,7 +2,7 @@
 API-contract dataclasses for the Tangle (Oasis) Cloud Pipelines API.
 
 These dataclasses model the shapes of HTTP request/response bodies on the
-Tangle API — ``PipelineRun``, ``ExecutionDetails``, ``ComponentSpec``,
+Tangle API — ``PipelineRun``, ``ComponentSpec``, container state, artifacts,
 etc. They are used by wrapper packages and OpenAPI-backed client helpers.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from tangle_cli.generated.models import ComponentSpec
+from tangle_cli.generated.models import ComponentSpec, GetExecutionInfoResponse
 
 
 # ---- Helpers ---------------------------------------------------------------
@@ -199,40 +199,6 @@ class TaskSpec:
                 self.component_spec.strip_implementation()
 
 
-@dataclass
-class ExecutionDetails:
-    """Response from GET /api/executions/{id}/details."""
-    id: str
-    task_spec: TaskSpec = field(default_factory=TaskSpec)
-    child_executions: dict[str, ExecutionDetails] = field(default_factory=dict)
-    pipeline_run_id: str | None = None
-    input_artifacts: dict[str, str] = field(default_factory=dict)
-    output_artifacts: dict[str, str] = field(default_factory=dict)
-    raw: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ExecutionDetails:
-        return cls(
-            id=data.get("id", ""),
-            task_spec=TaskSpec.from_dict(data.get("task_spec", {})),
-            pipeline_run_id=data.get("pipeline_run_id"),
-            input_artifacts={k: v["id"] for k, v in data.get("input_artifacts", {}).items() if "id" in v},
-            output_artifacts={k: v["id"] for k, v in data.get("output_artifacts", {}).items() if "id" in v},
-            raw=data,
-        )
-
-    def strip_implementations(self) -> None:
-        """Remove implementation blocks from all component specs in-place."""
-        self.task_spec.strip_implementations()
-        for child in self.child_executions.values():
-            child.strip_implementations()
-
-    @property
-    def tasks(self) -> dict[str, TaskSpec]:
-        """Shortcut to the root task_spec's graph_tasks."""
-        return self.task_spec.graph_tasks
-
-
 # ---- Container state -------------------------------------------------------
 
 
@@ -322,7 +288,7 @@ class ContainerState:
 class RunDetails:
     """Combined pipeline run + execution details from get_run_details."""
     run: PipelineRun
-    execution: ExecutionDetails | None = None
+    execution: GetExecutionInfoResponse | None = None
     annotations: dict[str, str | None] | None = None
     execution_state: GraphExecutionState | None = None
 
@@ -488,7 +454,6 @@ for _dict_like_cls in (
     GraphExecutionState,
     PipelineRun,
     TaskSpec,
-    ExecutionDetails,
     KubernetesDebugInfo,
     KubernetesJobInfo,
     DebugInfo,

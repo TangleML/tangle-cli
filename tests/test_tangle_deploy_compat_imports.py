@@ -35,7 +35,6 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
         ComponentSpec,
         ContainerState,
         DebugInfo,
-        ExecutionDetails,
         GraphExecutionState,
         KubernetesDebugInfo,
         KubernetesJobInfo,
@@ -105,7 +104,7 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     assert _null_logger is not None
     assert callable(_print_result)
     assert ArtifactComponentQuery and ArtifactInfo and ComponentInfo
-    assert ContainerState and DebugInfo and ExecutionDetails and GraphExecutionState
+    assert ContainerState and DebugInfo and GraphExecutionState
     assert KubernetesDebugInfo and KubernetesJobInfo and PageChunk and RunDetails
     assert SecretInfo and TaskSpec and UserInfo
     assert callable(_strip_text_from_graph)

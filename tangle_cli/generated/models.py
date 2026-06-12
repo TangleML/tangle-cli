@@ -14,7 +14,7 @@ try:
 except ImportError:  # pragma: no cover - pydantic v1 fallback
     ConfigDict = None  # type: ignore[assignment]
 
-from tangle_cli.generated_model_extensions import ComponentSpecExtensions, GetGraphExecutionStateResponseExtensions
+from tangle_cli.generated_model_extensions import ComponentSpecExtensions, GetExecutionInfoResponseExtensions, GetGraphExecutionStateResponseExtensions
 
 
 class TangleGeneratedModel(BaseModel):
@@ -184,7 +184,7 @@ class GetExecutionArtifactsResponse(TangleGeneratedModel):
     input_artifacts: Any = None
     output_artifacts: Any = None
 
-class GetExecutionInfoResponse(TangleGeneratedModel):
+class GetExecutionInfoResponse(GetExecutionInfoResponseExtensions, TangleGeneratedModel):
     child_task_execution_ids: Any = None
     id: Any = None
     input_artifacts: Any = None
