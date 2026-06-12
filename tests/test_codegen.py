@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 
@@ -108,7 +109,7 @@ def test_codegen_main_no_args_uses_default_backend_and_prints_summary(
     assert calls[0][1]["backend_path"] == backend
     assert calls[1][0] == "generate"
     assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
-    assert calls[1][1]["model_extension_module"] == codegen.DEFAULT_MODEL_EXTENSION_MODULE
+    assert calls[1][1]["model_extension_module"] is None
     output = capsys.readouterr().out
     assert f"Loaded OpenAPI from backend: {backend}" in output
     assert f"Wrote {tmp_path / 'openapi.json'}" in output
@@ -162,7 +163,7 @@ def test_codegen_main_from_snapshot_is_explicit(monkeypatch, tmp_path, capsys) -
 
     assert calls[0][0] == "generate"
     assert calls[0][1]["operations_class_name"] == "GeneratedTangleApiOperations"
-    assert calls[0][1]["model_extension_module"] == codegen.DEFAULT_MODEL_EXTENSION_MODULE
+    assert calls[0][1]["model_extension_module"] is None
     output = capsys.readouterr().out
     assert f"Loaded OpenAPI from snapshot: {tmp_path / 'openapi.json'}" in output
     assert f"Wrote {tmp_path / 'openapi.json'}" not in output
@@ -197,7 +198,7 @@ def test_codegen_main_accepts_custom_operations_class_name(monkeypatch, tmp_path
 
     assert calls[0][0] == "generate"
     assert calls[0][1]["operations_class_name"] == "GeneratedTangleApiExtensions"
-    assert calls[0][1]["model_extension_module"] == codegen.DEFAULT_MODEL_EXTENSION_MODULE
+    assert calls[0][1]["model_extension_module"] is None
 
 
 def test_codegen_main_accepts_empty_model_extension_module(monkeypatch, tmp_path) -> None:
@@ -225,7 +226,7 @@ def test_codegen_main_accepts_empty_model_extension_module(monkeypatch, tmp_path
     ])
 
     assert calls[0][0] == "generate"
-    assert calls[0][1]["model_extension_module"] == ""
+    assert calls[0][1]["model_extension_module"] == [""]
 
 
 def test_codegen_main_fetches_from_openapi_url_before_generating(
@@ -271,7 +272,7 @@ def test_codegen_main_fetches_from_openapi_url_before_generating(
     )
     assert calls[1][0] == "generate"
     assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
-    assert calls[1][1]["model_extension_module"] == codegen.DEFAULT_MODEL_EXTENSION_MODULE
+    assert calls[1][1]["model_extension_module"] is None
     output = capsys.readouterr().out
     assert "Loaded OpenAPI from URL: https://example.com/openapi.json" in output
     assert "Generated 1 operations from 1 paths" in output
@@ -334,9 +335,10 @@ def test_generate_models_uses_builtin_model_extension_module_by_default() -> Non
         "from tangle_cli.generated_model_extensions import "
         "GetGraphExecutionStateResponseExtensions"
     ) in models
+    assert "class _GetGraphExecutionStateResponseGenerated(TangleGeneratedModel):" in models
     assert (
         "class GetGraphExecutionStateResponse("
-        "GetGraphExecutionStateResponseExtensions, TangleGeneratedModel):"
+        "GetGraphExecutionStateResponseExtensions, _GetGraphExecutionStateResponseGenerated):"
     ) in models
 
 
@@ -357,7 +359,8 @@ def test_generate_models_can_disable_builtin_model_extension_module() -> None:
     }, model_extension_module="")
 
     assert "generated_model_extensions" not in models
-    assert "class GetGraphExecutionStateResponse(TangleGeneratedModel):" in models
+    assert "class _GetGraphExecutionStateResponseGenerated(TangleGeneratedModel):" in models
+    assert "class GetGraphExecutionStateResponse(_GetGraphExecutionStateResponseGenerated):" in models
 
 
 def test_generate_supports_model_extension_module(monkeypatch, tmp_path) -> None:
@@ -365,6 +368,9 @@ def test_generate_supports_model_extension_module(monkeypatch, tmp_path) -> None
     extension_dir.mkdir()
     (extension_dir / "demo_extensions.py").write_text(
         "class FooResponseExtensions:\n"
+        "    @property\n"
+        "    def id(self):\n"
+        "        return 'extended-id'\n"
         "    @property\n"
         "    def demo(self):\n"
         "        return 'extended'\n"
@@ -405,8 +411,137 @@ def test_generate_supports_model_extension_module(monkeypatch, tmp_path) -> None
 
     models = (out / "models.py").read_text(encoding="utf-8")
     assert "from demo_extensions import FooResponseExtensions" in models
-    assert "class FooResponse(FooResponseExtensions, TangleGeneratedModel):" in models
-    assert "class OtherResponse(TangleGeneratedModel):" in models
+    assert "class _FooResponseGenerated(TangleGeneratedModel):" in models
+    assert "class FooResponse(FooResponseExtensions, _FooResponseGenerated):" in models
+    assert "class _OtherResponseGenerated(TangleGeneratedModel):" in models
+    assert "class OtherResponse(_OtherResponseGenerated):" in models
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    generated_models = importlib.import_module("custom_generated_api.models")
+    response = generated_models.FooResponse(id="generated-id")
+    assert response.id == "extended-id"
+    assert response.to_dict()["id"] == "generated-id"
+
+
+
+def test_generate_composes_default_and_downstream_model_extensions(monkeypatch, tmp_path) -> None:
+    extension_dir = tmp_path / "extensions"
+    extension_dir.mkdir()
+    (extension_dir / "downstream_extensions.py").write_text(
+        "class GetGraphExecutionStateResponseExtensions:\n"
+        "    @property\n"
+        "    def status_totals(self):\n"
+        "        return {'DOWNSTREAM': 1}\n"
+        "\n"
+        "MODEL_EXTENSIONS = {\n"
+        "    'GetGraphExecutionStateResponse': 'GetGraphExecutionStateResponseExtensions',\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(extension_dir))
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "generated_graph_api"
+    openapi.write_text(
+        json.dumps({
+            "openapi": "3.1.0",
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "GetGraphExecutionStateResponse": {
+                        "type": "object",
+                        "properties": {
+                            "child_execution_status_stats": {"type": "object"},
+                        },
+                    },
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    codegen.generate(
+        openapi,
+        out,
+        model_extension_module="downstream_extensions",
+    )
+
+    models = (out / "models.py").read_text(encoding="utf-8")
+    assert (
+        "from downstream_extensions import "
+        "GetGraphExecutionStateResponseExtensions as "
+        "_downstream_extensions_GetGraphExecutionStateResponseExtensions"
+    ) in models
+    assert (
+        "from tangle_cli.generated_model_extensions import "
+        "GetGraphExecutionStateResponseExtensions as "
+        "_tangle_cli_generated_model_extensions_GetGraphExecutionStateResponseExtensions"
+    ) in models
+    assert (
+        "class GetGraphExecutionStateResponse("
+        "_downstream_extensions_GetGraphExecutionStateResponseExtensions, "
+        "_tangle_cli_generated_model_extensions_GetGraphExecutionStateResponseExtensions, "
+        "_GetGraphExecutionStateResponseGenerated):"
+    ) in models
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    generated_models = importlib.import_module("generated_graph_api.models")
+    response = generated_models.GetGraphExecutionStateResponse(
+        child_execution_status_stats={"exec-1": {"FAILED": 1}}
+    )
+    assert response.status_totals == {"DOWNSTREAM": 1}
+    assert response.failed_execution_ids == ["exec-1"]
+
+
+def test_generate_deduplicates_colliding_extension_aliases(monkeypatch, tmp_path) -> None:
+    package_dir = tmp_path / "a"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "b.py").write_text(
+        "class Ext:\n"
+        "    @property\n"
+        "    def source(self):\n"
+        "        return 'a.b'\n"
+        "\n"
+        "MODEL_EXTENSIONS = {'Foo': 'Ext'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "a_b.py").write_text(
+        "class Ext:\n"
+        "    @property\n"
+        "    def source(self):\n"
+        "        return 'a_b'\n"
+        "\n"
+        "MODEL_EXTENSIONS = {'Bar': 'Ext'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "alias_collision_api"
+    openapi.write_text(
+        json.dumps({
+            "openapi": "3.1.0",
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Foo": {"type": "object", "properties": {"id": {"type": "string"}}},
+                    "Bar": {"type": "object", "properties": {"id": {"type": "string"}}},
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    codegen.generate(openapi, out, model_extension_module=["a.b", "a_b"])
+
+    models = (out / "models.py").read_text(encoding="utf-8")
+    assert "from a.b import Ext as _a_b_Ext" in models
+    assert "from a_b import Ext as _a_b_Ext_2" in models
+    assert "class Foo(_a_b_Ext, _FooGenerated):" in models
+    assert "class Bar(_a_b_Ext_2, _BarGenerated):" in models
+
+    generated_models = importlib.import_module("alias_collision_api.models")
+    assert generated_models.Foo().source == "a.b"
+    assert generated_models.Bar().source == "a_b"
 
 
 def test_codegen_main_rejects_invalid_model_extension_module(tmp_path, capsys) -> None:
