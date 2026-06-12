@@ -22,6 +22,7 @@ import httpx
 import platformdirs
 from cyclopts import App, Parameter
 
+from .args_container import ArgsContainer, ConfigFileError
 from .api_schema import (
     SUPPORTED_METHODS,
     CliParameter,
@@ -120,6 +121,32 @@ SchemaSourceOption = Annotated[
         )
     ),
 ]
+ConfigOption = Annotated[
+    str | None,
+    Parameter(help="YAML/JSON config file providing command defaults."),
+]
+
+
+def _load_args(config: str | None, **kwargs: Any) -> list[ArgsContainer]:
+    try:
+        return ArgsContainer.load(config, **kwargs)
+    except ConfigFileError as exc:
+        raise SystemExit(f"Config error: {exc}") from exc
+
+
+def _common_api_arg_specs(
+    *,
+    base_url: str | None = None,
+    token: str | None = None,
+    auth_header: str | None = None,
+    header: list[str] | None = None,
+) -> dict[str, tuple[Any, ...]]:
+    return {
+        "base_url": (base_url, None),
+        "token": (token, None),
+        "auth_header": (auth_header, None),
+        "header": (header, None),
+    }
 
 
 def build_app(schema: dict[str, Any] | None = None) -> App:
@@ -182,41 +209,61 @@ def _register_refresh_command(api_app: App) -> None:
         token: TokenOption = None,
         auth_header: AuthHeaderOption = None,
         header: HeaderOption = None,
+        config: ConfigOption = None,
     ) -> None:
         """Fetch /openapi.json and update the local schema cache."""
 
-        normalized_base_url = _normalize_base_url(base_url) if base_url else default_base_url()
-        try:
-            schema, path = refresh_schema(normalized_base_url, token, header, auth_header)
-        except httpx.HTTPStatusError as exc:
-            message = f"HTTP {exc.response.status_code} {exc.response.reason_phrase}"
-            raise SystemExit(
-                f"Failed to fetch {_openapi_url(normalized_base_url)}: {message}"
-            ) from exc
-        except httpx.RequestError as exc:
-            raise SystemExit(
-                f"Failed to fetch {_openapi_url(normalized_base_url)}: {exc}"
-            ) from exc
-        path_count = len(schema.get("paths", {}))
-        print(f"Cached OpenAPI schema for {normalized_base_url}")
-        print(f"Path: {path}")
-        print(f"OpenAPI paths: {path_count}")
+        for args in _load_args(
+            config,
+            **_common_api_arg_specs(
+                base_url=base_url,
+                token=token,
+                auth_header=auth_header,
+                header=header,
+            ),
+        ):
+            normalized_base_url = (
+                _normalize_base_url(args.base_url) if args.base_url else default_base_url()
+            )
+            try:
+                schema, path = refresh_schema(
+                    normalized_base_url,
+                    args.token,
+                    args.header,
+                    args.auth_header,
+                )
+            except httpx.HTTPStatusError as exc:
+                message = f"HTTP {exc.response.status_code} {exc.response.reason_phrase}"
+                raise SystemExit(
+                    f"Failed to fetch {_openapi_url(normalized_base_url)}: {message}"
+                ) from exc
+            except httpx.RequestError as exc:
+                raise SystemExit(
+                    f"Failed to fetch {_openapi_url(normalized_base_url)}: {exc}"
+                ) from exc
+            path_count = len(schema.get("paths", {}))
+            print(f"Cached OpenAPI schema for {normalized_base_url}")
+            print(f"Path: {path}")
+            print(f"OpenAPI paths: {path_count}")
 
 
 def _register_reset_cache_command(api_app: App) -> None:
     @api_app.command(name="reset-cache")
-    def reset_cache(*, base_url: BaseUrlOption = None) -> None:
+    def reset_cache(*, base_url: BaseUrlOption = None, config: ConfigOption = None) -> None:
         """Delete the cached live OpenAPI schema for a base URL."""
 
-        normalized_base_url = _normalize_base_url(base_url) if base_url else default_base_url()
-        path = cache_path(normalized_base_url)
-        if path.exists():
-            path.unlink()
-            print(f"Deleted cached OpenAPI schema for {normalized_base_url}")
-            print(f"Path: {path}")
-        else:
-            print(f"No cached OpenAPI schema for {normalized_base_url}")
-            print(f"Path: {path}")
+        for args in _load_args(config, base_url=(base_url, None)):
+            normalized_base_url = (
+                _normalize_base_url(args.base_url) if args.base_url else default_base_url()
+            )
+            path = cache_path(normalized_base_url)
+            if path.exists():
+                path.unlink()
+                print(f"Deleted cached OpenAPI schema for {normalized_base_url}")
+                print(f"Path: {path}")
+            else:
+                print(f"No cached OpenAPI schema for {normalized_base_url}")
+                print(f"Path: {path}")
 
 
 def _make_operation_callable(operation: OperationCommand):
@@ -262,7 +309,8 @@ def _operation_signature(operation: OperationCommand) -> inspect.Signature:
             inspect.Parameter(
                 parameter.local_name,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=annotation,
+                default=None,
+                annotation=_optional_type(annotation),
             )
         )
 
@@ -276,11 +324,7 @@ def _operation_signature(operation: OperationCommand) -> inspect.Signature:
             else parameter.python_type,
             parameter.description,
         )
-        default = (
-            inspect.Parameter.empty
-            if parameter.required and not body_field_with_escape_hatch
-            else parameter.default
-        )
+        default = parameter.default if not parameter.required else None
         parameters.append(
             inspect.Parameter(
                 parameter.local_name,
@@ -300,6 +344,14 @@ def _operation_signature(operation: OperationCommand) -> inspect.Signature:
             )
         )
 
+    parameters.append(
+        inspect.Parameter(
+            "config",
+            inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=ConfigOption,
+        )
+    )
     parameters.append(
         inspect.Parameter(
             "schema_source",
@@ -364,6 +416,52 @@ def _operation_help(operation: OperationCommand) -> str:
 def _invoke_operation(operation: OperationCommand, values: dict[str, Any]) -> None:
     """Turn parsed CLI values into an HTTP request and print the response."""
 
+    config = values.pop("config", None)
+    for args in _operation_args_from_config(operation, values, config):
+        _invoke_operation_once(operation, args.to_dict())
+
+
+def _operation_args_from_config(
+    operation: OperationCommand,
+    values: dict[str, Any],
+    config: str | None,
+) -> list[ArgsContainer]:
+    specs: dict[str, tuple[Any, ...]] = {}
+    for parameter in operation.parameters:
+        default = parameter.default if not parameter.required else None
+        required = parameter.required and parameter.location != "body"
+        specs[parameter.local_name] = (
+            parameter.local_name,
+            values.get(parameter.local_name, default),
+            default,
+            False,
+            required,
+        )
+
+    specs["schema_source"] = (values.get("schema_source", "auto"), "auto")
+    if operation.has_request_body:
+        specs["body"] = (values.get("body"), None)
+    specs.update(
+        _common_api_arg_specs(
+            base_url=values.get("base_url"),
+            token=values.get("token"),
+            auth_header=values.get("auth_header"),
+            header=values.get("header"),
+        )
+    )
+    resolved = _load_args(config, **specs)
+    for args in resolved:
+        for parameter in operation.parameters:
+            if parameter.required or parameter.default is None:
+                continue
+            if parameter.local_name in args._config:
+                continue
+            if getattr(args, parameter.local_name, None) == parameter.default:
+                setattr(args, parameter.local_name, None)
+    return resolved
+
+
+def _invoke_operation_once(operation: OperationCommand, values: dict[str, Any]) -> None:
     _validate_schema_source(values.pop("schema_source", "official"))
     base_url = _normalize_base_url(values.pop("base_url", None) or default_base_url())
     token = values.pop("token", None) or default_token()
@@ -539,6 +637,7 @@ def _api_first_command(api_tail: list[str]) -> str | None:
         "--header",
         "-H",
         "--schema-source",
+        "--config",
     }
     for arg in api_tail:
         if skip_next:
@@ -556,8 +655,10 @@ def _api_first_command(api_tail: list[str]) -> str | None:
 
 
 def _schema_source_from_argv(argv: list[str]) -> str:
-    value = _option_from_argv(argv, "--schema-source") or "auto"
-    return _validate_schema_source(value)
+    value = _option_from_argv(argv, "--schema-source")
+    if value is None:
+        value = _config_value_from_argv(argv, "schema_source")
+    return _validate_schema_source(str(value or "auto"))
 
 
 def _validate_schema_source(value: str) -> str:
@@ -583,7 +684,11 @@ def _schema_fetch_failure_message(base_url: str, exc: Exception) -> str:
 
 
 def _base_url_from_argv(argv: list[str]) -> str | None:
-    return _option_from_argv(argv, "--base-url") or _option_from_argv(argv, "--api-url")
+    return (
+        _option_from_argv(argv, "--base-url")
+        or _option_from_argv(argv, "--api-url")
+        or _optional_str(_config_value_from_argv(argv, "base_url"))
+    )
 
 
 def _token_from_argv(argv: list[str]) -> str | None:
@@ -592,6 +697,23 @@ def _token_from_argv(argv: list[str]) -> str | None:
 
 def _auth_header_from_argv(argv: list[str]) -> str | None:
     return _option_from_argv(argv, "--auth-header") or default_auth_header()
+
+
+def _config_value_from_argv(argv: list[str], key: str) -> Any:
+    config_path = _option_from_argv(argv, "--config")
+    if config_path is None:
+        return None
+    try:
+        configs = ArgsContainer._load_config_file(config_path)
+    except ConfigFileError as exc:
+        raise SystemExit(f"Config error: {exc}") from exc
+    if not configs:
+        return None
+    return configs[0].get(key)
+
+
+def _optional_str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _headers_from_argv(argv: list[str]) -> list[str]:

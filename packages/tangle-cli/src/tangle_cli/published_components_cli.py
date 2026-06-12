@@ -7,6 +7,7 @@ from typing import Annotated, Any
 
 from cyclopts import App, Parameter
 
+from .args_container import ArgsContainer, ConfigFileError
 from .api_transport import DEFAULT_TIMEOUT_SECONDS
 
 BaseUrlOption = Annotated[
@@ -33,6 +34,10 @@ HeaderOption = Annotated[
         help="Custom request header as 'Name: value'. Repeat for multiple.",
         negative_iterable=(),
     ),
+]
+ConfigOption = Annotated[
+    str | None,
+    Parameter(help="YAML/JSON config file providing command defaults."),
 ]
 
 app = App(
@@ -74,6 +79,28 @@ def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _load_args(config: str | None, **kwargs: Any) -> list[ArgsContainer]:
+    try:
+        return ArgsContainer.load(config, **kwargs)
+    except ConfigFileError as exc:
+        raise SystemExit(f"Config error: {exc}") from exc
+
+
+def _api_arg_specs(
+    *,
+    base_url: str | None = None,
+    token: str | None = None,
+    auth_header: str | None = None,
+    header: list[str] | None = None,
+) -> dict[str, tuple[Any, ...]]:
+    return {
+        "base_url": (base_url, None),
+        "token": (token, None),
+        "auth_header": (auth_header, None),
+        "header": (header, None),
+    }
+
+
 def search_components(*args: Any, **kwargs: Any) -> Any:
     from .component_inspector import search_components as _search_components
 
@@ -102,31 +129,45 @@ def get_standard_library(*args: Any, **kwargs: Any) -> Any:
 def published_components_search(
     name: str | None = None,
     *,
-    include_deprecated: bool = False,
+    include_deprecated: bool | None = None,
     published_by: str | None = None,
     digest: str | None = None,
     base_url: BaseUrlOption = None,
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
+    config: ConfigOption = None,
 ) -> None:
     """Search published component metadata."""
 
-    client = _client_from_options(
-        base_url=base_url,
-        token=token,
-        auth_header=auth_header,
-        header=header,
-    )
-    _print_json(
-        search_components(
-            client,
-            name=name,
-            include_deprecated=include_deprecated,
-            published_by=published_by,
-            digest=digest,
+    for args in _load_args(
+        config,
+        name=(name, None),
+        include_deprecated=(include_deprecated, None),
+        published_by=(published_by, None),
+        digest=(digest, None),
+        **_api_arg_specs(
+            base_url=base_url,
+            token=token,
+            auth_header=auth_header,
+            header=header,
+        ),
+    ):
+        client = _client_from_options(
+            base_url=args.base_url,
+            token=args.token,
+            auth_header=args.auth_header,
+            header=args.header,
         )
-    )
+        _print_json(
+            search_components(
+                client,
+                name=args.name,
+                include_deprecated=bool(args.include_deprecated),
+                published_by=args.published_by,
+                digest=args.digest,
+            )
+        )
 
 
 @app.command(name="inspect")
@@ -134,44 +175,61 @@ def published_components_inspect(
     name: str | None = None,
     *,
     digest: str | None = None,
-    all_versions: bool = False,
-    include_deprecated: bool = False,
-    follow_deprecated: bool = False,
-    full_spec: bool = False,
+    all_versions: bool | None = None,
+    include_deprecated: bool | None = None,
+    follow_deprecated: bool | None = None,
+    full_spec: bool | None = None,
     published_by: str | None = None,
     base_url: BaseUrlOption = None,
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
+    config: ConfigOption = None,
 ) -> None:
     """Inspect a published component by exact name or digest."""
 
-    if bool(name) == bool(digest):
-        raise SystemExit("Provide exactly one of NAME or --digest DIGEST")
+    for args in _load_args(
+        config,
+        name=(name, None),
+        digest=(digest, None),
+        all_versions=(all_versions, None),
+        include_deprecated=(include_deprecated, None),
+        follow_deprecated=(follow_deprecated, None),
+        full_spec=(full_spec, None),
+        published_by=(published_by, None),
+        **_api_arg_specs(
+            base_url=base_url,
+            token=token,
+            auth_header=auth_header,
+            header=header,
+        ),
+    ):
+        if bool(args.name) == bool(args.digest):
+            raise SystemExit("Provide exactly one of NAME or --digest DIGEST")
 
-    client = _client_from_options(
-        base_url=base_url,
-        token=token,
-        auth_header=auth_header,
-        header=header,
-    )
-    if digest:
-        result = inspect_by_digest(
-            client,
-            digest,
-            full_spec=full_spec,
-            follow_deprecated=follow_deprecated,
+        client = _client_from_options(
+            base_url=args.base_url,
+            token=args.token,
+            auth_header=args.auth_header,
+            header=args.header,
         )
-    else:
-        result = inspect_by_name(
-            client,
-            name or "",
-            include_all_versions=all_versions,
-            include_deprecated=include_deprecated,
-            full_spec=full_spec,
-            published_by=published_by,
-        )
-    _print_json(result)
+        if args.digest:
+            result = inspect_by_digest(
+                client,
+                args.digest,
+                full_spec=bool(args.full_spec),
+                follow_deprecated=bool(args.follow_deprecated),
+            )
+        else:
+            result = inspect_by_name(
+                client,
+                args.name or "",
+                include_all_versions=bool(args.all_versions),
+                include_deprecated=bool(args.include_deprecated),
+                full_spec=bool(args.full_spec),
+                published_by=args.published_by,
+            )
+        _print_json(result)
 
 
 @app.command(name="library")
@@ -181,13 +239,23 @@ def published_components_library(
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
+    config: ConfigOption = None,
 ) -> None:
     """Print the curated standard component library."""
 
-    client = _client_from_options(
-        base_url=base_url,
-        token=token,
-        auth_header=auth_header,
-        header=header,
-    )
-    _print_json(get_standard_library(client))
+    for args in _load_args(
+        config,
+        **_api_arg_specs(
+            base_url=base_url,
+            token=token,
+            auth_header=auth_header,
+            header=header,
+        ),
+    ):
+        client = _client_from_options(
+            base_url=args.base_url,
+            token=args.token,
+            auth_header=args.auth_header,
+            header=args.header,
+        )
+        _print_json(get_standard_library(client))

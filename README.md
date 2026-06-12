@@ -139,6 +139,37 @@ Omit `--schema-source` to use `auto`, which includes cached-only backend
 extensions after refresh while preserving official definitions for core
 operations. Use `--schema-source official` to force OSS-only/core commands.
 
+### Config files
+
+Implemented API commands and `tangle sdk published-components` commands accept
+`--config path/to/config.yaml` (or JSON) for command defaults. Explicit CLI
+arguments take precedence over config-file values. Config files may contain a
+single object, a list of objects, or a `_defaults` + `configs` object; with
+multiple config entries, the command runs once per entry.
+
+```yaml
+_defaults:
+  base_url: https://api.example
+  header:
+    - "Cloud-Auth: ..."
+
+configs:
+  - schema_source: cache
+    filter: active
+    limit: 10
+  - schema_source: cache
+    filter: finished
+```
+
+```bash
+uv run tangle api pipeline-runs list --config api-config.yaml --limit 5
+uv run tangle sdk published-components search --config components.yaml
+```
+
+For generated `tangle api` commands, config keys use the generated CLI
+parameter names such as `base_url`, `schema_source`, `body`, and endpoint
+parameters like `limit`, `filter`, or `id`.
+
 ## Static and dynamic command examples
 
 OpenAPI resource paths are available as command groups from the checked-in official schema, with cached-only backend extensions included in auto mode after refresh. For example, `/api/pipeline_runs/` becomes `pipeline-runs`, `/api/components/{digest}` becomes `components`, and `/api/published_components/` becomes `published-components`:
