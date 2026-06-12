@@ -53,6 +53,7 @@ def _client_from_options(
     token: str | None = None,
     auth_header: str | None = None,
     header: list[str] | None = None,
+    include_env_credentials: bool = True,
 ) -> Any:
     """Create the static client used by published-component commands."""
 
@@ -73,6 +74,7 @@ def _client_from_options(
         auth_header=auth_header,
         header=header,
         timeout=DEFAULT_TIMEOUT_SECONDS,
+        include_env_credentials=include_env_credentials,
     )
 
 
@@ -89,6 +91,11 @@ def _load_args(config: str | None, **kwargs: Any) -> list[ArgsContainer]:
 
 def _optional_path(value: str | pathlib.Path | None) -> pathlib.Path | None:
     return pathlib.Path(value) if value is not None else None
+
+
+def _include_env_credentials(args: ArgsContainer, cli_base_url: str | None) -> bool:
+    config_base_url = getattr(args, "_config", {}).get("base_url")
+    return not (cli_base_url is None and config_base_url is not None)
 
 
 def _api_arg_specs(
@@ -130,10 +137,10 @@ def get_standard_library(*args: Any, **kwargs: Any) -> Any:
     return _get_standard_library(*args, **kwargs)
 
 
-def publish_component(*args: Any, **kwargs: Any) -> Any:
-    from .component_publisher import publish_component as _publish_component
+def ComponentPublisher(*args: Any, **kwargs: Any) -> Any:  # noqa: N802 - class-shaped lazy factory
+    from .component_publisher import ComponentPublisher as _ComponentPublisher
 
-    return _publish_component(*args, **kwargs)
+    return _ComponentPublisher(*args, **kwargs)
 
 
 def deprecate_component(*args: Any, **kwargs: Any) -> Any:
@@ -175,6 +182,7 @@ def published_components_search(
             token=args.token,
             auth_header=args.auth_header,
             header=args.header,
+            include_env_credentials=_include_env_credentials(args, base_url),
         )
         _print_json(
             search_components(
@@ -229,6 +237,7 @@ def published_components_inspect(
             token=args.token,
             auth_header=args.auth_header,
             header=args.header,
+            include_env_credentials=_include_env_credentials(args, base_url),
         )
         if args.digest:
             result = inspect_by_digest(
@@ -274,6 +283,7 @@ def published_components_library(
             token=args.token,
             auth_header=args.auth_header,
             header=args.header,
+            include_env_credentials=_include_env_credentials(args, base_url),
         )
         _print_json(get_standard_library(client))
 
@@ -294,6 +304,7 @@ def published_components_publish(
     git_remote_branch: str | None = None,
     git_remote_url: str | None = None,
     git_root: pathlib.Path | None = None,
+    published_by: str | None = None,
     base_url: BaseUrlOption = None,
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
@@ -302,7 +313,7 @@ def published_components_publish(
 ) -> None:
     """Publish one component YAML file to a Tangle component registry."""
 
-    for args in _load_args(
+    all_args = _load_args(
         config,
         component_path=("component_path", component_path, None, False, True, _optional_path),
         image=(image, None),
@@ -314,36 +325,52 @@ def published_components_publish(
         git_remote_branch=(git_remote_branch, None),
         git_remote_url=(git_remote_url, None),
         git_root=(git_root, None, _optional_path),
+        published_by=(published_by, None),
         **_api_arg_specs(
             base_url=base_url,
             token=token,
             auth_header=auth_header,
             header=header,
         ),
-    ):
+    )
+    results: list[dict[str, Any]] = []
+    for args in all_args:
         client = None if args.dry_run else _client_from_options(
             base_url=args.base_url,
             token=args.token,
             auth_header=args.auth_header,
             header=args.header,
+            include_env_credentials=_include_env_credentials(args, base_url),
         )
-        result = publish_component(
-            client,
-            args.component_path,
-            image=args.image,
-            name=args.name,
-            description=args.description,
-            annotations=args.annotations,
+        publisher = ComponentPublisher(
             dry_run=bool(args.dry_run),
             git_remote_sha=args.git_remote_sha,
             git_remote_branch=args.git_remote_branch,
             git_remote_url=args.git_remote_url,
             git_root=args.git_root,
+            published_by=args.published_by,
+            client=client,
         )
-        result_dict = result.to_dict() if hasattr(result, "to_dict") else result
-        _print_json(result_dict)
-        if isinstance(result_dict, dict) and result_dict.get("status") == "failed":
-            raise SystemExit(1)
+        result = publisher.publish_component(
+            args.component_path,
+            image=args.image,
+            name=args.name,
+            description=args.description,
+            annotations=args.annotations,
+        )
+        result_dict = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+        results.append({"component_path": str(args.component_path), **result_dict})
+
+    error_count = sum(1 for result in results if result.get("status") in {"error", "failed"})
+    summary = {
+        "status": "failed" if error_count else "success",
+        "components_count": len(results),
+        "error_count": error_count,
+        "results": results,
+    }
+    _print_json(summary)
+    if error_count:
+        raise SystemExit(1)
 
 
 @app.command(name="deprecate")
@@ -375,6 +402,7 @@ def published_components_deprecate(
             token=args.token,
             auth_header=args.auth_header,
             header=args.header,
+            include_env_credentials=_include_env_credentials(args, base_url),
         )
         result = deprecate_component(
             client,
@@ -383,5 +411,5 @@ def published_components_deprecate(
         )
         result_dict = result.to_dict() if hasattr(result, "to_dict") else result
         _print_json(result_dict)
-        if isinstance(result_dict, dict) and result_dict.get("status") == "failed":
+        if isinstance(result_dict, dict) and not result_dict.get("success", result_dict.get("status") != "failed"):
             raise SystemExit(1)

@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from tangle_cli import cli, published_components_cli
-from tangle_cli.component_publisher import deprecate_component, publish_component
+from tangle_cli.component_publisher import ProcessingOutcome, ProcessingResult
 
 
 def run_app(app, args: list[str]) -> None:
@@ -32,70 +32,22 @@ def _write_component(path: Path, *, name: str = "demo", version: str = "1.0") ->
     return path
 
 
-class FakeClient:
-    def __init__(self) -> None:
-        self.published_calls: list[dict[str, Any]] = []
-        self.deprecate_calls: list[dict[str, Any]] = []
+class FakePublisher:
+    instances: list["FakePublisher"] = []
 
-    def published_components_create(self, **kwargs: Any) -> dict[str, Any]:
-        self.published_calls.append(kwargs)
-        return {"digest": "sha256:abc123", "name": kwargs.get("name")}
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.publish_calls: list[dict[str, Any]] = []
+        FakePublisher.instances.append(self)
 
-    def published_components_update(self, **kwargs: Any) -> dict[str, Any]:
-        self.deprecate_calls.append(kwargs)
-        return {"digest": kwargs.get("digest"), "deprecated": kwargs.get("deprecated")}
-
-
-def test_publish_component_calls_generated_create_with_loaded_spec(tmp_path: Path):
-    component_path = _write_component(tmp_path / "component.yaml", name="Original")
-    client = FakeClient()
-
-    result = publish_component(
-        client,
-        component_path,
-        image="python:3.13",
-        name="Published Name",
-        description="Published description",
-        annotations={"owner": "oss"},
-    )
-
-    assert result.status == "success"
-    assert result.digest == "sha256:abc123"
-    assert client.published_calls == [
-        {
-            "name": "Published Name",
-            "text": client.published_calls[0]["text"],
-        }
-    ]
-    payload = yaml.safe_load(client.published_calls[0]["text"])
-    assert payload["name"] == "Published Name"
-    assert payload["description"] == "Published description"
-    assert payload["implementation"]["container"]["image"] == "python:3.13"
-    assert payload["metadata"]["annotations"]["owner"] == "oss"
-    assert "published_at" in payload["metadata"]["annotations"]
-
-
-def test_publish_component_dry_run_does_not_call_api(tmp_path: Path):
-    component_path = _write_component(tmp_path / "component.yaml", name="Dry Run")
-    client = FakeClient()
-
-    result = publish_component(client, component_path, dry_run=True)
-
-    assert result.status == "dry_run"
-    assert result.dry_run is True
-    assert client.published_calls == []
-    assert result.response["name"] == "Dry Run"
-
-
-def test_deprecate_component_calls_generated_update():
-    client = FakeClient()
-
-    result = deprecate_component(client, "sha256:old", superseded_by="sha256:new")
-
-    assert result.status == "success"
-    assert client.deprecate_calls == [
-        {"digest": "sha256:old", "deprecated": True, "superseded_by": "sha256:new"}
-    ]
+    def publish_component(self, component_path: Path, **kwargs: Any) -> ProcessingResult:
+        self.publish_calls.append({"component_path": component_path, **kwargs})
+        return ProcessingResult(
+            outcome=ProcessingOutcome.SUCCESS,
+            local_version="1.0",
+            latest_version=None,
+            reason=f"Dry-run: would publish {kwargs.get('name') or 'component'}",
+        )
 
 
 def test_published_components_publish_cli_wiring_and_config_precedence(monkeypatch, tmp_path: Path, capsys):
@@ -109,17 +61,13 @@ def test_published_components_publish_cli_wiring_and_config_precedence(monkeypat
         "  from_config: yes\n",
         encoding="utf-8",
     )
-    calls: list[dict[str, Any]] = []
 
     def fake_client_from_options(**kwargs: Any) -> object:
         raise AssertionError("dry-run publish must not create an API client")
 
-    def fake_publish_component(client: object, component_path: Path, **kwargs: Any) -> dict[str, Any]:
-        calls.append({"client": client, "component_path": component_path, **kwargs})
-        return {"status": "dry_run", "name": kwargs["name"], "dry_run": kwargs["dry_run"]}
-
+    FakePublisher.instances = []
     monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
-    monkeypatch.setattr(published_components_cli, "publish_component", fake_publish_component)
+    monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
 
     app = cli.build_app()
     run_app(
@@ -128,23 +76,219 @@ def test_published_components_publish_cli_wiring_and_config_precedence(monkeypat
     )
 
     result = json.loads(capsys.readouterr().out)
-    assert result["status"] == "dry_run"
-    assert result["name"] == "CLI Name"
-    assert calls == [
+    assert result["status"] == "success"
+    assert result["components_count"] == 1
+    assert FakePublisher.instances[0].kwargs == {
+        "dry_run": True,
+        "git_remote_sha": None,
+        "git_remote_branch": None,
+        "git_remote_url": None,
+        "git_root": None,
+        "published_by": None,
+        "client": None,
+    }
+    assert FakePublisher.instances[0].publish_calls == [
         {
-            "client": None,
             "component_path": component_path,
             "image": None,
             "name": "CLI Name",
             "description": None,
             "annotations": {"from_config": True},
-            "dry_run": True,
-            "git_remote_sha": None,
+        }
+    ]
+
+
+def test_published_components_publish_config_base_url_suppresses_env_credentials(monkeypatch, tmp_path: Path, capsys):
+    component_path = _write_component(tmp_path / "component.yaml", name="Config Name")
+    config = tmp_path / "publish.yaml"
+    config.write_text(
+        f"component_path: {component_path}\n"
+        "base_url: https://config.example\n"
+        "token: config-token\n"
+        "auth_header: Bearer config-auth\n"
+        "header:\n"
+        "  - 'X-Config: yes'\n",
+        encoding="utf-8",
+    )
+    fake_client = object()
+    client_calls: list[dict[str, Any]] = []
+    FakePublisher.instances = []
+
+    def fake_client_from_options(**kwargs: Any) -> object:
+        client_calls.append(kwargs)
+        return fake_client
+
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
+
+    app = cli.build_app()
+    run_app(app, ["sdk", "published-components", "publish", "--config", str(config)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "success"
+    assert client_calls == [
+        {
+            "base_url": "https://config.example",
+            "token": "config-token",
+            "auth_header": "Bearer config-auth",
+            "header": ["X-Config: yes"],
+            "include_env_credentials": False,
+        }
+    ]
+    assert FakePublisher.instances[0].kwargs["client"] is fake_client
+
+
+def test_published_components_publish_cli_base_url_keeps_env_credentials(monkeypatch, tmp_path: Path, capsys):
+    component_path = _write_component(tmp_path / "component.yaml", name="Config Name")
+    config = tmp_path / "publish.yaml"
+    config.write_text(
+        f"component_path: {component_path}\n"
+        "base_url: https://config.example\n",
+        encoding="utf-8",
+    )
+    client_calls: list[dict[str, Any]] = []
+    FakePublisher.instances = []
+
+    def fake_client_from_options(**kwargs: Any) -> object:
+        client_calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
+
+    app = cli.build_app()
+    run_app(
+        app,
+        [
+            "sdk",
+            "published-components",
+            "publish",
+            "--config",
+            str(config),
+            "--base-url",
+            "https://cli.example",
+        ],
+    )
+
+    json.loads(capsys.readouterr().out)
+    assert client_calls[-1]["base_url"] == "https://cli.example"
+    assert client_calls[-1]["include_env_credentials"] is True
+
+
+def test_published_components_publish_config_array_is_batch_interface(monkeypatch, tmp_path: Path, capsys):
+    first = _write_component(tmp_path / "one.yaml", name="One")
+    second = _write_component(tmp_path / "two.yaml", name="Two")
+    config = tmp_path / "publish-many.yaml"
+    config.write_text(
+        "_defaults:\n"
+        "  dry_run: true\n"
+        "  image: python:3.12\n"
+        "configs:\n"
+        f"  - component_path: {first}\n"
+        "    name: One Config\n"
+        f"  - component_path: {second}\n"
+        "    name: Two Config\n",
+        encoding="utf-8",
+    )
+
+    FakePublisher.instances = []
+    monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
+
+    app = cli.build_app()
+    run_app(app, ["sdk", "published-components", "publish", "--config", str(config)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "success"
+    assert result["components_count"] == 2
+    assert [publisher.publish_calls for publisher in FakePublisher.instances] == [
+        [
+            {
+                "component_path": first,
+                "image": "python:3.12",
+                "name": "One Config",
+                "description": None,
+                "annotations": None,
+            }
+        ],
+        [
+            {
+                "component_path": second,
+                "image": "python:3.12",
+                "name": "Two Config",
+                "description": None,
+                "annotations": None,
+            }
+        ],
+    ]
+
+
+def test_published_components_publish_config_array_uses_per_entry_controls(monkeypatch, tmp_path: Path, capsys):
+    first = _write_component(tmp_path / "one.yaml", name="One")
+    second = _write_component(tmp_path / "two.yaml", name="Two")
+    config = tmp_path / "publish-controls.yaml"
+    config.write_text(
+        "configs:\n"
+        f"  - component_path: {first}\n"
+        "    base_url: https://first.example\n"
+        "    token: first-token\n"
+        "    published_by: first@example.com\n"
+        "    git_remote_sha: first-sha\n"
+        f"  - component_path: {second}\n"
+        "    dry_run: true\n"
+        "    base_url: https://second.example\n"
+        "    token: second-token\n"
+        "    published_by: second@example.com\n"
+        "    git_remote_sha: second-sha\n",
+        encoding="utf-8",
+    )
+    fake_client = object()
+    client_calls: list[dict[str, Any]] = []
+    FakePublisher.instances = []
+
+    def fake_client_from_options(**kwargs: Any) -> object:
+        client_calls.append(kwargs)
+        return fake_client
+
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
+
+    app = cli.build_app()
+    run_app(app, ["sdk", "published-components", "publish", "--config", str(config)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "success"
+    assert result["components_count"] == 2
+    assert client_calls == [
+        {
+            "base_url": "https://first.example",
+            "token": "first-token",
+            "auth_header": None,
+            "header": None,
+            "include_env_credentials": False,
+        }
+    ]
+    assert [publisher.kwargs for publisher in FakePublisher.instances] == [
+        {
+            "dry_run": False,
+            "git_remote_sha": "first-sha",
             "git_remote_branch": None,
             "git_remote_url": None,
             "git_root": None,
-        }
+            "published_by": "first@example.com",
+            "client": fake_client,
+        },
+        {
+            "dry_run": True,
+            "git_remote_sha": "second-sha",
+            "git_remote_branch": None,
+            "git_remote_url": None,
+            "git_root": None,
+            "published_by": "second@example.com",
+            "client": None,
+        },
     ]
+    assert FakePublisher.instances[0].publish_calls[0]["component_path"] == first
+    assert FakePublisher.instances[1].publish_calls[0]["component_path"] == second
 
 
 def test_published_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_path: Path, capsys):
@@ -167,7 +311,7 @@ def test_published_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_p
 
     def fake_deprecate_component(client: object, digest: str, **kwargs: Any) -> dict[str, Any]:
         deprecate_calls.append({"client": client, "digest": digest, **kwargs})
-        return {"status": "success", "digest": digest, "superseded_by": kwargs.get("superseded_by")}
+        return {"success": True, "digest": digest, "superseded_by": kwargs.get("superseded_by")}
 
     monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "deprecate_component", fake_deprecate_component)
@@ -178,11 +322,17 @@ def test_published_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_p
     result = json.loads(capsys.readouterr().out)
     assert result == {
         "digest": "sha256:from-config",
-        "status": "success",
+        "success": True,
         "superseded_by": "sha256:new",
     }
     assert client_calls == [
-        {"base_url": "https://api.test", "token": None, "auth_header": None, "header": ["X-Test: yes"]}
+        {
+            "base_url": "https://api.test",
+            "token": None,
+            "auth_header": None,
+            "header": ["X-Test: yes"],
+            "include_env_credentials": False,
+        }
     ]
     assert deprecate_calls == [
         {"client": fake_client, "digest": "sha256:from-config", "superseded_by": "sha256:new"}
@@ -219,6 +369,7 @@ def test_components_and_published_components_help_reflect_api_split(capsys):
     publish_help = capsys.readouterr().out
     assert "base-url" in publish_help
     assert "auth-header" in publish_help
+    assert "published-by" in publish_help
     assert "slack" not in publish_help.lower()
     assert "shopify" not in publish_help.lower()
     assert "publish-all" not in publish_help
