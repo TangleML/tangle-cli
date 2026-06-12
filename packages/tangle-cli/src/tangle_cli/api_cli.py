@@ -224,6 +224,7 @@ def _register_refresh_command(api_app: App) -> None:
                 header=header,
             ),
         ):
+            base_url_from_config = base_url is None and "base_url" in args._config
             normalized_base_url = (
                 _normalize_base_url(args.base_url) if args.base_url else default_base_url()
             )
@@ -233,6 +234,7 @@ def _register_refresh_command(api_app: App) -> None:
                     args.token,
                     args.header,
                     args.auth_header,
+                    include_env_credentials=not base_url_from_config,
                 )
             except httpx.HTTPStatusError as exc:
                 message = f"HTTP {exc.response.status_code} {exc.response.reason_phrase}"
