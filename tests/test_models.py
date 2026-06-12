@@ -95,6 +95,24 @@ implementation:
         assert spec.name == "x"
         assert spec.version == "0.1"
 
+    def test_from_dict_accepts_raw_component_spec_shape(self):
+        spec = ComponentSpec.from_dict({
+            "name": "raw-component",
+            "description": "direct OpenAPI ComponentSpecOutput response",
+            "metadata": {"annotations": {"version": "1.0.0"}},
+            "inputs": [{"name": "query", "type": "String"}],
+            "outputs": [{"name": "result", "type": "String"}],
+            "implementation": {"container": {"image": "alpine"}},
+        })
+
+        assert spec.name == "raw-component"
+        assert spec.version == "1.0.0"
+        assert spec.description == "direct OpenAPI ComponentSpecOutput response"
+        assert spec.inputs == [{"name": "query", "type": "String"}]
+        assert spec.outputs == [{"name": "result", "type": "String"}]
+        assert spec.implementation == {"container": {"image": "alpine"}}
+        assert spec.data["name"] == "raw-component"
+
     def test_strip_implementation_removes_container(self):
         spec = ComponentSpec.from_dict({
             "digest": "d",

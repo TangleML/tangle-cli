@@ -110,6 +110,7 @@ def test_codegen_main_no_args_uses_default_backend_and_prints_summary(
     assert calls[1][0] == "generate"
     assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
     assert calls[1][1]["model_extension_module"] is None
+    assert calls[1][1]["model_aliases"] is None
     output = capsys.readouterr().out
     assert f"Loaded OpenAPI from backend: {backend}" in output
     assert f"Wrote {tmp_path / 'openapi.json'}" in output
@@ -164,6 +165,7 @@ def test_codegen_main_from_snapshot_is_explicit(monkeypatch, tmp_path, capsys) -
     assert calls[0][0] == "generate"
     assert calls[0][1]["operations_class_name"] == "GeneratedTangleApiOperations"
     assert calls[0][1]["model_extension_module"] is None
+    assert calls[0][1]["model_aliases"] is None
     output = capsys.readouterr().out
     assert f"Loaded OpenAPI from snapshot: {tmp_path / 'openapi.json'}" in output
     assert f"Wrote {tmp_path / 'openapi.json'}" not in output
@@ -199,6 +201,7 @@ def test_codegen_main_accepts_custom_operations_class_name(monkeypatch, tmp_path
     assert calls[0][0] == "generate"
     assert calls[0][1]["operations_class_name"] == "GeneratedTangleApiExtensions"
     assert calls[0][1]["model_extension_module"] is None
+    assert calls[0][1]["model_aliases"] is None
 
 
 def test_codegen_main_accepts_empty_model_extension_module(monkeypatch, tmp_path) -> None:
@@ -227,6 +230,7 @@ def test_codegen_main_accepts_empty_model_extension_module(monkeypatch, tmp_path
 
     assert calls[0][0] == "generate"
     assert calls[0][1]["model_extension_module"] == [""]
+    assert calls[0][1]["model_aliases"] is None
 
 
 def test_codegen_main_fetches_from_openapi_url_before_generating(
@@ -273,6 +277,7 @@ def test_codegen_main_fetches_from_openapi_url_before_generating(
     assert calls[1][0] == "generate"
     assert calls[1][1]["operations_class_name"] == "GeneratedTangleApiOperations"
     assert calls[1][1]["model_extension_module"] is None
+    assert calls[1][1]["model_aliases"] is None
     output = capsys.readouterr().out
     assert "Loaded OpenAPI from URL: https://example.com/openapi.json" in output
     assert "Generated 1 operations from 1 paths" in output
@@ -312,6 +317,157 @@ def test_generate_writes_support_modules_to_custom_out(tmp_path) -> None:
     assert "class GeneratedTangleApiOperations" in operations
     assert "def published_components_list" in operations
     assert "name_substring" in operations
+
+
+def test_generate_models_adds_default_component_spec_alias() -> None:
+    schema = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/components/{digest}": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ComponentSpecOutput"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "ComponentSpecOutput": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "title": "ComponentSpecOutput",
+                }
+            }
+        },
+    }
+
+    models = codegen.generate_models(schema, model_extension_module="")
+    operations = codegen.generate_operations(schema)
+
+    assert "class _ComponentSpecGenerated(TangleGeneratedModel):" in models
+    assert "class ComponentSpec(_ComponentSpecGenerated):" in models
+    assert "class _ComponentSpecOutputGenerated(TangleGeneratedModel):" in models
+    assert "'ComponentSpec'" in models
+    assert "from .models import ComponentSpec" in operations
+    assert "def components_get(self, digest: Any) -> ComponentSpec:" in operations
+    assert "response_model=ComponentSpec" in operations
+
+
+def test_component_spec_alias_operation_deserializes_raw_spec(monkeypatch, tmp_path) -> None:
+    schema = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/components/{digest}": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ComponentSpecOutput"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "ComponentSpecOutput": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "metadata": {"type": "object"},
+                    },
+                }
+            }
+        },
+    }
+    openapi = tmp_path / "openapi.json"
+    openapi.write_text(json.dumps(schema), encoding="utf-8")
+    out = tmp_path / "aliased_component_api"
+    codegen.generate(openapi, out)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    generated_operations = importlib.import_module("aliased_component_api.operations")
+
+    class Client(generated_operations.GeneratedTangleApiOperations):
+        def _request_json(self, *args, response_model=None, **kwargs):
+            return response_model.from_dict({
+                "name": "Widget",
+                "metadata": {"annotations": {"version": "1"}},
+            })
+
+    spec = Client().components_get("sha256:abc")
+
+    assert spec.__class__.__name__ == "ComponentSpec"
+    assert spec.name == "Widget"
+    assert spec.version == "1"
+    assert spec.data["name"] == "Widget"
+
+
+def test_generate_models_can_disable_default_model_aliases() -> None:
+    schema = {
+        "openapi": "3.1.0",
+        "paths": {},
+        "components": {
+            "schemas": {
+                "ComponentSpecOutput": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                }
+            }
+        },
+    }
+
+    models = codegen.generate_models(schema, model_extension_module="", model_aliases="")
+
+    assert "class _ComponentSpecGenerated" not in models
+    assert "class _ComponentSpecOutputGenerated(TangleGeneratedModel):" in models
+
+
+def test_generate_models_supports_custom_model_aliases() -> None:
+    schema = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/widgets/{id}": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/WidgetOutput"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "WidgetOutput": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                }
+            }
+        },
+    }
+
+    models = codegen.generate_models(schema, model_extension_module="", model_aliases=["Widget=WidgetOutput"])
+    operations = codegen.generate_operations(schema, model_aliases=["Widget=WidgetOutput"])
+
+    assert "class _WidgetGenerated(TangleGeneratedModel):" in models
+    assert "class Widget(_WidgetGenerated):" in models
+    assert "from .models import Widget" in operations
+    assert "-> Widget:" in operations
+    assert "response_model=Widget" in operations
 
 
 def test_generate_models_uses_builtin_model_extension_module_by_default() -> None:
@@ -542,6 +698,157 @@ def test_generate_deduplicates_colliding_extension_aliases(monkeypatch, tmp_path
     generated_models = importlib.import_module("alias_collision_api.models")
     assert generated_models.Foo().source == "a.b"
     assert generated_models.Bar().source == "a_b"
+
+
+def test_generate_operations_request_body_schema_override_preserves_raw_body(monkeypatch, tmp_path) -> None:
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "raw_body_api"
+    openapi.write_text(
+        json.dumps({
+            "openapi": "3.1.0",
+            "paths": {
+                "/api/search": {
+                    "post": {
+                        "operationId": "search_components",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {"query": {"type": "string"}},
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                    }
+                }
+            },
+            "components": {"schemas": {}},
+        }),
+        encoding="utf-8",
+    )
+
+    codegen.generate(
+        openapi,
+        out,
+        request_body_schemas={
+            "search_create": {
+                "type": "object",
+                "additionalProperties": True,
+                "title": "SearchQuery",
+            }
+        },
+    )
+
+    operations = (out / "operations.py").read_text(encoding="utf-8")
+    assert "def search_create(self, body: dict[str, Any] | None = None)" in operations
+    assert "query:" not in operations
+    assert "json_data=body" in operations
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    generated_operations = importlib.import_module("raw_body_api.operations")
+
+    class Client(generated_operations.GeneratedTangleApiOperations):
+        def __init__(self) -> None:
+            self.calls = []
+
+        def _request_json(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return {"ok": True}
+
+    payload = {"predicate": {"nested": {"value": True}}, "page_token": "next"}
+    client = Client()
+    client.search_create(body=payload)
+
+    assert client.calls[0][1]["json_data"] is payload
+
+
+def test_generate_operations_without_request_body_override_keeps_body_kwargs(tmp_path) -> None:
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "normal_body_api"
+    openapi.write_text(
+        json.dumps({
+            "openapi": "3.1.0",
+            "paths": {
+                "/api/search": {
+                    "post": {
+                        "operationId": "search_components",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {"query": {"type": "string"}},
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            },
+            "components": {"schemas": {}},
+        }),
+        encoding="utf-8",
+    )
+
+    codegen.generate(openapi, out)
+
+    operations = (out / "operations.py").read_text(encoding="utf-8")
+    assert "def search_create(self, query: Any = None)" in operations
+    assert "json_data={'query': query}" in operations
+    assert "body: dict[str, Any] | None" not in operations
+
+
+def test_codegen_main_accepts_request_body_schema_file(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, object]] = []
+    schema_file = tmp_path / "body-schema.json"
+    schema_file.write_text(
+        json.dumps({"type": "object", "additionalProperties": True, "title": "Body"}),
+        encoding="utf-8",
+    )
+
+    def fake_generate(openapi_path, generated_dir, **kwargs):
+        calls.append((
+            "generate",
+            {
+                "openapi_path": openapi_path,
+                "generated_dir": generated_dir,
+                **kwargs,
+            },
+        ))
+        return _schema(), _generated_files(tmp_path)
+
+    monkeypatch.setattr(codegen, "generate", fake_generate)
+
+    codegen.main([
+        "--openapi",
+        str(tmp_path / "openapi.json"),
+        "--from-snapshot",
+        "--request-body-schema",
+        'inline_op={"type":"object","additionalProperties":true}',
+        "--request-body-schema-file",
+        f"file_op={schema_file}",
+    ])
+
+    assert calls[0][1]["request_body_schemas"] == {
+        "inline_op": {"type": "object", "additionalProperties": True},
+        "file_op": {"type": "object", "additionalProperties": True, "title": "Body"},
+    }
+
+
+def test_codegen_main_rejects_invalid_request_body_schema(tmp_path, capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        codegen.main([
+            "--openapi",
+            str(tmp_path / "openapi.json"),
+            "--from-snapshot",
+            "--request-body-schema",
+            "search_components=not-json",
+        ])
+
+    assert exc_info.value.code == 2
+    assert "not valid JSON" in capsys.readouterr().err
 
 
 def test_codegen_main_rejects_invalid_model_extension_module(tmp_path, capsys) -> None:

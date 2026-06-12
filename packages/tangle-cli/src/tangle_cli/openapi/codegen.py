@@ -12,6 +12,7 @@ semantics without requiring OpenAPI parsing at normal runtime.
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib
 import json
 import keyword
@@ -33,6 +34,14 @@ _GENERATED_DIR = _REPO_ROOT / "packages" / "tangle-api" / "src" / "tangle_api" /
 DEFAULT_BACKEND_PATH = _REPO_ROOT / "third_party" / "tangle"
 DEFAULT_OPERATIONS_CLASS_NAME = "GeneratedTangleApiOperations"
 DEFAULT_MODEL_EXTENSION_MODULE = "tangle_cli.generated_model_extensions"
+DEFAULT_MODEL_ALIASES: dict[str, tuple[str, ...]] = {
+    "ComponentSpec": (
+        "ComponentSpec-Output",
+        "ComponentSpecOutput",
+        "ComponentSpec-Input",
+        "ComponentSpecInput",
+    ),
+}
 
 
 def _safe_identifier(name: str) -> str:
@@ -55,15 +64,19 @@ def _class_name(name: str) -> str:
     return value
 
 
-def _schema_ref_name(schema: dict[str, Any] | None) -> str | None:
+def _schema_ref_name(
+    schema: dict[str, Any] | None,
+    model_ref_aliases: dict[str, str] | None = None,
+) -> str | None:
     if not schema:
         return None
     ref = schema.get("$ref")
     if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
-        return _class_name(ref.rsplit("/", 1)[1])
+        schema_name = ref.rsplit("/", 1)[1]
+        return model_ref_aliases.get(schema_name, _class_name(schema_name)) if model_ref_aliases else _class_name(schema_name)
     for key in ("anyOf", "oneOf", "allOf"):
         for child in schema.get(key, []) or []:
-            name = _schema_ref_name(child)
+            name = _schema_ref_name(child, model_ref_aliases=model_ref_aliases)
             if name:
                 return name
     return None
@@ -116,35 +129,44 @@ def _schema_allows_null(schema: dict[str, Any] | None) -> bool:
     return False
 
 
-def _response_model_name(operation: dict[str, Any]) -> str | None:
+def _response_model_name(
+    operation: dict[str, Any],
+    model_ref_aliases: dict[str, str] | None = None,
+) -> str | None:
     schema = _success_schema(operation)
     if not schema:
         return None
     if _schema_type(schema) == "array":
         items = schema.get("items")
-        return _schema_ref_name(items if isinstance(items, dict) else None)
-    return _schema_ref_name(schema)
+        return _schema_ref_name(items if isinstance(items, dict) else None, model_ref_aliases=model_ref_aliases)
+    return _schema_ref_name(schema, model_ref_aliases=model_ref_aliases)
 
 
-def _response_return_annotation(operation: dict[str, Any]) -> str:
+def _response_return_annotation(
+    operation: dict[str, Any],
+    model_ref_aliases: dict[str, str] | None = None,
+) -> str:
     response = _success_response(operation)
     if response is None:
         return "Any"
     schema = _success_schema(operation)
     if schema is None or not schema:
         return "None"
-    return _schema_return_annotation(schema)
+    return _schema_return_annotation(schema, model_ref_aliases=model_ref_aliases)
 
 
-def _schema_return_annotation(schema: dict[str, Any]) -> str:
-    ref_name = _schema_ref_name(schema)
+def _schema_return_annotation(
+    schema: dict[str, Any],
+    model_ref_aliases: dict[str, str] | None = None,
+) -> str:
+    ref_name = _schema_ref_name(schema, model_ref_aliases=model_ref_aliases)
     if ref_name:
         return f"{ref_name} | None" if _schema_allows_null(schema) else ref_name
 
     schema_type = _schema_type(schema)
     if schema_type == "array":
         items = schema.get("items")
-        item_ref = _schema_ref_name(items if isinstance(items, dict) else None)
+        item_ref = _schema_ref_name(items if isinstance(items, dict) else None, model_ref_aliases=model_ref_aliases)
         annotation = f"list[{item_ref}]" if item_ref else "list[Any]"
         return f"{annotation} | None" if _schema_allows_null(schema) else annotation
 
@@ -164,6 +186,184 @@ def _schema_return_annotation(schema: dict[str, Any]) -> str:
     return "Any"
 
 
+
+def _parse_model_alias(value: str) -> tuple[str, tuple[str, ...]]:
+    """Parse ``PublicModel=SourceModel[,OtherSource]`` alias config."""
+
+    if "=" not in value:
+        raise ValueError(
+            "Model aliases must use PublicModel=SourceModel[,OtherSource] syntax"
+        )
+    alias_name, raw_sources = value.split("=", 1)
+    alias_name = _class_name(alias_name.strip())
+    _validate_class_name(alias_name)
+    sources = tuple(source.strip() for source in raw_sources.split(",") if source.strip())
+    if not sources:
+        raise ValueError(f"Model alias {alias_name!r} must include at least one source schema")
+    return alias_name, sources
+
+
+def _model_alias_mapping(
+    model_aliases: dict[str, Sequence[str] | str] | Sequence[str] | str | None,
+) -> dict[str, tuple[str, ...]]:
+    """Return public model aliases, applying built-in defaults first.
+
+    A string or sequence uses CLI-style ``PublicModel=SourceModel`` entries.
+    An empty-string entry disables the built-in defaults.
+    """
+
+    aliases = dict(DEFAULT_MODEL_ALIASES)
+    if model_aliases is None:
+        return aliases
+    if isinstance(model_aliases, dict):
+        for alias_name, sources in model_aliases.items():
+            parsed_alias = _class_name(alias_name)
+            _validate_class_name(parsed_alias)
+            source_values = [sources] if isinstance(sources, str) else list(sources)
+            source_tuple = tuple(str(source).strip() for source in source_values if str(source).strip())
+            if not source_tuple:
+                raise ValueError(f"Model alias {parsed_alias!r} must include at least one source schema")
+            aliases[parsed_alias] = source_tuple
+        return aliases
+
+    values = [model_aliases] if isinstance(model_aliases, str) else list(model_aliases)
+    if "" in values:
+        aliases = {}
+        values = [value for value in values if value != ""]
+    for value in values:
+        alias_name, sources = _parse_model_alias(value)
+        aliases[alias_name] = sources
+    return aliases
+
+
+def _apply_model_aliases(
+    schemas: dict[str, Any],
+    model_aliases: dict[str, Sequence[str] | str] | Sequence[str] | str | None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Add alias schemas and return source schema -> public class aliases."""
+
+    output = dict(schemas)
+    existing_class_names = {_class_name(schema_name) for schema_name in output}
+    model_ref_aliases: dict[str, str] = {}
+    for alias_name, sources in _model_alias_mapping(model_aliases).items():
+        present_sources = [source for source in sources if source in schemas]
+        if not present_sources:
+            continue
+        if alias_name not in existing_class_names:
+            output[alias_name] = dict(schemas[present_sources[0]])
+            if isinstance(output[alias_name], dict):
+                output[alias_name]["title"] = alias_name
+            existing_class_names.add(alias_name)
+        if alias_name in existing_class_names:
+            for source in present_sources:
+                model_ref_aliases[source] = alias_name
+    return output, model_ref_aliases
+
+
+def _request_body_schema_mapping(
+    request_body_schemas: dict[str, dict[str, Any]] | Sequence[str] | str | None,
+) -> dict[str, dict[str, Any]]:
+    """Parse operation request-body schema overrides keyed by operation id."""
+
+    if request_body_schemas is None:
+        return {}
+    if isinstance(request_body_schemas, dict):
+        return {key: dict(value) for key, value in request_body_schemas.items()}
+
+    values = [request_body_schemas] if isinstance(request_body_schemas, str) else list(request_body_schemas)
+    overrides: dict[str, dict[str, Any]] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(
+                "Request body schema overrides must use OperationId={...json schema...} syntax"
+            )
+        operation_id, raw_schema = value.split("=", 1)
+        operation_id = operation_id.strip()
+        if not operation_id:
+            raise ValueError("Request body schema override operation id cannot be empty")
+        try:
+            schema = json.loads(raw_schema)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Request body schema override for {operation_id!r} is not valid JSON: {exc.msg}"
+            ) from exc
+        if not isinstance(schema, dict):
+            raise ValueError(f"Request body schema override for {operation_id!r} must be a JSON object")
+        overrides[operation_id] = schema
+    return overrides
+
+
+def _request_body_schema_file_mapping(values: Sequence[str] | str | None) -> dict[str, dict[str, Any]]:
+    """Parse operation request-body schema overrides from JSON files."""
+
+    if values is None:
+        return {}
+    raw_values = [values] if isinstance(values, str) else list(values)
+    overrides: dict[str, dict[str, Any]] = {}
+    for value in raw_values:
+        if "=" not in value:
+            raise ValueError(
+                "Request body schema file overrides must use OperationId=path/to/schema.json syntax"
+            )
+        operation_id, raw_path = value.split("=", 1)
+        operation_id = operation_id.strip()
+        if not operation_id:
+            raise ValueError("Request body schema file override operation id cannot be empty")
+        path = Path(raw_path).expanduser()
+        try:
+            schema = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ValueError(f"Could not read request body schema file {path}: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Request body schema file {path} is not valid JSON: {exc.msg}") from exc
+        if not isinstance(schema, dict):
+            raise ValueError(f"Request body schema file {path} must contain a JSON object")
+        overrides[operation_id] = schema
+    return overrides
+
+
+def _operation_override_keys(operation: Any) -> set[str]:
+    """Return supported keys for request-body schema override matching."""
+
+    operation_id = operation.operation.get("operationId")
+    keys = {_method_name(operation.group_name, operation.command_name), operation.operation_name}
+    if isinstance(operation_id, str) and operation_id:
+        keys.add(operation_id)
+        keys.add(_safe_identifier(operation_id))
+    return keys
+
+
+def _set_json_request_body_schema(operation: dict[str, Any], schema: dict[str, Any]) -> None:
+    request_body = operation.setdefault("requestBody", {})
+    content = request_body.setdefault("content", {})
+    media = content.setdefault("application/json", {})
+    media["schema"] = schema
+    operation["x-tangle-cli-request-body-schema-override"] = True
+
+
+def _apply_request_body_schema_overrides(
+    schema: dict[str, Any],
+    request_body_schemas: dict[str, dict[str, Any]] | Sequence[str] | str | None,
+) -> dict[str, Any]:
+    """Return schema with configured request-body schema overrides applied."""
+
+    overrides = _request_body_schema_mapping(request_body_schemas)
+    if not overrides:
+        return schema
+
+    output = copy.deepcopy(schema)
+    operations = parsed_operations(output)
+    remaining = dict(overrides)
+    for operation in operations:
+        matching_keys = _operation_override_keys(operation)
+        for key in list(remaining):
+            if key in matching_keys:
+                _set_json_request_body_schema(operation.operation, remaining.pop(key))
+    if remaining:
+        raise ValueError(
+            "Unknown request body schema override operation(s): " + ", ".join(sorted(remaining))
+        )
+    return output
 
 
 @dataclass(frozen=True)
@@ -324,10 +524,12 @@ def _model_extension_import_lines(refs_by_model: dict[str, list[_ModelExtensionR
 def generate_models(
     schema: dict[str, Any],
     model_extension_module: str | Sequence[str] | None = None,
+    model_aliases: dict[str, Sequence[str] | str] | Sequence[str] | str | None = None,
 ) -> str:
     """Generate Pydantic model classes and apply configured model extensions."""
 
-    schemas = schema.get("components", {}).get("schemas", {}) or {}
+    raw_schemas = schema.get("components", {}).get("schemas", {}) or {}
+    schemas, _ = _apply_model_aliases(raw_schemas, model_aliases)
     extension_refs = _model_extension_refs(model_extension_module)
     lines: list[str] = [
         '"""Generated Pydantic models for the checked-in Tangle OpenAPI schema.\n\nDo not edit by hand; run ``uv run python -m tangle_cli.openapi.codegen``.\n"""',
@@ -403,7 +605,12 @@ def _validate_class_name(name: str) -> str:
     return name
 
 
-def _param_signature(parameters: list[Any], has_request_body: bool) -> tuple[str, list[str], list[str], list[str], bool]:
+def _param_signature(
+    parameters: list[Any],
+    has_request_body: bool,
+    *,
+    raw_body_override: bool = False,
+) -> tuple[str, list[str], list[str], list[str], bool]:
     required: list[Any] = []
     optional: list[Any] = []
     for parameter in parameters:
@@ -431,7 +638,8 @@ def _param_signature(parameters: list[Any], has_request_body: bool) -> tuple[str
             body_names.append(name)
     include_body = has_request_body and not body_names
     if include_body:
-        signature_parts.append("body: Any = None")
+        body_annotation = "dict[str, Any] | None" if raw_body_override else "Any"
+        signature_parts.append(f"body: {body_annotation} = None")
     return ", ".join(signature_parts), path_names, query_names, body_names, include_body
 
 
@@ -444,12 +652,19 @@ def _dict_literal(names: list[str]) -> str:
 def generate_operations(
     schema: dict[str, Any],
     operations_class_name: str = DEFAULT_OPERATIONS_CLASS_NAME,
+    model_aliases: dict[str, Sequence[str] | str] | Sequence[str] | str | None = None,
+    request_body_schemas: dict[str, dict[str, Any]] | Sequence[str] | str | None = None,
 ) -> str:
     """Generate the static operation mixin class for parsed OpenAPI operations."""
 
     operations_class_name = _validate_class_name(operations_class_name)
+    schema = _apply_request_body_schema_overrides(schema, request_body_schemas)
     operations = parsed_operations(schema)
-    response_models = sorted({name for op in operations if (name := _response_model_name(op.operation))})
+    _, model_ref_aliases = _apply_model_aliases(
+        schema.get("components", {}).get("schemas", {}) or {},
+        model_aliases,
+    )
+    response_models = sorted({name for op in operations if (name := _response_model_name(op.operation, model_ref_aliases))})
     imports = ", ".join(response_models)
     lines: list[str] = [
         '"""Generated static endpoint methods for the Tangle API.\n\nDo not edit by hand; run ``uv run python -m tangle_cli.openapi.codegen``.\n"""',
@@ -489,11 +704,13 @@ def generate_operations(
             raise RuntimeError(f"duplicate generated method {method_name}")
         used_methods.add(method_name)
         signature, path_names, query_names, body_names, include_body = _param_signature(
-            list(operation.parameters), operation.has_request_body
+            list(operation.parameters),
+            operation.has_request_body,
+            raw_body_override=bool(operation.operation.get("x-tangle-cli-request-body-schema-override")),
         )
-        response_model = _response_model_name(operation.operation)
+        response_model = _response_model_name(operation.operation, model_ref_aliases)
         response_arg = response_model if response_model else "None"
-        response_annotation = _response_return_annotation(operation.operation)
+        response_annotation = _response_return_annotation(operation.operation, model_ref_aliases)
         if signature:
             def_line = f"    def {method_name}(self, {signature}) -> {response_annotation}:"
         else:
@@ -622,6 +839,8 @@ def generate(
     *,
     operations_class_name: str = DEFAULT_OPERATIONS_CLASS_NAME,
     model_extension_module: str | Sequence[str] | None = None,
+    model_aliases: dict[str, Sequence[str] | str] | Sequence[str] | str | None = None,
+    request_body_schemas: dict[str, dict[str, Any]] | Sequence[str] | str | None = None,
 ) -> tuple[dict[str, Any], list[Path]]:
     schema = load_openapi_schema(openapi_path)
     output_dir = Path(generated_dir)
@@ -636,11 +855,20 @@ def generate(
         encoding="utf-8",
     )
     generated_files[1].write_text(
-        generate_models(schema, model_extension_module=model_extension_module),
+        generate_models(
+            schema,
+            model_extension_module=model_extension_module,
+            model_aliases=model_aliases,
+        ),
         encoding="utf-8",
     )
     generated_files[2].write_text(
-        generate_operations(schema, operations_class_name=operations_class_name),
+        generate_operations(
+            schema,
+            operations_class_name=operations_class_name,
+            model_aliases=model_aliases,
+            request_body_schemas=request_body_schemas,
+        ),
         encoding="utf-8",
     )
     return schema, generated_files
@@ -700,6 +928,37 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--model-alias",
+        action="append",
+        default=None,
+        help=(
+            "Expose a stable public model class from one or more source schemas, "
+            "using PublicModel=SourceSchema[,OtherSourceSchema]. Repeat for "
+            "multiple aliases. The built-in ComponentSpec alias is applied first "
+            "unless an empty string is passed to disable defaults."
+        ),
+    )
+    parser.add_argument(
+        "--request-body-schema",
+        action="append",
+        default=None,
+        help=(
+            "Override an operation JSON request-body schema using "
+            "OperationId={...json schema...}. OperationId may be the OpenAPI "
+            "operationId, generated method name, or group.command name. Repeat "
+            "for multiple operations."
+        ),
+    )
+    parser.add_argument(
+        "--request-body-schema-file",
+        action="append",
+        default=None,
+        help=(
+            "Override an operation JSON request-body schema from a JSON file "
+            "using OperationId=path/to/schema.json. Repeat for multiple operations."
+        ),
+    )
+    parser.add_argument(
         "--openapi-url",
         default=None,
         help="Remote OpenAPI JSON URL to fetch before regenerating.",
@@ -726,6 +985,11 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _validate_class_name(args.operations_class_name)
         _model_extension_refs(args.model_extension_module)
+        _model_alias_mapping(args.model_alias)
+        request_body_schema_overrides = _request_body_schema_mapping(args.request_body_schema)
+        request_body_schema_overrides.update(_request_body_schema_file_mapping(args.request_body_schema_file))
+        if not request_body_schema_overrides:
+            request_body_schema_overrides = None
     except ValueError as exc:
         parser.error(str(exc))
     source_count = sum(bool(value) for value in (args.openapi_url, args.backend_path, args.from_snapshot))
@@ -761,6 +1025,8 @@ def main(argv: list[str] | None = None) -> None:
         args.out,
         operations_class_name=args.operations_class_name,
         model_extension_module=args.model_extension_module,
+        model_aliases=args.model_alias,
+        request_body_schemas=request_body_schema_overrides,
     )
     _print_summary(
         source=source,
