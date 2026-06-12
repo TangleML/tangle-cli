@@ -11,6 +11,10 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     from tangle_cli.dynamic_discovery_client import TangleDynamicDiscoveryClient as DynamicDiscoveryClient
     from tangle_cli.client import TangleApiClient as StaticClient
     from tangle_cli.args_container import ArgsContainer, ConfigFileError
+    from tangle_cli.component_from_func import generate_component_yaml
+    from tangle_cli.component_generator import regenerate_yaml
+    from tangle_cli.module_bundler import ModuleBundler
+    from tangle_cli.version_manager import bump_version
     from tangle_cli.component_inspector import (
         get_standard_library,
         inspect_by_digest,
@@ -95,6 +99,10 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     assert ComponentSpec.__name__ == "ComponentSpec"
     assert PipelineRun.__name__ == "PipelineRun"
     assert ArgsContainer and ConfigFileError
+    assert callable(generate_component_yaml)
+    assert callable(regenerate_yaml)
+    assert callable(bump_version)
+    assert ModuleBundler is not None
     assert callable(get_standard_library)
     assert callable(inspect_by_digest)
     assert callable(inspect_by_name)

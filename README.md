@@ -25,12 +25,28 @@ SDK/scaffold commands live under `tangle sdk`. Local component generation/spec h
 uv run tangle sdk components --help
 uv run tangle sdk components annotations get
 uv run tangle sdk components annotations set
+uv run tangle sdk components generate from-python path/to/component.py --image python:3.12
+uv run tangle sdk components generate from-python-function path/to/component.py  # compatibility alias
+uv run tangle sdk components bump-version path/to/component.yaml
 uv run tangle sdk published-components --help
 uv run tangle sdk published-components search transformer
 uv run tangle sdk published-components inspect transformer
 uv run tangle sdk published-components inspect --digest sha256:...
 uv run tangle sdk published-components library
 ```
+
+`generate from-python` converts a local Python function into a component YAML
+using inline source by default, or `--mode bundle` to embed local dependency
+modules. The command accepts `--function`, `--output`, `--name`, `--image`,
+`--dependencies-from`, `--strip-code`, `--use-legacy-naming`, and
+`--resolve-root`. `bump-version` increments or sets component version metadata
+in YAML, and updates/regenerates a referenced Python source when the component
+contains `python_original_code_path` annotations.
+
+Both commands accept `--config` YAML/JSON files via `tangle_cli.args_container`.
+Use keys such as `python_file`, `image`, `function`, `mode`, `resolve_root`,
+`yaml_file`, `set_version`, and `update_timestamp`; explicit CLI values take
+precedence over config-file values.
 
 ## API commands
 

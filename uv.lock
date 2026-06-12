@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-05T03:12:22.361582Z"
+exclude-newer = "2026-06-05T15:26:34.402328Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -1796,11 +1796,13 @@ dependencies = [
     { name = "cloud-pipelines" },
     { name = "cloud-pipelines-backend" },
     { name = "cyclopts" },
+    { name = "docstring-parser" },
     { name = "httpx" },
     { name = "platformdirs" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "requests" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.optional-dependencies]
@@ -1832,12 +1834,14 @@ requires-dist = [
     { name = "cloud-pipelines", specifier = ">=0.26.3.12" },
     { name = "cloud-pipelines-backend", git = "https://github.com/TangleML/tangle?rev=stable_cli" },
     { name = "cyclopts", specifier = ">=4.16.1" },
+    { name = "docstring-parser", specifier = ">=0.16" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "platformdirs", specifier = ">=4.10.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32.0" },
     { name = "tangle-api", marker = "extra == 'native'", editable = "packages/tangle-api" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
 ]
 provides-extras = ["native"]
 
