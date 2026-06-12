@@ -23,7 +23,6 @@ from .api_transport import (
     _normalize_base_url,
     _request_headers,
     default_base_url,
-    default_token,
 )
 from tangle_api.generated.models import ComponentSpec, GetExecutionInfoResponse
 from tangle_api.generated.operations import GeneratedTangleApiOperations
@@ -63,6 +62,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         header: list[str] | str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         session: requests.Session | None = None,
+        include_env_credentials: bool = True,
     ) -> None:
         self.base_url = _normalize_base_url(base_url or default_base_url())
         self.logger = logger or _null_logger
@@ -73,6 +73,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         self.header = header
         self.timeout = timeout
         self.session = session or requests.Session()
+        self.include_env_credentials = include_env_credentials
 
     def set_verbose(self, enabled: bool) -> None:
         """Enable or disable request logging."""
@@ -293,10 +294,11 @@ class TangleApiClient(GeneratedTangleApiOperations):
         if extra_headers:
             headers.update({name: str(value) for name, value in extra_headers.items()})
         return _request_headers(
-            self.token or default_token(),
+            self.token,
             self.header,
             self.auth_header,
             headers,
+            include_env_credentials=self.include_env_credentials,
         )
 
     def _url(self, path: str) -> str:
