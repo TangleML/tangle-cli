@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 import requests
 
 from tangle_cli.client import TangleApiClient
@@ -86,6 +87,104 @@ def test_request_json_instantiates_list_response_models() -> None:
     assert runs[0].id == "run-1"
 
 
+def test_static_client_rejects_absolute_paths_before_request() -> None:
+    session = FakeSession()
+    client = TangleApiClient("https://api.test", session=session)
+
+    with pytest.raises(ValueError, match="must be relative"):
+        client._make_request("GET", "https://attacker.example/collect")
+
+    assert session.calls == []
+
+
+def test_static_client_rejects_network_path_references_before_request() -> None:
+    session = FakeSession()
+    client = TangleApiClient("https://api.test", session=session)
+
+    with pytest.raises(ValueError, match="must be relative"):
+        client._make_request("GET", "//attacker.example/collect")
+
+    assert session.calls == []
+
+
+def test_cross_origin_redirect_is_rejected() -> None:
+    redirect = response(status_code=307)
+    redirect.url = "https://api.test/api/secrets"
+    redirect.headers["Location"] = "https://attacker.example/leak"
+    session = FakeSession([redirect])
+    client = TangleApiClient("https://api.test", session=session)
+
+    with pytest.raises(requests.HTTPError, match="cross-origin redirect") as exc_info:
+        client._make_request("POST", "/api/secrets", json_data={"secret_value": "sensitive"})
+
+    assert exc_info.value.response is redirect
+    assert session.calls[0]["allow_redirects"] is False
+
+
+def test_same_origin_redirect_is_followed() -> None:
+    redirect = response(status_code=307)
+    redirect.url = "https://api.test/api/old"
+    redirect.headers["Location"] = "/api/new"
+    ok = response({"ok": True})
+    ok.url = "https://api.test/api/new"
+    session = FakeSession([redirect, ok])
+    client = TangleApiClient("https://api.test", session=session)
+
+    result = client._make_request("POST", "/api/old", json_data={"a": 1})
+
+    assert result is ok
+    assert len(session.calls) == 2
+    assert session.calls[1]["method"] == "POST"
+    assert session.calls[1]["url"] == "https://api.test/api/new"
+    assert session.calls[1]["params"] is None
+    assert session.calls[1]["json"] == {"a": 1}
+
+
+def test_rate_limit_response_is_retried(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.client.time.sleep", sleeps.append)
+    rate_limited = response(status_code=429)
+    rate_limited.headers["Retry-After"] = "0"
+    ok = response({"ok": True})
+    session = FakeSession([rate_limited, ok])
+    client = TangleApiClient("https://api.test", session=session)
+
+    result = client._make_request("GET", "/api/test")
+
+    assert result is ok
+    assert len(session.calls) == 2
+    assert sleeps == [0.0]
+
+
+def test_numeric_retry_after_is_capped(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.client.time.sleep", sleeps.append)
+    rate_limited = response(status_code=429)
+    rate_limited.headers["Retry-After"] = "999"
+    ok = response({"ok": True})
+    session = FakeSession([rate_limited, ok])
+    client = TangleApiClient("https://api.test", session=session)
+
+    client._make_request("GET", "/api/test")
+
+    assert sleeps == [client._MAX_RETRY_AFTER_SECONDS]
+
+
+def test_http_date_retry_after_is_capped(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.client.time.sleep", sleeps.append)
+    monkeypatch.setattr("tangle_cli.client.time.time", lambda: 0.0)
+    rate_limited = response(status_code=429)
+    rate_limited.headers["Retry-After"] = "Wed, 21 Oct 2037 07:28:00 GMT"
+    ok = response({"ok": True})
+    session = FakeSession([rate_limited, ok])
+    client = TangleApiClient("https://api.test", session=session)
+
+    client._make_request("GET", "/api/test")
+
+    assert sleeps == [client._MAX_RETRY_AFTER_SECONDS]
+
+
 def test_dumb_compat_wrappers_are_removed_but_semantic_helpers_remain() -> None:
     removed = [
         "get_artifact",
@@ -166,6 +265,53 @@ def test_get_run_details_uses_native_operations_for_retained_semantic_helper() -
         "https://api.test/api/pipeline_runs/run-1/annotations/",
         "https://api.test/api/executions/exec-1/graph_execution_state",
     ]
+
+
+def test_get_run_details_falls_back_to_run_id_as_root_execution_after_404() -> None:
+    not_found = response(status_code=404)
+    execution_payload = {
+        "id": "root-exec",
+        "task_spec": {"componentRef": {"spec": {"name": "pipeline"}}},
+        "child_task_execution_ids": {},
+        "input_artifacts": {},
+        "output_artifacts": {},
+    }
+    session = FakeSession([not_found, response(execution_payload)])
+    client = TangleApiClient("https://api.test", session=session)
+
+    details = client.get_run_details("root-exec")
+
+    assert details.run.id == "root-exec"
+    assert details.run.root_execution_id == "root-exec"
+    assert details.execution is not None
+    assert details.execution.id == "root-exec"
+    assert [call["url"] for call in session.calls] == [
+        "https://api.test/api/pipeline_runs/root-exec",
+        "https://api.test/api/executions/root-exec/details",
+    ]
+
+
+def test_get_run_details_fallback_can_include_execution_state() -> None:
+    not_found = response(status_code=404)
+    execution_payload = {
+        "id": "root-exec",
+        "task_spec": {"componentRef": {"spec": {"name": "pipeline"}}},
+        "child_task_execution_ids": {},
+        "input_artifacts": {},
+        "output_artifacts": {},
+    }
+    session = FakeSession([
+        not_found,
+        response(execution_payload),
+        response({"child_execution_status_stats": {"root-exec": {"SUCCEEDED": 1}}}),
+    ])
+    client = TangleApiClient("https://api.test", session=session)
+
+    details = client.get_run_details("root-exec", include_execution_state=True)
+
+    assert details.execution_state is not None
+    assert details.execution_state.status_totals == {"SUCCEEDED": 1}
+    assert session.calls[-1]["url"] == "https://api.test/api/executions/root-exec/graph_execution_state"
 
 
 def graph_execution_payload() -> dict[str, Any]:

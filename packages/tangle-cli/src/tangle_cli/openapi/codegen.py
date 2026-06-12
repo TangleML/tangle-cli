@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from collections import Counter
 from collections.abc import Sequence
@@ -649,6 +650,14 @@ def _dict_literal(names: list[str]) -> str:
     return "{" + ", ".join(f"{name!r}: {name}" for name in names) + "}"
 
 
+def _validate_operation_path(path: str) -> None:
+    """Reject OpenAPI operation paths that could override the configured origin."""
+
+    parsed_path = urllib.parse.urlparse(path)
+    if parsed_path.scheme or parsed_path.netloc:
+        raise ValueError(f"OpenAPI operation path must be relative: {path!r}")
+
+
 def generate_operations(
     schema: dict[str, Any],
     operations_class_name: str = DEFAULT_OPERATIONS_CLASS_NAME,
@@ -699,6 +708,7 @@ def generate_operations(
 
     used_methods: set[str] = set()
     for operation in operations:
+        _validate_operation_path(operation.path)
         method_name = _method_name(operation.group_name, operation.command_name)
         if method_name in used_methods:
             raise RuntimeError(f"duplicate generated method {method_name}")

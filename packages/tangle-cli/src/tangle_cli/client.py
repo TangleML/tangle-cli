@@ -8,15 +8,18 @@ higher-level semantic helpers that downstream callers use.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, is_dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
 from .api_transport import (
     DEFAULT_TIMEOUT_SECONDS,
+    _join_operation_url,
     _normalize_base_url,
     _request_headers,
     default_base_url,
@@ -41,6 +44,12 @@ class TangleApiClient(GeneratedTangleApiOperations):
     accepting the auth/header knobs used by the dynamic-discovery client. No
     OpenAPI schema is loaded at runtime; all endpoint wrappers are checked in.
     """
+
+    _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+    _MAX_REDIRECTS = 5
+    _MAX_RATE_LIMIT_RETRIES = 3
+    _RATE_LIMIT_BACKOFF_SECONDS = 1.0
+    _MAX_RETRY_AFTER_SECONDS = 60.0
 
     def __init__(
         self,
@@ -97,37 +106,164 @@ class TangleApiClient(GeneratedTangleApiOperations):
             json_data = kwargs.pop("json")
         timeout = kwargs.pop("timeout", self.timeout)
         extra_headers = kwargs.pop("headers", None)
-        request_headers = self._headers(extra_headers)
         url = self._url(path)
         clean_params = self._clean_mapping(params)
+        request_method = method.upper()
 
         self._refresh_auth()
-        # Refresh may mutate headers/session state, so build headers again.
-        request_headers = self._headers(extra_headers)
-        if self.verbose:
-            self.logger.info(f"{method.upper()} {url}")
-        response = self.session.request(
-            method.upper(),
+        response = self._request_with_rate_limit_retries(
+            request_method,
             url,
             params=clean_params,
-            json=json_data,
-            headers=request_headers,
+            json_data=json_data,
+            extra_headers=extra_headers,
             timeout=timeout,
-            **kwargs,
+            request_kwargs=kwargs,
         )
         if response.status_code == 401:
             self._refresh_auth()
-            request_headers = self._headers(extra_headers)
-            response = self.session.request(
-                method.upper(),
+            response = self._request_with_rate_limit_retries(
+                request_method,
                 url,
                 params=clean_params,
-                json=json_data,
-                headers=request_headers,
+                json_data=json_data,
+                extra_headers=extra_headers,
                 timeout=timeout,
-                **kwargs,
+                request_kwargs=kwargs,
             )
         return response
+
+    def _request_with_rate_limit_retries(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None,
+        json_data: Any,
+        extra_headers: Mapping[str, str] | None,
+        timeout: float,
+        request_kwargs: Mapping[str, Any],
+    ) -> requests.Response:
+        response: requests.Response | None = None
+        for attempt in range(self._MAX_RATE_LIMIT_RETRIES + 1):
+            response = self._request_with_same_origin_redirects(
+                method,
+                url,
+                params=params,
+                json_data=json_data,
+                extra_headers=extra_headers,
+                timeout=timeout,
+                request_kwargs=request_kwargs,
+            )
+            if response.status_code != 429 or attempt == self._MAX_RATE_LIMIT_RETRIES:
+                return response
+            self._sleep_for_rate_limit(response, attempt)
+        return response
+
+    def _sleep_for_rate_limit(self, response: requests.Response, attempt: int) -> None:
+        retry_after = response.headers.get("Retry-After")
+        delay = self._retry_after_delay(retry_after)
+        if delay is None:
+            delay = self._RATE_LIMIT_BACKOFF_SECONDS * (2 ** attempt)
+        delay = min(delay, self._MAX_RETRY_AFTER_SECONDS)
+        if self.verbose:
+            self.logger.info(f"429 rate limited; retrying in {delay:.1f}s")
+        time.sleep(delay)
+
+    @staticmethod
+    def _retry_after_delay(value: str | None) -> float | None:
+        if not value:
+            return None
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if retry_at.tzinfo is None:
+            return None
+        return max(0.0, retry_at.timestamp() - time.time())
+
+    def _request_with_same_origin_redirects(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None,
+        json_data: Any,
+        extra_headers: Mapping[str, str] | None,
+        timeout: float,
+        request_kwargs: Mapping[str, Any],
+    ) -> requests.Response:
+        """Send one request, following only same-origin redirects.
+
+        The client may carry custom auth headers/cookies in ``session.headers``.
+        ``requests`` does not strip those custom credentials on cross-origin
+        redirects, so redirects are handled manually and constrained to the
+        original origin.
+        """
+
+        current_method = method
+        current_url = url
+        current_params = params
+        current_json = json_data
+        response: requests.Response | None = None
+
+        for _ in range(self._MAX_REDIRECTS + 1):
+            request_headers = self._headers(extra_headers)
+            if self.verbose:
+                self.logger.info(f"{current_method} {current_url}")
+            response = self.session.request(
+                current_method,
+                current_url,
+                params=current_params,
+                json=current_json,
+                headers=request_headers,
+                timeout=timeout,
+                allow_redirects=False,
+                **request_kwargs,
+            )
+            if response.status_code not in self._REDIRECT_STATUSES:
+                return response
+
+            location = response.headers.get("Location")
+            if not location:
+                return response
+
+            next_url = urljoin(response.url, location)
+            if not self._same_origin(response.url, next_url):
+                raise requests.HTTPError(
+                    f"Refusing to follow cross-origin redirect from {response.url} to {next_url}",
+                    response=response,
+                )
+
+            try:
+                response.close()
+            except Exception:
+                pass
+            if response.status_code == 303 or (
+                response.status_code in {301, 302} and current_method not in {"GET", "HEAD"}
+            ):
+                current_method = "GET"
+                current_json = None
+            current_url = next_url
+            current_params = None
+
+        raise requests.TooManyRedirects(
+            f"Exceeded {self._MAX_REDIRECTS} redirects for {url}",
+            response=response,
+        )
+
+    @staticmethod
+    def _same_origin(left: str, right: str) -> bool:
+        left_parts = urlparse(left)
+        right_parts = urlparse(right)
+        return (
+            left_parts.scheme.lower() == right_parts.scheme.lower()
+            and left_parts.netloc.lower() == right_parts.netloc.lower()
+        )
 
     def _request_json(
         self,
@@ -164,9 +300,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         )
 
     def _url(self, path: str) -> str:
-        if path.startswith("http://") or path.startswith("https://"):
-            return path
-        return urljoin(self.base_url.rstrip("/") + "/", path.lstrip("/"))
+        return _join_operation_url(self.base_url, path)
 
     @staticmethod
     def _format_path(path: str, path_params: Mapping[str, Any] | None = None) -> str:
@@ -363,13 +497,30 @@ class TangleApiClient(GeneratedTangleApiOperations):
         include_execution_state: bool = False,
         execution_id: str | None = None,
     ) -> RunDetails:
-        run = PipelineRun.from_dict(_to_plain(self.pipeline_runs_get(run_id)))
-        root_execution_id = execution_id or run.root_execution_id
+        annotations_run_id: str | None = run_id
+        try:
+            run = PipelineRun.from_dict(_to_plain(self.pipeline_runs_get(run_id)))
+            root_execution_id = execution_id or run.root_execution_id
+        except requests.HTTPError as exc:
+            if exc.response is None or exc.response.status_code != 404 or execution_id is not None:
+                raise
+            root_execution_id = run_id
+            annotations_run_id = None
+            run = PipelineRun(
+                id=run_id,
+                root_execution_id=root_execution_id,
+                raw={"id": run_id, "root_execution_id": root_execution_id},
+            )
+
         execution = self.get_execution_details(root_execution_id) if root_execution_id else None
         if execution and not include_implementations:
             self._strip_execution_raw_tasks_for_run_details(execution)
             execution.strip_implementations()
-        raw_annotations = self.pipeline_runs_annotations(run_id) if include_annotations else None
+        raw_annotations = (
+            self.pipeline_runs_annotations(annotations_run_id)
+            if include_annotations and annotations_run_id
+            else None
+        )
         annotations = raw_annotations if isinstance(raw_annotations, dict) else None
         execution_state = (
             GraphExecutionState.from_dict(
