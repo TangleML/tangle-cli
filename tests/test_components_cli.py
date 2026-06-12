@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 import yaml
 
-from tangle_cli import cli, components_cli
+from tangle_cli import cli, published_components_cli
 from tangle_cli.component_publisher import deprecate_component, publish_component
 
 
@@ -98,7 +98,7 @@ def test_deprecate_component_calls_generated_update():
     ]
 
 
-def test_components_publish_cli_wiring_and_config_precedence(monkeypatch, tmp_path: Path, capsys):
+def test_published_components_publish_cli_wiring_and_config_precedence(monkeypatch, tmp_path: Path, capsys):
     component_path = _write_component(tmp_path / "component.yaml", name="Config Name")
     config = tmp_path / "publish.yaml"
     config.write_text(
@@ -118,13 +118,13 @@ def test_components_publish_cli_wiring_and_config_precedence(monkeypatch, tmp_pa
         calls.append({"client": client, "component_path": component_path, **kwargs})
         return {"status": "dry_run", "name": kwargs["name"], "dry_run": kwargs["dry_run"]}
 
-    monkeypatch.setattr(components_cli, "_client_from_options", fake_client_from_options)
-    monkeypatch.setattr(components_cli, "publish_component", fake_publish_component)
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "publish_component", fake_publish_component)
 
     app = cli.build_app()
     run_app(
         app,
-        ["sdk", "components", "publish", "--config", str(config), "--name", "CLI Name"],
+        ["sdk", "published-components", "publish", "--config", str(config), "--name", "CLI Name"],
     )
 
     result = json.loads(capsys.readouterr().out)
@@ -147,7 +147,7 @@ def test_components_publish_cli_wiring_and_config_precedence(monkeypatch, tmp_pa
     ]
 
 
-def test_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_path: Path, capsys):
+def test_published_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_path: Path, capsys):
     config = tmp_path / "deprecate.yaml"
     config.write_text(
         "digest: sha256:from-config\n"
@@ -169,11 +169,11 @@ def test_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_path: Path,
         deprecate_calls.append({"client": client, "digest": digest, **kwargs})
         return {"status": "success", "digest": digest, "superseded_by": kwargs.get("superseded_by")}
 
-    monkeypatch.setattr(components_cli, "_client_from_options", fake_client_from_options)
-    monkeypatch.setattr(components_cli, "deprecate_component", fake_deprecate_component)
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "deprecate_component", fake_deprecate_component)
 
     app = cli.build_app()
-    run_app(app, ["sdk", "components", "deprecate", "--config", str(config)])
+    run_app(app, ["sdk", "published-components", "deprecate", "--config", str(config)])
 
     result = json.loads(capsys.readouterr().out)
     assert result == {
@@ -189,21 +189,41 @@ def test_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_path: Path,
     ]
 
 
-def test_components_help_excludes_publish_all_and_shopify_slack_options(capsys):
+def test_components_and_published_components_help_reflect_api_split(capsys):
     app = cli.build_app()
 
     run_app(app, ["sdk", "components", "--help"])
     output = capsys.readouterr().out
-    assert "publish" in output
-    assert "deprecate" in output
+    assert "generate" in output
+    assert "bump-version" in output
+    assert "publish" not in output
+    assert "deprecate" not in output
     assert "publish-all" not in output
+    assert "base-url" not in output
+    assert "auth-header" not in output
+    assert "slack" not in output.lower()
+    assert "shopify" not in output.lower()
 
-    run_app(app, ["sdk", "components", "publish", "--help"])
+    run_app(app, ["sdk", "published-components", "--help"])
+    published_output = capsys.readouterr().out
+    assert "search" in published_output
+    assert "inspect" in published_output
+    assert "library" in published_output
+    assert "publish" in published_output
+    assert "deprecate" in published_output
+    assert "publish-all" not in published_output
+    assert "slack" not in published_output.lower()
+    assert "shopify" not in published_output.lower()
+
+    run_app(app, ["sdk", "published-components", "publish", "--help"])
     publish_help = capsys.readouterr().out
+    assert "base-url" in publish_help
+    assert "auth-header" in publish_help
     assert "slack" not in publish_help.lower()
     assert "shopify" not in publish_help.lower()
     assert "publish-all" not in publish_help
 
-    with pytest.raises(SystemExit) as exc_info:
-        app(["sdk", "components", "publish-all"])
-    assert exc_info.value.code != 0
+    for old_path in (["sdk", "components", "publish"], ["sdk", "components", "deprecate"], ["sdk", "components", "publish-all"]):
+        with pytest.raises(SystemExit) as exc_info:
+            app(old_path)
+        assert exc_info.value.code != 0

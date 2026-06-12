@@ -19,7 +19,7 @@ uv run tangle sdk published-components --help
 
 ## SDK commands
 
-SDK/scaffold commands live under `tangle sdk`. Local component generation/spec helpers are intentionally nested under `sdk components`; root-level `tangle components ...` is not registered in this lab CLI. Published/registry component inspection lives separately under `sdk published-components` so local component authoring and published component lookup do not share the same command group.
+SDK/scaffold commands live under `tangle sdk`. Local component generation/spec helpers are intentionally nested under `sdk components`; root-level `tangle components ...` is not registered in this lab CLI. API-backed published/registry component operations live separately under `sdk published-components` so local component authoring and registry calls do not share the same command group.
 
 ```bash
 uv run tangle sdk components --help
@@ -28,13 +28,13 @@ uv run tangle sdk components annotations set
 uv run tangle sdk components generate from-python path/to/component.py --image python:3.12
 uv run tangle sdk components generate from-python-function path/to/component.py  # compatibility alias
 uv run tangle sdk components bump-version path/to/component.yaml
-uv run tangle sdk components publish path/to/component.yaml --base-url https://api.example
-uv run tangle sdk components deprecate sha256:... --superseded-by sha256:...
 uv run tangle sdk published-components --help
 uv run tangle sdk published-components search transformer
 uv run tangle sdk published-components inspect transformer
 uv run tangle sdk published-components inspect --digest sha256:...
 uv run tangle sdk published-components library
+uv run tangle sdk published-components publish path/to/component.yaml --base-url https://api.example
+uv run tangle sdk published-components deprecate sha256:... --superseded-by sha256:...
 ```
 
 `generate from-python` converts a local Python function into a component YAML
@@ -51,16 +51,16 @@ Generation and version-bump commands accept `--config` YAML/JSON files via
 `update_timestamp`; explicit CLI values take precedence over config-file values.
 
 Local components can also be published to, or deprecated in, a Tangle component
-registry using the native generated/static API client:
+registry using the native generated/static API client under `sdk published-components`:
 
 ```bash
-uv run tangle sdk components publish components/my-component.yaml \
+uv run tangle sdk published-components publish components/my-component.yaml \
   --base-url https://api.example \
   --image python:3.12 \
   --name "My component"
 
-uv run tangle sdk components publish components/my-component.yaml --dry-run
-uv run tangle sdk components deprecate sha256:old --superseded-by sha256:new
+uv run tangle sdk published-components publish components/my-component.yaml --dry-run
+uv run tangle sdk published-components deprecate sha256:old --superseded-by sha256:new
 ```
 
 `publish` accepts `--image`, `--name`, `--description`, `--annotations` (JSON),
