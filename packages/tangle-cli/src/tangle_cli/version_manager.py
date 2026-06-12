@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from pathlib import Path
 import yaml
 
 from tangle_cli import utils
-from tangle_cli.component_from_func import extract_file_metadata
+from tangle_cli.component_from_func import extract_file_metadata, find_function_in_source
 from tangle_cli.component_generator import regenerate_yaml
 from tangle_cli.logger import Logger, get_default_logger
 
@@ -125,11 +126,15 @@ class VersionManager:
         new_version: str | None = None,
         reference_content_getter: ReferenceContentGetter | None = None,
         update_timestamp: bool = False,
+        function_name: str | None = None,
     ) -> bool:
         """Update a Python component function docstring Metadata section."""
 
         python_path = Path(python_file)
-        metadata, actual_func_name = extract_file_metadata(python_path)
+        if function_name and not _has_exact_public_function(python_path, function_name):
+            self.log.warn(f"   ⚠️  Function '{function_name}' not found in {python_path.name}")
+            return False
+        metadata, actual_func_name = extract_file_metadata(python_path, function_name)
         if not actual_func_name:
             self.log.warn(f"   ⚠️  No function found in {python_path.name}")
             return False
@@ -175,7 +180,13 @@ class VersionManager:
 
         with open(python_file, encoding="utf-8") as f:
             content = f.read()
-        new_content = self._update_docstring_metadata(content, final_version, current_timestamp)
+        new_content = self._update_function_docstring_metadata(
+            python_path,
+            content,
+            actual_func_name,
+            final_version,
+            current_timestamp,
+        )
         if new_content == content:
             self.log.warn("     ⚠️  Could not update docstring - no Metadata section found")
             return False
@@ -183,6 +194,35 @@ class VersionManager:
             f.write(new_content)
         self.log.info("     ✅ Updated")
         return True
+
+    def _update_function_docstring_metadata(
+        self,
+        python_path: Path,
+        content: str,
+        function_name: str,
+        version: str,
+        timestamp: str | None = None,
+    ) -> str:
+        _, func_node = find_function_in_source(python_path, function_name)
+        if not func_node or not func_node.body:
+            return content
+        doc_node = func_node.body[0]
+        value = getattr(doc_node, "value", None)
+        if not (
+            getattr(doc_node, "lineno", None)
+            and getattr(doc_node, "end_lineno", None)
+            and isinstance(getattr(value, "value", None), str)
+        ):
+            return content
+
+        lines = content.splitlines(keepends=True)
+        start = doc_node.lineno - 1
+        end = doc_node.end_lineno
+        docstring_source = "".join(lines[start:end])
+        updated_docstring = self._update_docstring_metadata(docstring_source, version, timestamp)
+        if updated_docstring == docstring_source:
+            return content
+        return "".join([*lines[:start], updated_docstring, *lines[end:]])
 
     def _update_docstring_metadata(
         self,
@@ -209,6 +249,58 @@ class VersionManager:
         return metadata_pattern.sub(replace_metadata, content, count=1)
 
 
+def _has_exact_public_function(python_path: Path, function_name: str) -> bool:
+    """Return whether *python_path* defines exactly this public function."""
+
+    try:
+        tree = ast.parse(python_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return False
+    return any(
+        isinstance(node, ast.FunctionDef) and node.name == function_name and not node.name.startswith("_")
+        for node in ast.iter_child_nodes(tree)
+    )
+
+
+def _common_generation_dir(yaml_path: Path, annotations: dict[str, str]) -> Path | None:
+    component_yaml_path = annotations.get("component_yaml_path")
+    if not component_yaml_path:
+        return None
+    yaml_rel = Path(component_yaml_path)
+    if yaml_rel.is_absolute():
+        return None
+    common_dir = yaml_path.resolve().parent
+    for part in yaml_rel.parent.parts:
+        if part not in ("", "."):
+            common_dir = common_dir.parent
+    return common_dir
+
+
+def _resolve_annotated_path(yaml_path: Path, annotations: dict[str, str], annotation_key: str) -> Path | None:
+    raw_path = annotations.get(annotation_key)
+    if not raw_path:
+        return None
+    annotated_path = Path(raw_path)
+    if annotated_path.is_absolute():
+        return annotated_path if annotated_path.exists() else None
+
+    candidates: list[Path] = []
+    common_dir = _common_generation_dir(yaml_path, annotations)
+    if common_dir:
+        candidates.append(common_dir / annotated_path)
+    candidates.append(yaml_path.parent / annotated_path)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            return resolved
+    return None
+
+
 def _resolve_python_source_path(yaml_path: Path, annotations: dict[str, str]) -> Path | None:
     """Resolve a component YAML's annotated Python source path.
 
@@ -228,15 +320,9 @@ def _resolve_python_source_path(yaml_path: Path, annotations: dict[str, str]) ->
         return python_path if python_path.exists() else None
 
     candidates: list[Path] = []
-    component_yaml_path = annotations.get("component_yaml_path")
-    if component_yaml_path:
-        yaml_rel = Path(component_yaml_path)
-        if not yaml_rel.is_absolute():
-            common_dir = yaml_path.resolve().parent
-            for part in yaml_rel.parent.parts:
-                if part not in ("", "."):
-                    common_dir = common_dir.parent
-            candidates.append(common_dir / python_path)
+    common_dir = _common_generation_dir(yaml_path, annotations)
+    if common_dir:
+        candidates.append(common_dir / python_path)
 
     yaml_dir = yaml_path.parent
     candidates.extend(
@@ -292,6 +378,43 @@ def bump_version(
         annotations = metadata["annotations"]
     python_path = annotations.get("python_original_code_path")
     has_original_code = "python_original_code" in annotations
+    generation_function_name = annotations.get("tangle_cli_generation_function_name")
+    generation_mode = annotations.get("tangle_cli_generation_mode") or (
+        "bundle" if annotations.get("bundled_modules") else "inline"
+    )
+    if generation_mode not in {"inline", "bundle"}:
+        error = f"Unsupported generation mode: {generation_mode}"
+        log.error(f"❌ {error}")
+        return {"status": "failed", "yaml_file": str(yaml_path), "error": error}
+    custom_name = (
+        yaml_content.get("name")
+        if isinstance(yaml_content, dict) and isinstance(yaml_content.get("name"), str)
+        else None
+    )
+
+    dependencies_from = None
+    if annotations.get("tangle_cli_generation_dependencies_from"):
+        dependencies_from = _resolve_annotated_path(
+            yaml_path,
+            annotations,
+            "tangle_cli_generation_dependencies_from",
+        )
+        if dependencies_from is None:
+            error = f"Dependency file not found: {annotations['tangle_cli_generation_dependencies_from']}"
+            log.error(f"❌ {error}")
+            return {"status": "failed", "yaml_file": str(yaml_path), "error": error}
+
+    resolve_root = None
+    if annotations.get("tangle_cli_generation_resolve_root"):
+        resolve_root = _resolve_annotated_path(
+            yaml_path,
+            annotations,
+            "tangle_cli_generation_resolve_root",
+        )
+        if resolve_root is None:
+            error = f"Resolve root not found: {annotations['tangle_cli_generation_resolve_root']}"
+            log.error(f"❌ {error}")
+            return {"status": "failed", "yaml_file": str(yaml_path), "error": error}
 
     if python_path:
         python_full_path = _resolve_python_source_path(yaml_path, annotations)
@@ -302,13 +425,19 @@ def bump_version(
                 new_version=set_version,
                 reference_content_getter=reference_content_getter,
                 update_timestamp=update_timestamp,
+                function_name=generation_function_name,
             )
             if success:
                 log.info("   🔄 Regenerating YAML...")
                 success = regenerate_yaml(
                     python_full_path,
                     output_path=yaml_path,
+                    function_name=generation_function_name,
+                    custom_name=custom_name,
+                    dependencies_from=dependencies_from,
                     strip_code=not has_original_code,
+                    mode=generation_mode,
+                    resolve_root=resolve_root,
                 )
         else:
             log.error(f"❌ Python source not found: {python_path}")

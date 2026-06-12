@@ -4,6 +4,8 @@ metadata:
   annotations:
     cloud_pipelines.net: 'true'
     components new regenerate python-function-component: 'true'
+    tangle_cli_generation_function_name: test_component
+    tangle_cli_generation_mode: inline
     python_original_code_path: test_component.py
     python_original_code: |
       #!/usr/bin/env python3
