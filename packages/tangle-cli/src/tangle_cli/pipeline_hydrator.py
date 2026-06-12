@@ -17,17 +17,20 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from jinja2 import Environment, FileSystemLoader
 
 from . import utils
 from .api_transport import DEFAULT_TIMEOUT_SECONDS
-from .client import TangleApiClient
 from .component_generator import regenerate_yaml
 from .logger import Logger, get_default_logger
-from .models import ComponentInfo, add_official_prefix
+from .utils import add_official_prefix
+
+if TYPE_CHECKING:
+    from .client import TangleApiClient
+    from .models import ComponentInfo
 
 
 class HydrationError(RuntimeError):
