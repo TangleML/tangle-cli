@@ -299,6 +299,13 @@ def _resolve_git_source(spec: ComponentSpec) -> dict[str, Any] | None:
     return source if source else None
 
 
+def _backfill_version_from_spec(info: ComponentInfo) -> None:
+    """Use attached component spec metadata when registry metadata omits version."""
+
+    if info.version is None and info.component_spec is not None:
+        info.version = info.component_spec.version
+
+
 def _enrich_with_spec(
     info: ComponentInfo,
     client: TangleApiClient,
@@ -309,6 +316,7 @@ def _enrich_with_spec(
         return
     try:
         info.component_spec = _get_component_spec(client, info.digest)
+        _backfill_version_from_spec(info)
     except Exception as e:
         info.spec_error = str(e)
 
@@ -364,6 +372,7 @@ def inspect_by_digest(
         info.version = comp.version if comp else None
 
     info.component_spec = comp
+    _backfill_version_from_spec(info)
 
     result: dict[str, Any] = {"status": "success"}
     if not pub_info:

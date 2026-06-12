@@ -176,6 +176,8 @@ def _validate_module_name(module_name: str) -> str:
 
 
 def _model_extension_mapping(module_name: str | None) -> dict[str, str]:
+    """Load and validate a MODEL_EXTENSIONS mapping from an extension module."""
+
     module_name = _normalize_model_extension_module(module_name)
     if not module_name:
         return {}
@@ -209,6 +211,8 @@ def generate_models(
     schema: dict[str, Any],
     model_extension_module: str | None = DEFAULT_MODEL_EXTENSION_MODULE,
 ) -> str:
+    """Generate Pydantic model classes and apply configured model extensions."""
+
     schemas = schema.get("components", {}).get("schemas", {}) or {}
     model_extension_module = _normalize_model_extension_module(model_extension_module)
     extension_mapping = _model_extension_mapping(model_extension_module)
@@ -306,6 +310,8 @@ def _method_name(group_name: str, command_name: str) -> str:
 
 
 def _validate_class_name(name: str) -> str:
+    """Validate a generated class name or extension class name."""
+
     if not re.fullmatch(r"[A-Za-z_]\w*", name) or keyword.iskeyword(name):
         raise ValueError(f"Invalid generated operations class name: {name!r}")
     return name
@@ -353,6 +359,8 @@ def generate_operations(
     schema: dict[str, Any],
     operations_class_name: str = DEFAULT_OPERATIONS_CLASS_NAME,
 ) -> str:
+    """Generate the static operation mixin class for parsed OpenAPI operations."""
+
     operations_class_name = _validate_class_name(operations_class_name)
     operations = parsed_operations(schema)
     response_models = sorted({name for op in operations if (name := _response_model_name(op.operation))})

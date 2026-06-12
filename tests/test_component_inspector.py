@@ -218,6 +218,30 @@ class TestInspectComponents:
         assert result["status"] == "success"
         assert result["digest"] == "abc123"
 
+    def test_inspect_by_digest_backfills_missing_published_version_from_spec(self):
+        class MissingPublishedVersionClient(FakeClient):
+            def list_published_component_infos(self, **params: Any) -> list[ComponentInfo]:
+                if params.get("digest") == "abc123":
+                    return [ComponentInfo(name="demo", digest="abc123")]
+                return super().list_published_component_infos(**params)
+
+        result = inspect_by_digest(MissingPublishedVersionClient(), "abc123")
+
+        assert result["status"] == "success"
+        assert result["version"] == "1.2.3"
+
+    def test_inspect_by_name_backfills_missing_published_version_from_spec(self):
+        class MissingPublishedVersionClient(FakeClient):
+            def list_published_component_infos(self, **params: Any) -> list[ComponentInfo]:
+                if params.get("name_substring") == "demo":
+                    return [ComponentInfo(name="demo", digest="abc123")]
+                return super().list_published_component_infos(**params)
+
+        result = inspect_by_name(MissingPublishedVersionClient(), "demo")
+
+        assert result["status"] == "success"
+        assert result["versions"][0]["version"] == "1.2.3"
+
     def test_inspect_by_name_returns_matching_versions(self):
         result = inspect_by_name(FakeClient(), "demo")
 
