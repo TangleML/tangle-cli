@@ -134,6 +134,32 @@ def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
     )
 
 
+def test_tangle_cli_wheel_api_refresh_builds_without_native_tangle_api(tmp_path) -> None:
+    wheel = _build_wheel(tmp_path)
+    stubs = tmp_path / "stubs"
+    _write_import_stubs(stubs)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(wheel), str(stubs)])}
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            "import importlib.util; "
+            "import sys; "
+            "assert importlib.util.find_spec('tangle_api') is None; "
+            "sys.argv = ['tangle', 'api', 'refresh']; "
+            "import tangle_cli.cli; "
+            "tangle_cli.cli.build_app()",
+        ],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
 def test_tangle_cli_wheel_binds_to_consumer_local_tangle_api(tmp_path) -> None:
     cli_wheel = _build_wheel(tmp_path / "cli")
     consumer_source = _write_consumer_tangle_api(tmp_path / "consumer")

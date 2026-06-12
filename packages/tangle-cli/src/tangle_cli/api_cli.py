@@ -416,11 +416,11 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
     if api_tail is None:
         return None
 
-    schema_source = _schema_source_from_argv(api_tail)
-    official = load_bundled_openapi_schema()
-    if schema_source == "official":
-        return official
+    first_command = _api_first_command(api_tail)
+    if first_command in {"refresh", "reset-cache"}:
+        return None
 
+    schema_source = _schema_source_from_argv(api_tail)
     base_url = _base_url_from_argv(api_tail) or default_base_url()
     cached = load_cached_schema(base_url)
     if schema_source == "cache":
@@ -428,12 +428,31 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
             raise SystemExit(
                 f"No cached OpenAPI schema for {_normalize_base_url(base_url)}. "
                 "Run `tangle api refresh` with the same --base-url/--auth-header/--header options, "
-                "or use `--schema-source official` to use the official static schema."
+                "or install tangle-cli[native] to use the official static schema."
             )
         return cached
+
+    try:
+        official = load_bundled_openapi_schema()
+    except FileNotFoundError as exc:
+        if first_command is None:
+            return None
+        raise SystemExit(_missing_official_schema_message()) from exc
+
+    if schema_source == "official":
+        return official
     if cached is None:
         return official
     return _merge_official_with_cached_extensions(official, cached)
+
+
+def _missing_official_schema_message() -> str:
+    return (
+        "Official static Tangle API commands require the native tangle-api "
+        "package because the bundled OpenAPI snapshot lives in tangle_api.schema. "
+        "Install tangle-cli[native], or run `tangle api refresh` and use "
+        "`--schema-source cache` for cached backend operations."
+    )
 
 
 def _merge_official_with_cached_extensions(
@@ -482,7 +501,7 @@ def _argv_requests_api_schema(argv: list[str]) -> bool:
     if api_tail is None:
         return False
     first_command = _api_first_command(api_tail)
-    return first_command not in {None, "refresh"}
+    return first_command not in {None, "refresh", "reset-cache"}
 
 
 def _argv_dispatches_dynamic_command(argv: list[str]) -> bool:
@@ -490,7 +509,7 @@ def _argv_dispatches_dynamic_command(argv: list[str]) -> bool:
     if api_tail is None:
         return False
     first_command = _api_first_command(api_tail)
-    return first_command not in {None, "refresh"}
+    return first_command not in {None, "refresh", "reset-cache"}
 
 
 def _api_argv_tail(argv: list[str]) -> list[str] | None:

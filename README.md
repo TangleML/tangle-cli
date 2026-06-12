@@ -34,7 +34,9 @@ uv run tangle sdk published-components library
 
 ## API commands
 
-API commands are pre-generated from the checked-in official Tangle FastAPI/OpenAPI snapshot, so `tangle api --help` shows resource command groups immediately on a cold cache and command invocations do not require `refresh` first. By default, the CLI uses `--schema-source auto`: official static operations are always present, and cached live-backend operations discovered by `tangle api refresh` are included as extensions when they exist. Cached schemas do not override official operations with the same method/path; official definitions win.
+API commands are pre-generated from the checked-in official Tangle FastAPI/OpenAPI snapshot, so native installs (`tangle-cli[native]`, or development installs with the workspace `tangle-api` package) show resource command groups immediately on a cold cache and command invocations do not require `refresh` first. By default, the CLI uses `--schema-source auto`: official static operations are always present when the native API package is installed, and cached live-backend operations discovered by `tangle api refresh` are included as extensions when they exist. Cached schemas do not override official operations with the same method/path; official definitions win.
+
+Default `tangle-cli` installs without the native `tangle-api` package can still run cache-management commands such as `tangle api refresh` and can dispatch cached operations with `--schema-source cache`. Official static API commands require `tangle-cli[native]` so the packaged `tangle_api.schema` snapshot is available.
 
 You can refresh the local schema cache explicitly for a live backend with:
 
@@ -116,9 +118,9 @@ Repeated `--header 'Name: value'` flags can be used with both `tangle api refres
 
 Schema source modes are:
 
-- `--schema-source auto` (default): official static operations plus cached-only backend extensions when a cache exists.
-- `--schema-source official`: only the checked-in official static schema (OSS-only/core commands).
-- `--schema-source cache`: only the schema previously written by `tangle api refresh` for the selected base URL.
+- `--schema-source auto` (default): official static operations plus cached-only backend extensions when a cache exists. Requires `tangle-cli[native]` for official operations.
+- `--schema-source official`: only the checked-in official static schema (OSS-only/core commands). Requires `tangle-cli[native]`.
+- `--schema-source cache`: only the schema previously written by `tangle api refresh` for the selected base URL. Does not require the native API package.
 
 For resource help, put the option on the resource group:
 

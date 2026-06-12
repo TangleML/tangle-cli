@@ -451,6 +451,86 @@ def test_importing_cli_modules_does_not_fetch_schema(monkeypatch, tmp_path):
     assert calls == []
 
 
+def test_api_refresh_and_reset_cache_do_not_require_official_schema(monkeypatch, tmp_path):
+    def fail_load_schema():  # pragma: no cover - assertion helper
+        raise FileNotFoundError("missing tangle_api.schema")
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", fail_load_schema)
+
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", "refresh"])
+    refresh_app = api_cli.build_app()
+    assert refresh_app is not None
+
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", "reset-cache"])
+    reset_app = api_cli.build_app()
+    assert reset_app is not None
+    assert not api_cli._argv_requests_api_schema(api_cli.sys.argv)
+    assert not api_cli._argv_dispatches_dynamic_command(api_cli.sys.argv)
+
+
+def test_api_help_without_official_schema_keeps_static_commands_unregistered(monkeypatch, tmp_path, capsys):
+    def fail_load_schema():
+        raise FileNotFoundError("missing tangle_api.schema")
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", fail_load_schema)
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", "--help"])
+
+    app = api_cli.build_app()
+    run_app(app, ["--help"])
+
+    output = capsys.readouterr().out
+    assert "refresh" in output
+    assert "reset-cache" in output
+    assert "published-components" not in output
+
+
+def test_official_static_command_without_schema_fails_with_actionable_error(monkeypatch, tmp_path):
+    def fail_load_schema():
+        raise FileNotFoundError("missing tangle_api.schema")
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", fail_load_schema)
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "published-components", "--help"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        api_cli.build_app()
+
+    message = str(exc_info.value)
+    assert "Official static Tangle API commands require the native tangle-api package" in message
+    assert "Install tangle-cli[native]" in message
+    assert "--schema-source cache" in message
+
+
+def test_cache_schema_source_does_not_require_official_schema(monkeypatch, tmp_path, capsys):
+    def fail_load_schema():
+        raise FileNotFoundError("missing tangle_api.schema")
+
+    monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
+    api_cli.write_cached_schema(
+        _oasis_like_schema_with_published_component_extensions(),
+        "http://api.test",
+    )
+    monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", fail_load_schema)
+    monkeypatch.setattr(
+        api_cli.sys,
+        "argv",
+        ["tangle", "api", "published-components", "list", "--schema-source", "cache", "--help"],
+    )
+
+    app = api_cli.build_app()
+    run_app(app, ["published-components", "list", "--schema-source", "cache", "--help"])
+
+    output = capsys.readouterr().out
+    assert "--cached-only" in output
+
+
 def test_non_api_root_command_does_not_fetch_when_argument_value_is_api(
     monkeypatch, tmp_path
 ):
