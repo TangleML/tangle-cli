@@ -24,6 +24,12 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
         publish_component,
         publish_component_to_tangle,
     )
+    from tangle_cli.artifacts import (
+        _collect_artifacts,
+        _collect_execution_artifacts,
+        _serialize_artifacts,
+        get_artifacts,
+    )
     from tangle_cli.module_bundler import ModuleBundler
     from tangle_cli.version_manager import bump_version
     from tangle_cli.component_inspector import (
@@ -123,6 +129,10 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     assert callable(deprecate_component)
     assert callable(bump_version)
     assert ModuleBundler is not None
+    assert callable(_collect_artifacts)
+    assert callable(_collect_execution_artifacts)
+    assert callable(_serialize_artifacts)
+    assert callable(get_artifacts)
     assert callable(get_standard_library)
     assert callable(inspect_by_digest)
     assert callable(inspect_by_name)

@@ -63,6 +63,7 @@ def test_sdk_help_includes_pipelines(capsys):
     run_app(app, ["sdk", "--help"])
 
     output = capsys.readouterr().out
+    assert "artifacts" in output
     assert "components" in output
     assert "pipelines" in output
     assert "published-components" in output
