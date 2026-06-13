@@ -194,6 +194,42 @@ def test_pipelines_hydrate_renders_template_and_resolves_local_file_refs(
     assert task["componentRef"]["spec"]["implementation"]["container"]["image"] == "python:3.12"
 
 
+def test_pipelines_hydrate_log_type_none_suppresses_progress(tmp_path: Path, capsys):
+    component_path = _write_pipeline(
+        tmp_path / "component.yaml",
+        {
+            "name": "Local Component",
+            "implementation": {"container": {"image": "python:3.12"}},
+        },
+    )
+    pipeline_path = _write_pipeline(
+        tmp_path / "pipeline.yaml",
+        {
+            "name": "Pipeline",
+            "implementation": {
+                "graph": {
+                    "tasks": {
+                        "local": {
+                            "componentRef": {"url": f"file://{component_path.name}"}
+                        }
+                    }
+                }
+            },
+        },
+    )
+    app = cli.build_app()
+
+    run_app(
+        app,
+        ["sdk", "pipelines", "hydrate", str(pipeline_path), "--log-type", "none"],
+    )
+
+    captured = capsys.readouterr()
+    hydrated = yaml.safe_load(captured.out)
+    assert hydrated["implementation"]["graph"]["tasks"]["local"]["componentRef"]["spec"]["name"] == "Local Component"
+    assert captured.err == ""
+
+
 def test_pipelines_hydrate_writes_output_when_requested(tmp_path: Path, capsys):
     component_path = _write_pipeline(
         tmp_path / "component.yaml",

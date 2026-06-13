@@ -141,10 +141,8 @@ def perform_version_check(
     """
 
     log = logger or get_default_logger()
-    verbose = utils.tangle_verbose_enabled()
     local_version = spec.version
-    if verbose:
-        log.info(f"   Local version: {local_version}")
+    log.info(f"   Local version: {local_version}")
 
     latest_version = None
 
@@ -194,11 +192,10 @@ def perform_version_check(
                     log.warn(f"   Warning: Failed to get version for component {digest[:16]}: {exc}")
                     continue
 
-            if verbose:
-                if latest_version:
-                    log.info(f"   Remote version: {latest_version}")
-                else:
-                    log.info(f"   ℹ️  Found {len(existing_components)} component(s) but couldn't extract version")
+            if latest_version:
+                log.info(f"   Remote version: {latest_version}")
+            else:
+                log.info(f"   ℹ️  Found {len(existing_components)} component(s) but couldn't extract version")
 
     should_proceed = not latest_version or utils.compare_versions(local_version, latest_version) != 0
 
@@ -217,8 +214,7 @@ def perform_version_check(
             spec=spec,
         )
 
-    if verbose:
-        log.info(f"   ⏭️  Skipping: Version {local_version} unchanged")
+    log.info(f"   ⏭️  Skipping: Version {local_version} unchanged")
 
     return ProcessingResult(
         outcome=ProcessingOutcome.SKIP,

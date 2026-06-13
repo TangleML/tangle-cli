@@ -6,6 +6,7 @@ import json
 import sys
 from typing import Any
 
+from tangle_cli import artifacts as artifacts_module
 from tangle_cli import artifacts_cli, cli
 
 
@@ -53,10 +54,10 @@ def test_sdk_artifacts_get_cli_config_auth_and_env_isolation(monkeypatch, tmp_pa
         get_calls.append({"run_id": run_id, "query": query, "client": client})
         return {"artifact-config": object()}
 
-    monkeypatch.setattr(artifacts_cli, "_client_from_options", fake_client_from_options)
-    monkeypatch.setattr(artifacts_cli, "get_artifacts", fake_get_artifacts)
+    monkeypatch.setattr(artifacts_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(artifacts_module, "get_artifacts", fake_get_artifacts)
     monkeypatch.setattr(
-        artifacts_cli,
+        artifacts_module,
         "_serialize_artifacts",
         lambda artifacts: [{"id": "artifact-config", "uri": "gs://bucket/config", "key": "artifact-config"}],
     )
@@ -78,6 +79,7 @@ def test_sdk_artifacts_get_cli_config_auth_and_env_isolation(monkeypatch, tmp_pa
             "auth_header": "Bearer config-auth",
             "header": ["X-Config: yes"],
             "include_env_credentials": False,
+            "command_name": "artifact commands",
         }
     ]
     assert get_calls == [
@@ -104,9 +106,9 @@ def test_sdk_artifacts_get_cli_base_url_keeps_env_credentials(monkeypatch, tmp_p
         client_calls.append(kwargs)
         return object()
 
-    monkeypatch.setattr(artifacts_cli, "_client_from_options", fake_client_from_options)
-    monkeypatch.setattr(artifacts_cli, "get_artifacts", lambda *args, **kwargs: {})
-    monkeypatch.setattr(artifacts_cli, "_serialize_artifacts", lambda artifacts: [])
+    monkeypatch.setattr(artifacts_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(artifacts_module, "get_artifacts", lambda *args, **kwargs: {})
+    monkeypatch.setattr(artifacts_module, "_serialize_artifacts", lambda artifacts: [])
 
     app = cli.build_app()
     run_app(
@@ -125,6 +127,42 @@ def test_sdk_artifacts_get_cli_base_url_keeps_env_credentials(monkeypatch, tmp_p
     json.loads(capsys.readouterr().out)
     assert client_calls[-1]["base_url"] == "https://cli.example"
     assert client_calls[-1]["include_env_credentials"] is True
+
+
+def test_sdk_artifacts_get_missing_native_api_uses_friendly_error(monkeypatch, tmp_path) -> None:
+    config = tmp_path / "artifacts.yaml"
+    config.write_text(
+        "run_id: run-config\nquery: '{\"artifact_ids\": [\"artifact-config\"]}'\n",
+        encoding="utf-8",
+    )
+    import tangle_cli
+
+    for attr in ("artifacts", "client", "models"):
+        if hasattr(tangle_cli, attr):
+            monkeypatch.delattr(tangle_cli, attr)
+    for name in list(sys.modules):
+        if name in {"tangle_cli.artifacts", "tangle_cli.client", "tangle_cli.models"} or name.startswith("tangle_api"):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+
+    original_import = builtins.__import__
+
+    def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "tangle_api" or name.startswith("tangle_api."):
+            raise ModuleNotFoundError("No module named 'tangle_api'", name="tangle_api")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    app = cli.build_app()
+
+    try:
+        app(["sdk", "artifacts", "get", "--config", str(config)])
+    except SystemExit as exc:
+        message = str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("expected missing native API to fail")
+
+    assert "Native generated Tangle API bindings are required for artifact commands" in message
+    assert "Install tangle-cli[native]" in message
 
 
 def test_sdk_artifacts_get_cli_requires_query(tmp_path) -> None:

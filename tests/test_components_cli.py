@@ -1,6 +1,9 @@
+import builtins
 import json
+import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import ANY
 
 import pytest
 import yaml
@@ -66,7 +69,7 @@ def test_published_components_publish_cli_wiring_and_config_precedence(monkeypat
         raise AssertionError("dry-run publish must not create an API client")
 
     FakePublisher.instances = []
-    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
 
     app = cli.build_app()
@@ -86,6 +89,7 @@ def test_published_components_publish_cli_wiring_and_config_precedence(monkeypat
         "git_root": None,
         "published_by": None,
         "client": None,
+        "logger": ANY,
     }
     assert FakePublisher.instances[0].publish_calls == [
         {
@@ -118,7 +122,7 @@ def test_published_components_publish_config_base_url_suppresses_env_credentials
         client_calls.append(kwargs)
         return fake_client
 
-    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
 
     app = cli.build_app()
@@ -133,6 +137,7 @@ def test_published_components_publish_config_base_url_suppresses_env_credentials
             "auth_header": "Bearer config-auth",
             "header": ["X-Config: yes"],
             "include_env_credentials": False,
+            "command_name": "published-component commands",
         }
     ]
     assert FakePublisher.instances[0].kwargs["client"] is fake_client
@@ -153,7 +158,7 @@ def test_published_components_publish_cli_base_url_keeps_env_credentials(monkeyp
         client_calls.append(kwargs)
         return object()
 
-    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
 
     app = cli.build_app()
@@ -249,7 +254,7 @@ def test_published_components_publish_config_array_uses_per_entry_controls(monke
         client_calls.append(kwargs)
         return fake_client
 
-    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
 
     app = cli.build_app()
@@ -265,6 +270,7 @@ def test_published_components_publish_config_array_uses_per_entry_controls(monke
             "auth_header": None,
             "header": None,
             "include_env_credentials": False,
+            "command_name": "published-component commands",
         }
     ]
     assert [publisher.kwargs for publisher in FakePublisher.instances] == [
@@ -276,6 +282,7 @@ def test_published_components_publish_config_array_uses_per_entry_controls(monke
             "git_root": None,
             "published_by": "first@example.com",
             "client": fake_client,
+            "logger": ANY,
         },
         {
             "dry_run": True,
@@ -285,6 +292,7 @@ def test_published_components_publish_config_array_uses_per_entry_controls(monke
             "git_root": None,
             "published_by": "second@example.com",
             "client": None,
+            "logger": ANY,
         },
     ]
     assert FakePublisher.instances[0].publish_calls[0]["component_path"] == first
@@ -313,7 +321,7 @@ def test_published_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_p
         deprecate_calls.append({"client": client, "digest": digest, **kwargs})
         return {"success": True, "digest": digest, "superseded_by": kwargs.get("superseded_by")}
 
-    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "deprecate_component", fake_deprecate_component)
 
     app = cli.build_app()
@@ -332,11 +340,75 @@ def test_published_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_p
             "auth_header": None,
             "header": ["X-Test: yes"],
             "include_env_credentials": False,
+            "command_name": "published-component commands",
         }
     ]
     assert deprecate_calls == [
-        {"client": fake_client, "digest": "sha256:from-config", "superseded_by": "sha256:new"}
+        {
+            "client": fake_client,
+            "digest": "sha256:from-config",
+            "superseded_by": "sha256:new",
+            "logger": ANY,
+        }
     ]
+
+
+def test_published_components_missing_native_api_uses_friendly_error(monkeypatch):
+    import tangle_cli
+
+    for attr in ("component_inspector", "client", "models"):
+        if hasattr(tangle_cli, attr):
+            monkeypatch.delattr(tangle_cli, attr)
+    for name in list(sys.modules):
+        if name in {
+            "tangle_cli.component_inspector",
+            "tangle_cli.client",
+            "tangle_cli.models",
+        } or name.startswith("tangle_api"):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+
+    original_import = builtins.__import__
+
+    def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "tangle_api" or name.startswith("tangle_api."):
+            raise ModuleNotFoundError("No module named 'tangle_api'", name="tangle_api")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    app = cli.build_app()
+
+    for command in (
+        ["sdk", "published-components", "search", "demo"],
+        ["sdk", "published-components", "inspect", "demo"],
+        ["sdk", "published-components", "library"],
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            app(command)
+        message = str(exc_info.value)
+        assert "Native generated Tangle API bindings are required for published-component commands" in message
+        assert "Install tangle-cli[native]" in message
+
+
+def test_published_components_publish_log_type_none_suppresses_progress(tmp_path: Path, capsys):
+    component_path = _write_component(tmp_path / "component.yaml", name="Quiet")
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "published-components",
+            "publish",
+            str(component_path),
+            "--dry-run",
+            "--log-type",
+            "none",
+        ],
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["status"] == "success"
+    assert captured.err == ""
 
 
 def test_components_and_published_components_help_reflect_api_split(capsys):
@@ -370,6 +442,7 @@ def test_components_and_published_components_help_reflect_api_split(capsys):
     assert "base-url" in publish_help
     assert "auth-header" in publish_help
     assert "published-by" in publish_help
+    assert "--log-type" in publish_help
     assert "slack" not in publish_help.lower()
     assert "shopify" not in publish_help.lower()
     assert "publish-all" not in publish_help

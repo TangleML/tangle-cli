@@ -7,14 +7,16 @@ from typing import Annotated
 
 from cyclopts import App, Parameter
 
-from .cli_helpers import load_config_or_exit, optional_path
+from .cli_helpers import LazyTangleApiClient, load_config_or_exit, optional_path
 from .cli_options import (
     AuthHeaderOption,
     BaseUrlOption,
     ConfigOption,
     HeaderOption,
+    LogTypeOption,
     TokenOption,
 )
+from .logger import logger_for_log_type
 from .pipelines import (
     PipelineValidationError,
     generate_mermaid,
@@ -30,25 +32,41 @@ app = App(
 
 
 @app.command(name="validate")
-def pipelines_validate(pipeline_path: pathlib.Path) -> None:
+def pipelines_validate(
+    pipeline_path: pathlib.Path,
+    *,
+    log_type: LogTypeOption = "console",
+) -> None:
     """Validate a local pipeline YAML file."""
 
+    logger, finalize_logs = logger_for_log_type(log_type)
     try:
-        validate_pipeline_file(pipeline_path)
-    except PipelineValidationError as exc:
-        raise SystemExit(str(exc)) from exc
-    print(f"Valid pipeline: {pipeline_path}")
+        try:
+            validate_pipeline_file(pipeline_path)
+        except PipelineValidationError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Valid pipeline: {pipeline_path}")
+    finally:
+        finalize_logs()
 
 
 @app.command(name="diagram")
-def pipelines_diagram(pipeline_path: pathlib.Path) -> None:
+def pipelines_diagram(
+    pipeline_path: pathlib.Path,
+    *,
+    log_type: LogTypeOption = "console",
+) -> None:
     """Print a Mermaid dependency diagram for a local pipeline YAML file."""
 
+    logger, finalize_logs = logger_for_log_type(log_type)
     try:
-        pipeline = validate_pipeline_file(pipeline_path)
-    except PipelineValidationError as exc:
-        raise SystemExit(str(exc)) from exc
-    print(generate_mermaid(pipeline))
+        try:
+            pipeline = validate_pipeline_file(pipeline_path)
+        except PipelineValidationError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(generate_mermaid(pipeline))
+    finally:
+        finalize_logs()
 
 
 def _optional_str(value: object) -> str | None:
@@ -105,6 +123,7 @@ def pipelines_hydrate(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Hydrate a local pipeline YAML file."""
 
@@ -117,6 +136,7 @@ def pipelines_hydrate(
     if resolved_token is None:
         resolved_token = _optional_str(config_values.get("token"))
 
+    logger, finalize_logs = logger_for_log_type(log_type)
     try:
         result = hydrate_pipeline_file(
             pipeline_path,
@@ -131,9 +151,24 @@ def pipelines_hydrate(
             ),
             header=_header_entries(header, config_values),
             include_env_credentials=include_env_credentials,
+            logger=logger,
+            client=LazyTangleApiClient(
+                command_name="pipeline hydration with API-backed component references",
+                base_url=resolved_base_url,
+                token=resolved_token,
+                auth_header=(
+                    auth_header
+                    if auth_header is not None
+                    else _optional_str(config_values.get("auth_header"))
+                ),
+                header=_header_entries(header, config_values),
+                include_env_credentials=include_env_credentials,
+            ),
         )
     except PipelineValidationError as exc:
         raise SystemExit(str(exc)) from exc
+    finally:
+        finalize_logs()
 
     if result.output_path is None:
         print(result.content, end="" if result.content.endswith("\n") else "\n")
@@ -168,9 +203,11 @@ def pipelines_layout(
         int,
         Parameter(help="Vertical spacing between tasks in the same layer."),
     ] = 120,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Add or update editor.position annotations in a local pipeline YAML file."""
 
+    logger, finalize_logs = logger_for_log_type(log_type)
     try:
         result = layout_pipeline_file(
             pipeline_path,
@@ -181,6 +218,8 @@ def pipelines_layout(
         )
     except PipelineValidationError as exc:
         raise SystemExit(str(exc)) from exc
+    finally:
+        finalize_logs()
     print(
         f"Positioned {result.tasks_positioned} task(s) across "
         f"{result.graphs_positioned} graph(s)."

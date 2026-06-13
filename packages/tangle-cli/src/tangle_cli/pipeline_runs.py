@@ -18,8 +18,7 @@ from typing import Any, Mapping
 
 import yaml
 
-from .api_transport import tangle_verbose_enabled
-from .logger import Logger, _null_logger, get_default_logger
+from .logger import Logger, get_default_logger
 from .pipeline_hydrator import PipelineHydrator
 from .utils import dump_yaml
 
@@ -45,9 +44,7 @@ class PipelineRunHooks:
     runtime defaults without forking the generic pipeline-run manager.
     """
 
-    logger: Logger = field(
-        default_factory=lambda: get_default_logger() if tangle_verbose_enabled() else _null_logger
-    )
+    logger: Logger = field(default_factory=get_default_logger)
 
     def read_pipeline_yaml(self, pipeline_path: str | Path) -> dict[str, Any]:
         path_text = str(pipeline_path)

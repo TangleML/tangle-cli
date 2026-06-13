@@ -46,3 +46,7 @@ ConfigOption = Annotated[
     str | None,
     Parameter(help="YAML/JSON config file providing command defaults."),
 ]
+LogTypeOption = Annotated[
+    str,
+    Parameter(help="Log output: console, none, file."),
+]

@@ -89,10 +89,11 @@ def regenerate_yaml(
     verbose: bool = False,
     mode: str = "inline",
     resolve_root: Path | None = None,
+    logger: Any | None = None,
 ) -> bool:
     """Regenerate a YAML component from a Python function source file."""
 
-    log = print if verbose else lambda *args, **kwargs: None
+    log = logger.info if logger is not None else (print if verbose else lambda *args, **kwargs: None)
     if not python_file.exists():
         log(f"  ❌ File not found: {python_file}")
         return False

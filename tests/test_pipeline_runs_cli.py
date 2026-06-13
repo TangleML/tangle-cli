@@ -116,11 +116,14 @@ def test_pipeline_runs_help_exposes_run_commands_not_local_pipeline_commands(cap
     assert "validate" not in output
     assert "diagram" not in output
 
+    run_app(app, ["sdk", "pipeline-runs", "submit", "--help"])
+    assert "--log-type" in capsys.readouterr().out
+
 
 def test_pipeline_runs_submit_builds_create_payload(monkeypatch, tmp_path: Path, capsys):
     pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
     fake_client = FakeClient()
-    monkeypatch.setattr(pipeline_runs_cli, "_client_from_options", lambda **kwargs: fake_client)
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
     app = cli.build_app()
 
     run_app(
@@ -171,7 +174,7 @@ def test_pipeline_runs_submit_dry_run_prints_sanitized_payload(monkeypatch, tmp_
         encoding="utf-8",
     )
     fake_client = FakeClient()
-    monkeypatch.setattr(pipeline_runs_cli, "_client_from_options", lambda **kwargs: fake_client)
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
     app = cli.build_app()
 
     run_app(
@@ -196,7 +199,52 @@ def test_pipeline_runs_submit_dry_run_prints_sanitized_payload(monkeypatch, tmp_
     assert "_source_dir" not in task_ref["spec"]
 
 
-def test_pipeline_runs_hydrate_logs_stay_quiet_when_verbose_false(
+def test_pipeline_runs_submit_with_hydrate_logs_progress(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+):
+    (tmp_path / "component.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "Local Component",
+                "implementation": {"container": {"image": "busybox"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "Demo Pipeline",
+                "implementation": {
+                    "graph": {
+                        "tasks": {
+                            "task": {"componentRef": {"url": "file://./component.yaml"}}
+                        }
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit", str(pipeline_path)])
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"id": "run-1", "root_execution_id": "exec-1"}
+    assert fake_client.created[0]["root_task"]["componentRef"]["spec"]["name"] == "Demo Pipeline"
+    assert "Loading component from file URL" in captured.err
+    assert "✅ Loaded component" in captured.err
+
+
+def test_pipeline_runs_hydrate_logs_progress_when_verbose_false(
     monkeypatch,
     tmp_path: Path,
     capsys,
@@ -230,10 +278,127 @@ def test_pipeline_runs_hydrate_logs_stay_quiet_when_verbose_false(
         encoding="utf-8",
     )
     fake_client = FakeClient()
-    monkeypatch.setattr(pipeline_runs_cli, "_client_from_options", lambda **kwargs: fake_client)
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
     app = cli.build_app()
 
     run_app(app, ["sdk", "pipeline-runs", "submit", str(pipeline_path), "--dry-run"])
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["root_task"]["componentRef"]["spec"]["name"] == "Demo Pipeline"
+    assert "Loading component from file URL" in captured.err
+    assert "✅ Loaded component" in captured.err
+    assert "[verbose]" not in captured.err
+
+
+def test_pipeline_runs_submit_log_type_file_captures_progress(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+):
+    (tmp_path / "component.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "Local Component",
+                "implementation": {"container": {"image": "busybox"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "Demo Pipeline",
+                "implementation": {
+                    "graph": {
+                        "tasks": {
+                            "task": {"componentRef": {"url": "file://./component.yaml"}}
+                        }
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit",
+            str(pipeline_path),
+            "--dry-run",
+            "--log-type",
+            "file",
+        ],
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["root_task"]["componentRef"]["spec"]["name"] == "Demo Pipeline"
+    assert "Logs written to:" in captured.err
+    log_path = Path(captured.err.split("Logs written to:", 1)[1].strip())
+    try:
+        log_text = log_path.read_text(encoding="utf-8")
+    finally:
+        log_path.unlink(missing_ok=True)
+    assert "Loading component from file URL" in log_text
+    assert "✅ Loaded component" in log_text
+
+
+def test_pipeline_runs_submit_log_type_none_suppresses_progress(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+):
+    (tmp_path / "component.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "Local Component",
+                "implementation": {"container": {"image": "busybox"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "Demo Pipeline",
+                "implementation": {
+                    "graph": {
+                        "tasks": {
+                            "task": {"componentRef": {"url": "file://./component.yaml"}}
+                        }
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit",
+            str(pipeline_path),
+            "--dry-run",
+            "--log-type",
+            "none",
+        ],
+    )
 
     captured = capsys.readouterr()
     assert json.loads(captured.out)["root_task"]["componentRef"]["spec"]["name"] == "Demo Pipeline"
@@ -251,7 +416,7 @@ def test_pipeline_runs_config_base_url_suppresses_ambient_credentials(monkeypatc
     config = tmp_path / "config.yaml"
     config.write_text("base_url: https://api.test\ntoken: explicit\n", encoding="utf-8")
     monkeypatch.setenv("TANGLE_API_TOKEN", "ambient")
-    monkeypatch.setattr(pipeline_runs_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", fake_client_from_options)
     app = cli.build_app()
 
     run_app(app, ["sdk", "pipeline-runs", "status", "run-1", "--config", str(config)])
@@ -263,7 +428,7 @@ def test_pipeline_runs_config_base_url_suppresses_ambient_credentials(monkeypatc
 
 def test_pipeline_runs_commands_call_generated_operations(monkeypatch, tmp_path: Path, capsys):
     fake_client = FakeClient()
-    monkeypatch.setattr(pipeline_runs_cli, "_client_from_options", lambda **kwargs: fake_client)
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
     app = cli.build_app()
 
     run_app(app, ["sdk", "pipeline-runs", "details", "run-1", "--include-annotations"])

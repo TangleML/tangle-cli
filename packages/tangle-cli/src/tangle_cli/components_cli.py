@@ -5,7 +5,8 @@ from typing import Annotated, Any
 from cyclopts import App, Parameter
 
 from .cli_helpers import load_args_or_exit, optional_path
-from .cli_options import ConfigOption
+from .cli_options import ConfigOption, LogTypeOption
+from .logger import logger_for_log_type
 
 app = App(name="components", help="Work with Tangle component definitions.")
 
@@ -104,6 +105,7 @@ def _components_generate_from_python_impl(
     mode: str | None = None,
     resolve_root: pathlib.Path | None = None,
     config: str | None = None,
+    log_type: str = "console",
 ) -> None:
     all_args = load_args_or_exit(
         config,
@@ -117,8 +119,10 @@ def _components_generate_from_python_impl(
         use_legacy_naming=(use_legacy_naming, None),
         mode=(mode, None),
         resolve_root=(resolve_root, None, optional_path),
+        log_type=(log_type, "console"),
     )
     for args in all_args:
+        logger, finalize_logs = logger_for_log_type(args.log_type)
         from .component_generator import determine_output_path, regenerate_yaml
 
         selected_mode = args.mode or "inline"
@@ -131,20 +135,24 @@ def _components_generate_from_python_impl(
             output_is_dir=False,
             use_legacy_naming=bool(args.use_legacy_naming),
         )
-        success = regenerate_yaml(
-            python_file=python_path,
-            output_path=output_path,
-            function_name=args.function_name,
-            custom_name=args.name,
-            image=args.image,
-            dependencies_from=args.dependencies_from,
-            strip_code=bool(args.strip_code),
-            mode=selected_mode,
-            resolve_root=args.resolve_root,
-            verbose=True,
-        )
-        if not success:
-            raise SystemExit(1)
+        try:
+            success = regenerate_yaml(
+                python_file=python_path,
+                output_path=output_path,
+                function_name=args.function_name,
+                custom_name=args.name,
+                image=args.image,
+                dependencies_from=args.dependencies_from,
+                strip_code=bool(args.strip_code),
+                mode=selected_mode,
+                resolve_root=args.resolve_root,
+                verbose=True,
+                logger=logger,
+            )
+            if not success:
+                raise SystemExit(1)
+        finally:
+            finalize_logs()
 
 
 @generate_app.command(name="from-python")
@@ -164,6 +172,7 @@ def components_generate_from_python(
     mode: str | None = None,
     resolve_root: pathlib.Path | None = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Generate a component YAML file from a local Python function."""
 
@@ -179,6 +188,7 @@ def components_generate_from_python(
         mode=mode,
         resolve_root=resolve_root,
         config=config,
+        log_type=log_type,
     )
 
 
@@ -199,6 +209,7 @@ def components_generate_from_python_function(
     mode: str | None = None,
     resolve_root: pathlib.Path | None = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Compatibility alias for `generate from-python`."""
 
@@ -214,6 +225,7 @@ def components_generate_from_python_function(
         mode=mode,
         resolve_root=resolve_root,
         config=config,
+        log_type=log_type,
     )
 
 
@@ -227,6 +239,7 @@ def components_bump_version(
     set_version: str | None = None,
     update_timestamp: bool | None = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Bump version metadata in a component YAML file."""
 
@@ -235,17 +248,23 @@ def components_bump_version(
         yaml_file=("yaml_file", yaml_file, None, False, True, optional_path),
         set_version=(set_version, None),
         update_timestamp=(update_timestamp, None),
+        log_type=(log_type, "console"),
     )
     result: dict[str, Any] = {}
     from .version_manager import bump_version
 
     for args in all_args:
-        result = bump_version(
-            args.yaml_file,
-            set_version=args.set_version,
-            update_timestamp=bool(args.update_timestamp),
-        )
-        if result.get("status") != "success":
-            raise SystemExit(1)
+        logger, finalize_logs = logger_for_log_type(args.log_type)
+        try:
+            result = bump_version(
+                args.yaml_file,
+                set_version=args.set_version,
+                update_timestamp=bool(args.update_timestamp),
+                logger=logger,
+            )
+            if result.get("status") != "success":
+                raise SystemExit(1)
+        finally:
+            finalize_logs()
     if result:
         print(result)
