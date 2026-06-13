@@ -474,6 +474,188 @@ def test_pipelines_hydrate_http_url_refs(monkeypatch, tmp_path: Path, capsys):
     assert ref["spec"]["implementation"]["container"]["image"] == "python:3.12"
 
 
+def _write_local_from_python_pipeline(
+    project_dir: Path,
+    python_file: str,
+    *,
+    resolve_root: str | None = None,
+) -> Path:
+    gen_config = {
+        "file": python_file,
+        "output_folder": "./generated",
+    }
+    if resolve_root is not None:
+        gen_config["resolve_root"] = resolve_root
+    _write_pipeline(
+        project_dir / "components.resolve.yaml",
+        {"generated": {"local_from_python": gen_config}},
+    )
+    return _write_pipeline(
+        project_dir / "pipeline.yaml",
+        {
+            "name": "Pipeline",
+            "implementation": {
+                "graph": {
+                    "tasks": {
+                        "generated": {
+                            "componentRef": {"url": "resolve://./components.resolve.yaml#generated"}
+                        }
+                    }
+                }
+            },
+        },
+    )
+
+
+def test_pipelines_hydrate_local_from_python_trusts_project_paths(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+):
+    from tangle_cli import pipeline_hydrator as hydrator_module
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    python_file = project_dir / "component.py"
+    python_file.write_text("# trusted project component\n", encoding="utf-8")
+    pipeline_path = _write_local_from_python_pipeline(project_dir, "./component.py")
+    regenerated: list[Path] = []
+
+    def fake_regenerate_yaml(**kwargs):
+        regenerated.append(kwargs["python_file"])
+        kwargs["output_path"].write_text(
+            "name: Generated Component\nimplementation:\n  container:\n    image: busybox\n",
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipelines", "hydrate", str(pipeline_path)])
+
+    hydrated = yaml.safe_load(capsys.readouterr().out)
+    ref = hydrated["implementation"]["graph"]["tasks"]["generated"]["componentRef"]
+    assert ref["name"] == "Generated Component"
+    assert regenerated == [python_file.resolve()]
+
+
+def test_pipelines_hydrate_local_from_python_refuses_untrusted_absolute_path(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from tangle_cli import pipeline_hydrator as hydrator_module
+    from tangle_cli.pipelines import PipelineValidationError, hydrate_pipeline_file
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_python = outside_dir / "evil.py"
+    outside_python.write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
+    pipeline_path = _write_local_from_python_pipeline(project_dir, str(outside_python))
+    regenerated: list[Path] = []
+
+    def fake_regenerate_yaml(**kwargs):
+        regenerated.append(kwargs["python_file"])
+        raise AssertionError("untrusted local_from_python must be blocked before generation")
+
+    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+
+    with pytest.raises(PipelineValidationError, match="Refusing to execute untrusted local_from_python source"):
+        hydrate_pipeline_file(pipeline_path)
+    assert regenerated == []
+
+
+def test_pipelines_hydrate_local_from_python_ignores_untrusted_resolve_root(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from tangle_cli import pipeline_hydrator as hydrator_module
+    from tangle_cli.pipelines import PipelineValidationError, hydrate_pipeline_file
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_python = outside_dir / "evil.py"
+    outside_python.write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
+    pipeline_path = _write_local_from_python_pipeline(
+        project_dir,
+        str(outside_python),
+        resolve_root=str(outside_dir),
+    )
+
+    def fake_regenerate_yaml(**kwargs):
+        raise AssertionError("untrusted resolve_root must not authorize execution")
+
+    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+
+    with pytest.raises(PipelineValidationError, match="Refusing to execute untrusted local_from_python source"):
+        hydrate_pipeline_file(pipeline_path)
+
+
+def test_pipelines_hydrate_local_from_python_blocks_symlink_escape(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from tangle_cli import pipeline_hydrator as hydrator_module
+    from tangle_cli.pipelines import PipelineValidationError, hydrate_pipeline_file
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_python = outside_dir / "evil.py"
+    outside_python.write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
+    symlink = project_dir / "linked.py"
+    symlink.symlink_to(outside_python)
+    pipeline_path = _write_local_from_python_pipeline(project_dir, "./linked.py")
+
+    def fake_regenerate_yaml(**kwargs):
+        raise AssertionError("symlink escape must be blocked before generation")
+
+    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+
+    with pytest.raises(PipelineValidationError, match="Refusing to execute untrusted local_from_python source"):
+        hydrate_pipeline_file(pipeline_path)
+
+
+def test_pipelines_hydrate_trusted_hydration_allows_untrusted_python_source(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+):
+    from tangle_cli import pipeline_hydrator as hydrator_module
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_python = outside_dir / "component.py"
+    outside_python.write_text("# trusted by explicit override\n", encoding="utf-8")
+    pipeline_path = _write_local_from_python_pipeline(project_dir, str(outside_python))
+    regenerated: list[Path] = []
+
+    def fake_regenerate_yaml(**kwargs):
+        regenerated.append(kwargs["python_file"])
+        kwargs["output_path"].write_text(
+            "name: Explicitly Trusted Component\nimplementation:\n  container:\n    image: busybox\n",
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipelines", "hydrate", str(pipeline_path), "--trusted-hydration"])
+
+    hydrated = yaml.safe_load(capsys.readouterr().out)
+    ref = hydrated["implementation"]["graph"]["tasks"]["generated"]["componentRef"]
+    assert ref["name"] == "Explicitly Trusted Component"
+    assert regenerated == [outside_python.resolve()]
+
+
 def test_pipelines_hydrate_name_refs_use_api_without_env_credentials_for_config_base_url(
     monkeypatch,
     tmp_path: Path,

@@ -141,7 +141,11 @@ def test_request_operation_verbose_env_logs_redacted_body(
     def fake_request(*args, **kwargs):
         return httpx.Response(
             200,
-            json={"id": "run-1", "secret": "response-secret"},
+            json={
+                "id": "run-1",
+                "secret": "response-secret",
+                "signed_url": "https://storage.test/object?X-Goog-Signature=response-signature",
+            },
             headers={"X-Api-Key": "response-key"},
             request=httpx.Request("POST", "https://api.test/api/pipeline_runs/"),
         )
@@ -169,6 +173,7 @@ def test_request_operation_verbose_env_logs_redacted_body(
     assert "request-token" not in logs
     assert "response-secret" not in logs
     assert "response-key" not in logs
+    assert "response-signature" not in logs
 
 
 def test_request_operation_verbose_env_redacts_opaque_component_text(

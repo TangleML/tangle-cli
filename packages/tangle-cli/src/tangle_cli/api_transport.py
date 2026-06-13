@@ -18,7 +18,7 @@ _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _MISSING = object()
 _SENSITIVE_HEADER_NAMES = {"authorization", "cloud-auth", "cookie", "x-api-key"}
 _SENSITIVE_KEY_RE = re.compile(
-    r"(authorization|authentication|(^|[-_])auth($|[-_])|cloud[-_]?auth|cookie|x[-_]?api[-_]?key|token|secret|password|credential)",
+    r"(authorization|authentication|(^|[-_])auth($|[-_])|cloud[-_]?auth|cookie|x[-_]?api[-_]?key|token|secret|password|credential|pre[-_]?signed[-_]?url|signed[-_]?url)",
     re.IGNORECASE,
 )
 _REDACTED = "<redacted>"

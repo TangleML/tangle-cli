@@ -375,6 +375,8 @@ def hydrate_pipeline_file(
     include_env_credentials: bool = True,
     client: Any | None = None,
     logger: Any | None = None,
+    trusted_python_sources: list[str] | None = None,
+    allow_all_hydration: bool = False,
 ) -> HydrateResult:
     """Hydrate a local pipeline YAML file using the ported TD hydrator."""
 
@@ -391,6 +393,8 @@ def hydrate_pipeline_file(
             include_env_credentials=include_env_credentials,
             logger=logger,
             resolution_overrides=dict(overrides or {}),
+            trusted_python_sources=trusted_python_sources,
+            allow_all_hydration=allow_all_hydration,
         )
         hydrated = hydrator.hydrate_file(
             pipeline_path,

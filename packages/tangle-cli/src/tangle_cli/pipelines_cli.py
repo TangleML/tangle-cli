@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pathlib
-from typing import Annotated
+from typing import Annotated, Any
 
 from cyclopts import App, Parameter
 
@@ -84,6 +84,33 @@ def _header_entries(cli_header: list[str] | None, config: dict[str, object]) -> 
     return None
 
 
+def _trusted_hydration_config(config: dict[str, object]) -> dict[str, Any]:
+    trusted = config.get("trusted_hydration", {})
+    return trusted if isinstance(trusted, dict) else {}
+
+
+def _trusted_sources(
+    cli_sources: list[str] | None,
+    config: dict[str, object],
+) -> list[str]:
+    sources: list[str] = []
+    config_sources = _trusted_hydration_config(config).get("trusted_python_sources", [])
+    if isinstance(config_sources, str):
+        sources.append(config_sources)
+    elif isinstance(config_sources, list):
+        sources.extend(str(source) for source in config_sources)
+    if cli_sources:
+        sources.extend(cli_sources)
+    return [source for source in sources if source]
+
+
+def _allow_all_hydration(
+    trusted_hydration: bool | None,
+    config: dict[str, object],
+) -> bool:
+    return bool(trusted_hydration or _trusted_hydration_config(config).get("allow_all", False))
+
+
 def _parse_vars(values: list[str] | dict[str, object] | None) -> dict[str, str]:
     parsed: dict[str, str] = {}
     if isinstance(values, dict):
@@ -122,6 +149,21 @@ def pipelines_hydrate(
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
+    trusted_source: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--trusted-source",
+            help="Trusted local_from_python source root or glob. Repeat for multiple.",
+            negative_iterable=(),
+        ),
+    ] = None,
+    trusted_hydration: Annotated[
+        bool | None,
+        Parameter(
+            name="--trusted-hydration",
+            help="Allow all local_from_python execution during hydration for trusted inputs.",
+        ),
+    ] = None,
     config: ConfigOption = None,
     log_type: LogTypeOption = "console",
 ) -> None:
@@ -152,6 +194,8 @@ def pipelines_hydrate(
             header=_header_entries(header, config_values),
             include_env_credentials=include_env_credentials,
             logger=logger,
+            trusted_python_sources=_trusted_sources(trusted_source, config_values),
+            allow_all_hydration=_allow_all_hydration(trusted_hydration, config_values),
             client=LazyTangleApiClient(
                 command_name="pipeline hydration with API-backed component references",
                 base_url=resolved_base_url,

@@ -24,6 +24,7 @@ import yaml
 from . import utils
 from .api_transport import DEFAULT_TIMEOUT_SECONDS
 from .component_generator import regenerate_yaml
+from .hydration_trust import is_trusted_python_source, trusted_python_source_guidance
 from .logger import Logger, get_default_logger
 from .utils import add_official_prefix
 
@@ -138,6 +139,8 @@ class PipelineHydrator:
         header: list[str] | None = None,
         include_env_credentials: bool = True,
         component_resolvers: Mapping[str, ComponentResolver] | None = None,
+        trusted_python_sources: list[str] | None = None,
+        allow_all_hydration: bool = False,
     ) -> None:
         self.client = client
         self._client_options = {
@@ -157,6 +160,8 @@ class PipelineHydrator:
         if component_resolvers:
             self.component_resolvers.update(component_resolvers)
         self.resolution_overrides: dict[str, Any] = resolution_overrides or {}
+        self.trusted_python_sources = trusted_python_sources or []
+        self.allow_all_hydration = allow_all_hydration
         self._resolution_overrides_str: dict[str, str] = {
             k: str(v) for k, v in self.resolution_overrides.items()
         }
@@ -658,6 +663,16 @@ class PipelineHydrator:
         if python_file is None or not python_file.exists():
             self.log.warn(f"   ⚠️ local_from_python file not found: {python_file}")
             return None
+        python_file = python_file.resolve()
+        resolve_root = _resolve_path(gen_config.get("resolve_root"))
+        trust_base_dirs = [base_dir, Path.cwd()]
+        if not is_trusted_python_source(
+            python_file,
+            base_dirs=trust_base_dirs,
+            trusted_sources=self.trusted_python_sources,
+            allow_all=self.allow_all_hydration,
+        ):
+            raise HydrationError(trusted_python_source_guidance(python_file))
 
         output_folder = _resolve_path(gen_config.get("output_folder"))
         if output_folder is None:
@@ -678,7 +693,7 @@ class PipelineHydrator:
             strip_code=bool(gen_config.get("strip_code", False)),
             verbose=False,
             mode=str(gen_config.get("mode", "inline")),
-            resolve_root=_resolve_path(gen_config.get("resolve_root")),
+            resolve_root=resolve_root,
         )
         if not success or not out_path.exists():
             self.log.warn(f"   ⚠️ local_from_python failed to generate {out_path}")
