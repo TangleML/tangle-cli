@@ -171,6 +171,39 @@ def test_request_operation_verbose_env_logs_redacted_body(
     assert "response-key" not in logs
 
 
+def test_request_operation_verbose_env_redacts_opaque_component_text(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("TANGLE_VERBOSE", "1")
+
+    def fake_request(*args, **kwargs):
+        return httpx.Response(
+            200,
+            json={"id": "component-1", "text": "response-yaml-with-secret-token"},
+            request=httpx.Request("POST", "https://api.test/api/components/"),
+        )
+
+    monkeypatch.setattr("tangle_cli.api_transport.httpx.request", fake_request)
+
+    request_operation(
+        _operation("/api/components/", method="POST", has_request_body=True),
+        {},
+        base_url="https://api.test",
+        auth_header="Bearer request-secret",
+        body={
+            "name": "demo-component",
+            "text": "component:\n  env:\n    TOKEN: hard-coded-component-secret\n",
+        },
+    )
+
+    logs = capsys.readouterr().err
+    assert "demo-component" in logs
+    assert "<redacted document>" in logs
+    assert "hard-coded-component-secret" not in logs
+    assert "response-yaml-with-secret-token" not in logs
+
+
 def test_build_operation_request_rejects_absolute_url_paths() -> None:
     with pytest.raises(ValueError, match="must be relative"):
         build_operation_request(
