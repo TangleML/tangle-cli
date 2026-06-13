@@ -22,6 +22,15 @@ _SENSITIVE_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _REDACTED = "<redacted>"
+_REDACTED_DOCUMENT = "<redacted document>"
+_OPAQUE_DOCUMENT_KEY_NAMES = {
+    "component_yaml",
+    "dockerfile",
+    "manifest",
+    "pipeline_yaml",
+    "text",
+    "yaml",
+}
 
 
 def tangle_verbose_enabled() -> bool:
@@ -46,6 +55,8 @@ def _redact_headers(headers: dict[str, Any] | None) -> dict[str, Any]:
 def _redact_sensitive_values(value: Any, key: str | None = None) -> Any:
     if key and _SENSITIVE_KEY_RE.search(key):
         return _REDACTED
+    if key and key.lower() in _OPAQUE_DOCUMENT_KEY_NAMES and isinstance(value, str) and value:
+        return _REDACTED_DOCUMENT
     if isinstance(value, dict):
         return {str(k): _redact_sensitive_values(v, str(k)) for k, v in value.items()}
     if isinstance(value, list):
