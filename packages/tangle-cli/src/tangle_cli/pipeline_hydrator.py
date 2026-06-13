@@ -1004,6 +1004,8 @@ class PipelineHydrator:
         """Resolve component references to full componentRef with spec."""
         if recursive_params is not None:
             self._global_params = recursive_params
+        else:
+            self._global_params = {}
         if not isinstance(task_data, dict):
             return task_data
 
@@ -1216,67 +1218,71 @@ class PipelineHydrator:
         overrides: dict[str, str] | None = None,
     ) -> HydratedPipeline:
         """Hydrate a pipeline YAML file."""
-        input_str = str(input_file)
-        input_scheme = self._uri_scheme(input_str)
-        input_path: Path | None = None
-        base_dir: Path | None = None
+        self._global_params = {}
         try:
-            if input_scheme and input_scheme != "file":
-                yaml_text = self._read_uri_text(
-                    input_str,
-                    "pipeline",
-                    self.make_resolver_context(input_scheme, input_str, "pipeline", None),
-                )
-                config = yaml.safe_load(yaml_text) if yaml_text is not None else None
-            else:
-                raw_input = input_str[7:] if input_str.startswith("file://") else input_str
-                input_path = Path(raw_input)
-                base_dir = input_path.parent.resolve()
-                config = yaml.safe_load(input_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise HydrationError(f"Failed to read pipeline YAML {input_file}: {exc}") from exc
-        if config is None:
-            config = {}
-        if not isinstance(config, dict):
-            raise HydrationError("Pipeline YAML must contain a top-level mapping")
+            input_str = str(input_file)
+            input_scheme = self._uri_scheme(input_str)
+            input_path: Path | None = None
+            base_dir: Path | None = None
+            try:
+                if input_scheme and input_scheme != "file":
+                    yaml_text = self._read_uri_text(
+                        input_str,
+                        "pipeline",
+                        self.make_resolver_context(input_scheme, input_str, "pipeline", None),
+                    )
+                    config = yaml.safe_load(yaml_text) if yaml_text is not None else None
+                else:
+                    raw_input = input_str[7:] if input_str.startswith("file://") else input_str
+                    input_path = Path(raw_input)
+                    base_dir = input_path.parent.resolve()
+                    config = yaml.safe_load(input_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise HydrationError(f"Failed to read pipeline YAML {input_file}: {exc}") from exc
+            if config is None:
+                config = {}
+            if not isinstance(config, dict):
+                raise HydrationError("Pipeline YAML must contain a top-level mapping")
 
-        if "template_file" in config:
-            if input_path is None:
-                raise UnsupportedHydrationFeatureError(
-                    "template_file configs require a local pipeline input"
-                )
-            result = self._render_template_config(input_path, config, overrides=overrides)
-            if result is None:
-                raise HydrationError(
-                    f"Template file not found: {(base_dir / config['template_file']).resolve()}"
-                )
-            _, output_yaml = result
-            if self.recursive_context:
-                self._global_params = {k: v for k, v in config.items() if k != "template_file"}
-                if overrides:
-                    self._global_params.update(overrides)
-            self.log.info(f"✅ Hydrated {input_file}")
-        else:
-            output_yaml = config
-            self.log.info(f"✅ Copied {input_file}")
-
-        output_yaml = self.resolve_components(output_yaml, base_dir=base_dir)
-        output_content = utils.dump_yaml(output_yaml)
-        if output_file is not None:
-            output_str = str(output_file)
-            output_scheme = self._uri_scheme(output_str)
-            if output_scheme and output_scheme != "file":
-                self._write_uri_text(
-                    output_str,
-                    output_content,
-                    self.make_resolver_context(output_scheme, output_str, "output", base_dir),
-                )
+            if "template_file" in config:
+                if input_path is None:
+                    raise UnsupportedHydrationFeatureError(
+                        "template_file configs require a local pipeline input"
+                    )
+                result = self._render_template_config(input_path, config, overrides=overrides)
+                if result is None:
+                    raise HydrationError(
+                        f"Template file not found: {(base_dir / config['template_file']).resolve()}"
+                    )
+                _, output_yaml = result
+                if self.recursive_context:
+                    self._global_params = {k: v for k, v in config.items() if k != "template_file"}
+                    if overrides:
+                        self._global_params.update(overrides)
+                self.log.info(f"✅ Hydrated {input_file}")
             else:
-                raw_output = output_str[7:] if output_str.startswith("file://") else output_str
-                output_path = Path(raw_output)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_text(output_content, encoding="utf-8")
-        return HydratedPipeline(output_yaml, output_content, self.resolved_count)
+                output_yaml = config
+                self.log.info(f"✅ Copied {input_file}")
+
+            output_yaml = self.resolve_components(output_yaml, base_dir=base_dir)
+            output_content = utils.dump_yaml(output_yaml)
+            if output_file is not None:
+                output_str = str(output_file)
+                output_scheme = self._uri_scheme(output_str)
+                if output_scheme and output_scheme != "file":
+                    self._write_uri_text(
+                        output_str,
+                        output_content,
+                        self.make_resolver_context(output_scheme, output_str, "output", base_dir),
+                    )
+                else:
+                    raw_output = output_str[7:] if output_str.startswith("file://") else output_str
+                    output_path = Path(raw_output)
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(output_content, encoding="utf-8")
+            return HydratedPipeline(output_yaml, output_content, self.resolved_count)
+        finally:
+            self._global_params = {}
 
 
 # =============================================================================
