@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from contextlib import nullcontext
 from pathlib import Path
@@ -1077,6 +1078,166 @@ def test_pipeline_runs_run_pipeline_lifecycle_and_retry_hooks(tmp_path: Path) ->
         ("poll", 2, "SUCCEEDED"),
         ("after_lifecycle", 2, True, None),
     ]
+
+
+def test_pipeline_runs_path_retry_rebuilds_submit_body_each_attempt(tmp_path: Path) -> None:
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    reads = []
+    events = []
+
+    class Hooks(PipelineRunHooks):
+        def read_pipeline_yaml(self, pipeline_path):
+            reads.append(len(reads) + 1)
+            return {
+                "name": f"Retry Source {len(reads)}",
+                "inputs": [{"name": "required", "type": "String"}],
+                "implementation": {"graph": {"tasks": {}}},
+            }
+
+        def after_poll(self, poll, context):
+            events.append(("poll", context.attempt, context.pipeline_spec["name"]))
+            if context.attempt == 1:
+                raise PipelineRunError("retry after first build")
+
+    client = FakeClient()
+    manager = PipelineRunManager(client=client, hooks=Hooks())
+
+    result = manager.run_pipeline(
+        pipeline_path,
+        run_args={"required": "value"},
+        hydrate=False,
+        wait=True,
+        max_attempts=2,
+        poll_interval=1,
+    )
+
+    assert result["wait"]["status"] == "SUCCEEDED"
+    assert reads == [1, 2]
+    assert [body["root_task"]["componentRef"]["spec"]["name"] for body in client.created] == [
+        "Retry Source 1",
+        "Retry Source 2",
+    ]
+    assert events == [
+        ("poll", 1, "Retry Source 1"),
+        ("poll", 2, "Retry Source 2"),
+    ]
+
+
+def test_pipeline_runs_run_pipeline_spec_uses_in_memory_spec_lifecycle() -> None:
+    events = []
+    spec = {
+        "name": "Prepared Spec",
+        "inputs": [{"name": "required", "type": "String"}],
+        "implementation": {"graph": {"tasks": {}}},
+    }
+
+    class Hooks(PipelineRunHooks):
+        def around_run(self, context):
+            events.append(("around", context.run_name, context.pipeline_path))
+            return nullcontext()
+
+        def before_submit_context(self, context):
+            events.append(("before_submit", context.run_name, context.pipeline_spec["name"]))
+
+        def after_submit_context(self, context):
+            events.append(("after_submit", context.run_id, context.root_execution_id))
+
+    client = FakeClient()
+    manager = PipelineRunManager(client=client, hooks=Hooks())
+
+    result = manager.run_pipeline_spec(
+        spec,
+        run_args={"required": "value"},
+        annotations={"team": "oss"},
+        pipeline_path="already-prepared.yaml",
+        wait=False,
+    )
+
+    assert result["response"]["id"] == "run-1"
+    assert result["context"].run_id == "run-1"
+    assert client.created[0]["root_task"]["componentRef"]["spec"]["name"] == "Prepared Spec"
+    assert client.created[0]["annotations"] == {"team": "oss"}
+    assert events == [
+        ("around", "Prepared Spec", "already-prepared.yaml"),
+        ("before_submit", "Prepared Spec", "Prepared Spec"),
+        ("after_submit", "run-1", "exec-1"),
+    ]
+
+
+def test_pipeline_runs_run_prepared_body_retry_body_factory() -> None:
+    events = []
+    base_body = {
+        "root_task": {
+            "componentRef": {"spec": {"name": "Body", "implementation": {"graph": {"tasks": {}}}}},
+            "arguments": {"attempt": 1},
+        },
+        "annotations": {},
+    }
+
+    class Hooks(PipelineRunHooks):
+        def after_poll(self, poll, context):
+            events.append(("poll", context.attempt, context.submit_body["root_task"]["arguments"]))
+            if context.attempt == 1:
+                raise PipelineRunError("retry first body")
+
+        def before_retry(self, context, error, *, next_attempt):
+            events.append(("before_retry", context.run_id, next_attempt, str(error)))
+
+        def after_retry_submit(self, context):
+            events.append(("after_retry_submit", context.attempt))
+
+    def retry_body_factory(attempt, previous_context, error):
+        assert attempt == 2
+        assert previous_context.run_id == "run-1"
+        assert str(error) == "retry first body"
+        retry_body = copy.deepcopy(base_body)
+        retry_body["root_task"]["arguments"] = {"attempt": attempt}
+        return retry_body
+
+    client = FakeClient()
+    manager = PipelineRunManager(client=client, hooks=Hooks())
+
+    result = manager.run_prepared_body(
+        base_body,
+        wait=True,
+        max_attempts=2,
+        poll_interval=1,
+        retry_body_factory=retry_body_factory,
+    )
+
+    assert result["wait"]["status"] == "SUCCEEDED"
+    assert [body["root_task"]["arguments"] for body in client.created] == [
+        {"attempt": 1},
+        {"attempt": 2},
+    ]
+    assert events == [
+        ("poll", 1, {"attempt": 1}),
+        ("before_retry", "run-1", 2, "retry first body"),
+        ("after_retry_submit", 2),
+        ("poll", 2, {"attempt": 2}),
+    ]
+
+
+def test_pipeline_runs_wait_allows_zero_poll_interval_when_opted_in() -> None:
+    class RunningClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-1",
+                "execution_status_stats": {"RUNNING": 1},
+            }
+
+    manager = PipelineRunManager(client=RunningClient())
+
+    result = manager.wait_for_completion(
+        "run-1",
+        max_wait=0,
+        poll_interval=0,
+        allow_zero_poll_interval=True,
+        timeout_clock="wall",
+    )
+
+    assert result["timed_out"] is True
 
 
 def test_pipeline_run_status_uses_deterministic_precedence() -> None:

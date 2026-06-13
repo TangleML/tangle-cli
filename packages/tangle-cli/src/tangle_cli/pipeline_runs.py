@@ -13,6 +13,7 @@ import copy
 import json
 import re
 import time
+from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -616,21 +617,26 @@ class PipelineRunManager:
         *,
         pipeline_path: str | Path | None = None,
         attempt: int = 1,
+        context: PipelineRunContext | None = None,
     ) -> dict[str, Any]:
         pipeline_spec = body["root_task"]["componentRef"]["spec"]
-        context = PipelineRunContext(
-            run_name=str(pipeline_spec.get("name")) if isinstance(pipeline_spec, dict) else None,
+        submit_context = context or PipelineRunContext(
             pipeline_path=pipeline_path,
             start_time=time.time(),
             attempt=attempt,
-            submit_body=body,
-            pipeline_spec=pipeline_spec,
         )
-        self.hooks.before_submit_context(context)
+        submit_context.run_name = (
+            str(pipeline_spec.get("name")) if isinstance(pipeline_spec, dict) else None
+        )
+        submit_context.pipeline_path = pipeline_path
+        submit_context.attempt = attempt
+        submit_context.submit_body = body
+        submit_context.pipeline_spec = pipeline_spec if isinstance(pipeline_spec, dict) else None
+        self.hooks.before_submit_context(submit_context)
         try:
             response = self.to_plain(self.client.pipeline_runs_create(body=body))
         except Exception as exc:
-            self.hooks.on_submit_error(exc, context=context)
+            self.hooks.on_submit_error(exc, context=submit_context)
             raise
         if not isinstance(response, dict):
             response = {}
@@ -640,7 +646,13 @@ class PipelineRunManager:
             pipeline_path=pipeline_path,
             attempt=attempt,
         )
-        self.hooks.after_submit_context(submitted_context)
+        submit_context.run_id = submitted_context.run_id
+        submit_context.run_name = submitted_context.run_name
+        submit_context.root_execution_id = submitted_context.root_execution_id
+        submit_context.submit_body = submitted_context.submit_body
+        submit_context.pipeline_spec = submitted_context.pipeline_spec
+        submit_context.response = response
+        self.hooks.after_submit_context(submit_context)
         return response
 
     def submit_pipeline_spec(
@@ -840,19 +852,29 @@ class PipelineRunManager:
         poll_interval: float,
         use_graph_state: bool = False,
         context: PipelineRunContext | None = None,
+        allow_zero_poll_interval: bool = False,
+        timeout_clock: str = "monotonic",
     ) -> dict[str, Any]:
         wait_context = context or PipelineRunContext(run_id=run_id, start_time=time.time())
         if max_wait is not None and max_wait < 0:
             raise PipelineRunError("--max-wait must be non-negative")
-        if poll_interval <= 0:
+        if poll_interval < 0 or (poll_interval == 0 and not allow_zero_poll_interval):
             raise PipelineRunError("--poll-interval must be positive")
+        if timeout_clock not in {"monotonic", "wall"}:
+            raise PipelineRunError("timeout_clock must be 'monotonic' or 'wall'")
         enforce_max_wait = max_wait is not None and self.hooks.should_enforce_max_wait(wait_context)
-        started_at = time.monotonic()
-        deadline = started_at + max_wait if enforce_max_wait else None
+        poll_started_at = time.monotonic()
+        deadline_now: Callable[[], float] = time.time if timeout_clock == "wall" else time.monotonic
+        deadline_started_at = deadline_now()
+        deadline = deadline_started_at + max_wait if enforce_max_wait else None
         self.hooks.before_wait(wait_context)
         last_poll: PipelineWaitPoll | None = None
         while True:
-            poll = self._poll_run_status(run_id, use_graph_state=use_graph_state, started_at=started_at)
+            poll = self._poll_run_status(
+                run_id,
+                use_graph_state=use_graph_state,
+                started_at=poll_started_at,
+            )
             last_poll = poll
             self.hooks.after_poll(poll, wait_context)
             if poll.terminal:
@@ -865,7 +887,7 @@ class PipelineRunManager:
                 result = {"run": poll.run, "status": poll.status, "timed_out": False, "early_exit": True}
                 self.hooks.after_wait_context(result, wait_context)
                 return result
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline is not None and deadline_now() >= deadline:
                 self.hooks.on_timeout(poll, wait_context)
                 result = {"run": poll.run, "status": poll.status, "timed_out": True}
                 self.hooks.after_wait_context(result, wait_context)
@@ -873,56 +895,44 @@ class PipelineRunManager:
             if deadline is None:
                 sleep_for = poll_interval
             else:
-                sleep_for = min(poll_interval, max(0.0, deadline - time.monotonic()))
+                sleep_for = min(poll_interval, max(0.0, deadline - deadline_now()))
             time.sleep(sleep_for)
         if last_poll is None:  # pragma: no cover - defensive, loop always polls first
             raise PipelineRunError(f"No status returned for run {run_id}")
 
-    def run_pipeline(
+    def _run_body_factory(
         self,
-        pipeline_path: str | Path,
+        body_factory: Callable[[int, PipelineRunContext | None, Exception | None], dict[str, Any]],
         *,
-        run_args: dict[str, Any] | None = None,
-        annotations: dict[str, str] | None = None,
-        hydrate: bool = True,
-        run_as: str | None = None,
-        resolution_overrides: dict[str, Any] | None = None,
+        pipeline_path: str | Path | None = None,
         wait: bool = False,
         max_wait: float | None = 600.0,
         poll_interval: float = 10.0,
         use_graph_state: bool = False,
         max_attempts: int = 1,
+        allow_zero_poll_interval: bool = False,
+        timeout_clock: str = "monotonic",
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Submit (and optionally wait for) a pipeline with lifecycle hooks.
-
-        This is intentionally opt-in so existing CLI submit/wait semantics stay
-        unchanged. Downstreams can use it to centralize mutex acquisition,
-        graceful-shutdown context, retry, and notification lifecycles around the
-        generic OSS submit/wait behavior.
-        """
+        """Drive submit/wait/retry for already prepared specs or submit bodies."""
 
         if max_attempts < 1:
             raise PipelineRunError("max_attempts must be at least 1")
         last_error: Exception | None = None
         previous_context: PipelineRunContext | None = None
+        attempts: list[PipelineRunContext] = []
         for attempt in range(1, max_attempts + 1):
             context = PipelineRunContext(
                 pipeline_path=pipeline_path,
                 start_time=time.time(),
                 attempt=attempt,
+                metadata=dict(metadata or {}),
             )
             lifecycle_started = False
             success = False
             error: Exception | None = None
             retry_requested = False
-            body = self.build_submit_body(
-                pipeline_path,
-                run_args=run_args,
-                annotations=annotations,
-                hydrate=hydrate,
-                run_as=run_as,
-                resolution_overrides=resolution_overrides,
-            )
+            body = body_factory(attempt, previous_context, last_error)
             pipeline_spec = body.get("root_task", {}).get("componentRef", {}).get("spec")
             context.submit_body = body
             context.pipeline_spec = pipeline_spec if isinstance(pipeline_spec, dict) else None
@@ -930,6 +940,7 @@ class PipelineRunManager:
                 context.run_name = str(context.pipeline_spec["name"])
             self.hooks.before_run_lifecycle(context)
             lifecycle_started = True
+            attempts.append(context)
             try:
                 with self.hooks.around_run(context):
                     try:
@@ -937,19 +948,8 @@ class PipelineRunManager:
                             body,
                             pipeline_path=pipeline_path,
                             attempt=attempt,
+                            context=context,
                         )
-                        submitted_context = self.response_run_context(
-                            response,
-                            submit_body=body,
-                            pipeline_path=pipeline_path,
-                            attempt=attempt,
-                        )
-                        context.run_id = submitted_context.run_id
-                        context.run_name = submitted_context.run_name
-                        context.root_execution_id = submitted_context.root_execution_id
-                        context.submit_body = submitted_context.submit_body
-                        context.pipeline_spec = submitted_context.pipeline_spec
-                        context.response = response
                         previous_context = context
                         if attempt > 1:
                             self.hooks.after_retry_submit(context)
@@ -961,10 +961,14 @@ class PipelineRunManager:
                                 poll_interval=poll_interval,
                                 use_graph_state=use_graph_state,
                                 context=context,
+                                allow_zero_poll_interval=allow_zero_poll_interval,
+                                timeout_clock=timeout_clock,
                             )
                             result = {"response": response, "wait": wait_result}
                         else:
                             result = {"response": response}
+                        result["context"] = context
+                        result["attempts"] = attempts
                         success = True
                         return result
                     except Exception as exc:
@@ -994,6 +998,150 @@ class PipelineRunManager:
         if last_error is not None:  # pragma: no cover - defensive
             raise last_error
         raise PipelineRunError("Pipeline run did not start")  # pragma: no cover
+
+    def run_prepared_body(
+        self,
+        body: dict[str, Any],
+        *,
+        pipeline_path: str | Path | None = None,
+        wait: bool = False,
+        max_wait: float | None = 600.0,
+        poll_interval: float = 10.0,
+        use_graph_state: bool = False,
+        max_attempts: int = 1,
+        retry_body_factory: Callable[
+            [int, PipelineRunContext | None, Exception | None], dict[str, Any]
+        ] | None = None,
+        allow_zero_poll_interval: bool = False,
+        timeout_clock: str = "monotonic",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Submit/wait/retry an already prepared submit body.
+
+        ``retry_body_factory`` lets downstreams refresh retry bodies while still
+        keeping hydration/layout/validation outside the generic lifecycle.
+        """
+
+        def body_factory(
+            attempt: int,
+            previous_context: PipelineRunContext | None,
+            error: Exception | None,
+        ) -> dict[str, Any]:
+            if attempt > 1 and retry_body_factory is not None:
+                return retry_body_factory(attempt, previous_context, error)
+            return copy.deepcopy(body)
+
+        return self._run_body_factory(
+            body_factory,
+            pipeline_path=pipeline_path,
+            wait=wait,
+            max_wait=max_wait,
+            poll_interval=poll_interval,
+            use_graph_state=use_graph_state,
+            max_attempts=max_attempts,
+            allow_zero_poll_interval=allow_zero_poll_interval,
+            timeout_clock=timeout_clock,
+            metadata=metadata,
+        )
+
+    def run_pipeline_spec(
+        self,
+        pipeline_spec: dict[str, Any],
+        *,
+        run_args: dict[str, Any] | None = None,
+        annotations: dict[str, str] | None = None,
+        pipeline_path: str | Path | None = None,
+        run_as: str | None = None,
+        hydrate: bool = True,
+        wait: bool = False,
+        max_wait: float | None = 600.0,
+        poll_interval: float = 10.0,
+        use_graph_state: bool = False,
+        max_attempts: int = 1,
+        allow_zero_poll_interval: bool = False,
+        timeout_clock: str = "monotonic",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Submit/wait/retry an already hydrated/validated in-memory spec."""
+
+        def body_factory(
+            _attempt: int,
+            _previous_context: PipelineRunContext | None,
+            _error: Exception | None,
+        ) -> dict[str, Any]:
+            return self.build_submit_body_from_spec(
+                copy.deepcopy(pipeline_spec),
+                run_args=run_args,
+                annotations=annotations,
+                pipeline_path=pipeline_path,
+                run_as=run_as,
+                hydrate=hydrate,
+            )
+
+        return self._run_body_factory(
+            body_factory,
+            pipeline_path=pipeline_path,
+            wait=wait,
+            max_wait=max_wait,
+            poll_interval=poll_interval,
+            use_graph_state=use_graph_state,
+            max_attempts=max_attempts,
+            allow_zero_poll_interval=allow_zero_poll_interval,
+            timeout_clock=timeout_clock,
+            metadata=metadata,
+        )
+
+    def run_pipeline(
+        self,
+        pipeline_path: str | Path,
+        *,
+        run_args: dict[str, Any] | None = None,
+        annotations: dict[str, str] | None = None,
+        hydrate: bool = True,
+        run_as: str | None = None,
+        resolution_overrides: dict[str, Any] | None = None,
+        wait: bool = False,
+        max_wait: float | None = 600.0,
+        poll_interval: float = 10.0,
+        use_graph_state: bool = False,
+        max_attempts: int = 1,
+        allow_zero_poll_interval: bool = False,
+        timeout_clock: str = "monotonic",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Submit (and optionally wait for) a pipeline with lifecycle hooks.
+
+        Unlike ``run_pipeline_spec``, path-based runs intentionally rebuild the
+        submit body on every retry so read/hydrate/resolution hooks are
+        re-invoked for each attempt.
+        """
+
+        def body_factory(
+            _attempt: int,
+            _previous_context: PipelineRunContext | None,
+            _error: Exception | None,
+        ) -> dict[str, Any]:
+            return self.build_submit_body(
+                pipeline_path,
+                run_args=run_args,
+                annotations=annotations,
+                hydrate=hydrate,
+                run_as=run_as,
+                resolution_overrides=resolution_overrides,
+            )
+
+        return self._run_body_factory(
+            body_factory,
+            pipeline_path=pipeline_path,
+            wait=wait,
+            max_wait=max_wait,
+            poll_interval=poll_interval,
+            use_graph_state=use_graph_state,
+            max_attempts=max_attempts,
+            allow_zero_poll_interval=allow_zero_poll_interval,
+            timeout_clock=timeout_clock,
+            metadata=metadata,
+        )
 
 
 def parse_key_value_entries(entries: list[str] | None) -> dict[str, str]:
