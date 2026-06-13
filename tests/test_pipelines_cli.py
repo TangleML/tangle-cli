@@ -1004,6 +1004,81 @@ def test_pipeline_hydrator_recursive_context_flows_to_child_templates(tmp_path: 
     assert child_spec["name"] == "Child child yes also"
 
 
+def test_pipeline_hydrator_recursive_context_does_not_leak_between_hydrates(tmp_path: Path):
+    from tangle_cli.pipeline_hydrator import PipelineHydrator
+
+    (tmp_path / "first-pipeline.yaml.j2").write_text(
+        textwrap.dedent(
+            """
+            name: First
+            implementation:
+              graph:
+                tasks:
+                  child:
+                    componentRef:
+                      url: file://./first-child-config.yaml
+            """
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "first-child.yaml.j2").write_text(
+        textwrap.dedent(
+            """
+            name: "First {{ parent_only }}"
+            implementation:
+              container:
+                image: python:3.12
+            """
+        ),
+        encoding="utf-8",
+    )
+    _write_pipeline(
+        tmp_path / "first-config.yaml",
+        {"template_file": "first-pipeline.yaml.j2", "parent_only": "leaked"},
+    )
+    _write_pipeline(
+        tmp_path / "first-child-config.yaml",
+        {"template_file": "first-child.yaml.j2"},
+    )
+
+    (tmp_path / "plain-child.yaml.j2").write_text(
+        textwrap.dedent(
+            """
+            name: "Plain {{ parent_only|default('missing') }} {{ child_only }}"
+            implementation:
+              container:
+                image: python:3.12
+            """
+        ),
+        encoding="utf-8",
+    )
+    _write_pipeline(
+        tmp_path / "plain.yaml",
+        {
+            "name": "Plain",
+            "implementation": {
+                "graph": {
+                    "tasks": {
+                        "child": {"componentRef": {"url": "file://./plain-child-config.yaml"}}
+                    }
+                }
+            },
+        },
+    )
+    _write_pipeline(
+        tmp_path / "plain-child-config.yaml",
+        {"template_file": "plain-child.yaml.j2", "child_only": "second"},
+    )
+
+    hydrator = PipelineHydrator(recursive_context="parent-priority")
+    hydrator.hydrate_file(tmp_path / "first-config.yaml")
+    second = hydrator.hydrate_file(tmp_path / "plain.yaml")
+
+    child_spec = second.data["implementation"]["graph"]["tasks"]["child"]["componentRef"]["spec"]
+    assert child_spec["name"] == "Plain missing second"
+    assert hydrator._global_params == {}
+
+
 def test_pipelines_layout_preserves_tasks_and_updates_coordinates(tmp_path: Path, capsys):
     pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml", _minimal_valid_pipeline())
     output_path = tmp_path / "layout.yaml"
