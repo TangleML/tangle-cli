@@ -1660,6 +1660,8 @@ def generate_component_yaml(
     strip_code: bool = False,
     strip_source_path: bool = False,
     resolve_root: Path | None = None,
+    emit_generation_annotations: bool = True,
+    path_annotation_mode: Literal["oss", "td_legacy"] = "oss",
 ) -> bool:
     """Generate a component YAML file from a Python function.
 
@@ -1677,11 +1679,20 @@ def generate_component_yaml(
         resolve_root: Root directory for resolving local module imports in bundle
             mode.  Defaults to ``file_path.parent``.  Set this when local modules
             live in sibling directories (e.g. ``src/utils`` alongside ``src/components``).
+        emit_generation_annotations: Persist tangle-cli regeneration context
+            annotations. Disable for downstream legacy snapshot compatibility.
+        path_annotation_mode: ``"oss"`` always records source/YAML paths relative
+            to their common ancestor. ``"td_legacy"`` only uses that relative
+            common-root behavior inside a git checkout; outside git it records
+            ``file_path.name`` / ``output_path.name`` like legacy tangle-deploy.
 
     Returns:
         True on success, False on failure.
     """
     try:
+        if path_annotation_mode not in {"oss", "td_legacy"}:
+            raise ValueError("path_annotation_mode must be 'oss' or 'td_legacy'")
+
         # 1. Extract metadata from source (AST-based, before module loading)
         file_metadata, resolved_func_name = extract_file_metadata(file_path, function_name)
         if not resolved_func_name:
@@ -1744,36 +1755,39 @@ def generate_component_yaml(
         if deps:
             annotations["python_dependencies"] = json.dumps(deps)
 
-        annotations["tangle_cli_generation_function_name"] = resolved_func_name
-        annotations["tangle_cli_generation_mode"] = mode
+        if emit_generation_annotations:
+            annotations["tangle_cli_generation_function_name"] = resolved_func_name
+            annotations["tangle_cli_generation_mode"] = mode
 
         # Use the common ancestor of source and output so both paths are clean
         # forward references (no ".."). This lets later local maintenance
         # commands find the source even when YAML is generated into a separate
-        # output directory, regardless of whether the files live in a git repo.
+        # output directory. TD legacy compatibility keeps basename-only paths
+        # outside a git checkout to preserve historical snapshots.
         resolved_source = file_path.resolve()
         resolved_output = output_path.resolve()
         common_dir = Path(os.path.commonpath([resolved_source, resolved_output]))
-
-        def _generation_path_annotation(path: Path) -> str:
-            try:
-                return str(path.resolve().relative_to(common_dir))
-            except ValueError:
-                return str(path)
-
-        try:
-            if not strip_source_path:
-                annotations["python_original_code_path"] = str(resolved_source.relative_to(common_dir))
-            annotations["component_yaml_path"] = str(resolved_output.relative_to(common_dir))
-        except ValueError:
-            annotations["component_yaml_path"] = output_path.name
-        if dependencies_from:
-            annotations["tangle_cli_generation_dependencies_from"] = _generation_path_annotation(dependencies_from)
-        if resolve_root:
-            annotations["tangle_cli_generation_resolve_root"] = _generation_path_annotation(resolve_root)
-
-        # Git info — use the same common ancestor as git_relative_dir.
         git_root = get_git_root(directory)
+        use_common_paths = path_annotation_mode == "oss" or git_root is not None
+
+        def _path_annotation(path: Path) -> str:
+            if use_common_paths:
+                try:
+                    return str(path.resolve().relative_to(common_dir))
+                except ValueError:
+                    return str(path)
+            return path.name
+
+        if not strip_source_path:
+            annotations["python_original_code_path"] = _path_annotation(file_path)
+        annotations["component_yaml_path"] = _path_annotation(output_path)
+        if emit_generation_annotations:
+            if dependencies_from:
+                annotations["tangle_cli_generation_dependencies_from"] = _path_annotation(dependencies_from)
+            if resolve_root:
+                annotations["tangle_cli_generation_resolve_root"] = _path_annotation(resolve_root)
+
+        # Git info — use the same common ancestor as git_relative_dir when common paths are active.
         if git_root:
             git_info = get_git_info(common_dir)
             git_info.pop("_git_root", None)

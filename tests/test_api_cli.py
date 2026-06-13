@@ -5,7 +5,7 @@ import sys
 import httpx
 import pytest
 
-from tangle_cli import api_cli, cli, cli_helpers, component_inspector, components_cli, published_components_cli
+from tangle_cli import api_cli, cli, cli_helpers, components_cli, published_components_cli
 
 
 SCHEMA = {
@@ -294,16 +294,16 @@ def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, 
 
     monkeypatch.setattr(
         published_components_cli,
-        "LazyTangleApiClient",
+        "_client_from_options",
         fake_client_from_options,
     )
     monkeypatch.setattr(
-        component_inspector,
+        published_components_cli,
         "search_components",
         lambda client, **kwargs: {"client_ok": client is fake_client, "search": kwargs},
     )
     monkeypatch.setattr(
-        component_inspector,
+        published_components_cli,
         "inspect_by_name",
         lambda client, name, **kwargs: {
             "client_ok": client is fake_client,
@@ -312,7 +312,7 @@ def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, 
         },
     )
     monkeypatch.setattr(
-        component_inspector,
+        published_components_cli,
         "inspect_by_digest",
         lambda client, digest, **kwargs: {
             "client_ok": client is fake_client,
@@ -321,7 +321,7 @@ def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, 
         },
     )
     monkeypatch.setattr(
-        component_inspector,
+        published_components_cli,
         "get_standard_library",
         lambda client: {"client_ok": client is fake_client, "folders": []},
     )
@@ -418,9 +418,9 @@ def test_sdk_published_components_search_uses_config_with_cli_precedence(monkeyp
         client_calls.append(kwargs)
         return fake_client
 
-    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
     monkeypatch.setattr(
-        component_inspector,
+        published_components_cli,
         "search_components",
         lambda client, **kwargs: {"client_ok": client is fake_client, "search": kwargs},
     )
@@ -475,9 +475,9 @@ def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tm
         client_calls.append(kwargs)
         return fake_client
 
-    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
     monkeypatch.setattr(
-        component_inspector,
+        published_components_cli,
         "inspect_by_digest",
         lambda client, digest, **kwargs: {
             "client_ok": client is fake_client,
@@ -486,7 +486,7 @@ def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tm
         },
     )
     monkeypatch.setattr(
-        component_inspector,
+        published_components_cli,
         "get_standard_library",
         lambda client: {"client_ok": client is fake_client},
     )

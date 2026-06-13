@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from tangle_cli import cli
+from tangle_cli.component_from_func import generate_component_yaml
 from tangle_cli.component_generator import (
     determine_output_path,
     find_dependencies_file,
@@ -139,6 +140,61 @@ def test_complete_generation_flow(monkeypatch, tmp_path: Path, use_cli: bool):
         assert regenerate_yaml(py_file, image="test-image:latest") is True
 
     _assert_yaml_matches(yaml_file, SNAPSHOTS_DIR / "complete_generation.expected.yaml")
+
+
+def test_generate_component_yaml_default_emits_generation_annotations_and_oss_paths(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setattr("tangle_cli.utils._fill_from_ci_env", lambda info: None)
+    src_dir = tmp_path / "src"
+    out_dir = tmp_path / "generated"
+    src_dir.mkdir()
+    out_dir.mkdir()
+    py_file = src_dir / "component.py"
+    py_file.write_text(DUMMY_PYTHON_COMPONENT, encoding="utf-8")
+    yaml_file = out_dir / "component.yaml"
+
+    assert generate_component_yaml(py_file, yaml_file, "python:3.12", function_name="test_component") is True
+
+    generated = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
+    annotations = generated["metadata"]["annotations"]
+    assert annotations["python_original_code_path"] == "src/component.py"
+    assert annotations["component_yaml_path"] == "generated/component.yaml"
+    assert annotations["tangle_cli_generation_function_name"] == "test_component"
+    assert annotations["tangle_cli_generation_mode"] == "inline"
+
+
+def test_generate_component_yaml_can_disable_generation_annotations_and_use_td_legacy_paths(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setattr("tangle_cli.utils._fill_from_ci_env", lambda info: None)
+    src_dir = tmp_path / "src"
+    out_dir = tmp_path / "generated"
+    src_dir.mkdir()
+    out_dir.mkdir()
+    py_file = src_dir / "component.py"
+    py_file.write_text(DUMMY_PYTHON_COMPONENT, encoding="utf-8")
+    yaml_file = out_dir / "component.yaml"
+
+    assert generate_component_yaml(
+        py_file,
+        yaml_file,
+        "python:3.12",
+        function_name="test_component",
+        emit_generation_annotations=False,
+        path_annotation_mode="td_legacy",
+    ) is True
+
+    generated = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
+    annotations = generated["metadata"]["annotations"]
+    assert annotations["python_original_code_path"] == "component.py"
+    assert annotations["component_yaml_path"] == "component.yaml"
+    assert "tangle_cli_generation_function_name" not in annotations
+    assert "tangle_cli_generation_mode" not in annotations
+    assert "tangle_cli_generation_dependencies_from" not in annotations
+    assert "tangle_cli_generation_resolve_root" not in annotations
 
 
 def test_from_python_function_alias_and_config(monkeypatch, tmp_path: Path):

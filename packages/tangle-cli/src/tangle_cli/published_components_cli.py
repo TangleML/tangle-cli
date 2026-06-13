@@ -26,6 +26,56 @@ from .cli_options import (
 from .logger import logger_for_log_type
 from .component_publisher import ComponentPublisher, deprecate_component
 
+
+def _client_from_options(
+    *,
+    base_url: str | None = None,
+    token: str | None = None,
+    auth_header: str | None = None,
+    header: list[str] | str | None = None,
+    include_env_credentials: bool = True,
+    command_name: str = "published-component commands",
+) -> LazyTangleApiClient:
+    """Create a lazy static client proxy for published-component commands.
+
+    Kept as a module-level seam so downstream wrappers/tests can monkeypatch
+    client construction without replacing the shared LazyTangleApiClient class.
+    """
+
+    return LazyTangleApiClient(
+        base_url=base_url,
+        token=token,
+        auth_header=auth_header,
+        header=header,
+        include_env_credentials=include_env_credentials,
+        command_name=command_name,
+    )
+
+
+def search_components(*args: Any, **kwargs: Any) -> Any:
+    from .component_inspector import search_components as _search_components
+
+    return _search_components(*args, **kwargs)
+
+
+def inspect_by_digest(*args: Any, **kwargs: Any) -> Any:
+    from .component_inspector import inspect_by_digest as _inspect_by_digest
+
+    return _inspect_by_digest(*args, **kwargs)
+
+
+def inspect_by_name(*args: Any, **kwargs: Any) -> Any:
+    from .component_inspector import inspect_by_name as _inspect_by_name
+
+    return _inspect_by_name(*args, **kwargs)
+
+
+def get_standard_library(*args: Any, **kwargs: Any) -> Any:
+    from .component_inspector import get_standard_library as _get_standard_library
+
+    return _get_standard_library(*args, **kwargs)
+
+
 app = App(
     name="published-components",
     help="Inspect and search published Tangle components from the registry.",
@@ -64,7 +114,7 @@ def published_components_search(
     ):
         logger, finalize_logs = logger_for_log_type(args.log_type)
         try:
-            client = LazyTangleApiClient(
+            client = _client_from_options(
                 base_url=args.base_url,
                 token=args.token,
                 auth_header=args.auth_header,
@@ -74,7 +124,6 @@ def published_components_search(
             )
             if require_available := getattr(client, "require_available", None):
                 require_available()
-            from .component_inspector import search_components
 
             print_json(
                 search_components(
@@ -130,7 +179,7 @@ def published_components_inspect(
             if bool(args.name) == bool(args.digest):
                 raise SystemExit("Provide exactly one of NAME or --digest DIGEST")
 
-            client = LazyTangleApiClient(
+            client = _client_from_options(
                 base_url=args.base_url,
                 token=args.token,
                 auth_header=args.auth_header,
@@ -141,8 +190,6 @@ def published_components_inspect(
             if require_available := getattr(client, "require_available", None):
                 require_available()
             if args.digest:
-                from .component_inspector import inspect_by_digest
-
                 result = inspect_by_digest(
                     client,
                     args.digest,
@@ -150,8 +197,6 @@ def published_components_inspect(
                     follow_deprecated=bool(args.follow_deprecated),
                 )
             else:
-                from .component_inspector import inspect_by_name
-
                 result = inspect_by_name(
                     client,
                     args.name or "",
@@ -189,7 +234,7 @@ def published_components_library(
     ):
         logger, finalize_logs = logger_for_log_type(args.log_type)
         try:
-            client = LazyTangleApiClient(
+            client = _client_from_options(
                 base_url=args.base_url,
                 token=args.token,
                 auth_header=args.auth_header,
@@ -199,7 +244,6 @@ def published_components_library(
             )
             if require_available := getattr(client, "require_available", None):
                 require_available()
-            from .component_inspector import get_standard_library
 
             print_json(get_standard_library(client))
         finally:
@@ -257,7 +301,7 @@ def published_components_publish(
     for args in all_args:
         logger, finalize_logs = logger_for_log_type(args.log_type)
         try:
-            client = None if args.dry_run else LazyTangleApiClient(
+            client = None if args.dry_run else _client_from_options(
                 base_url=args.base_url,
                 token=args.token,
                 auth_header=args.auth_header,
@@ -327,7 +371,7 @@ def published_components_deprecate(
     ):
         logger, finalize_logs = logger_for_log_type(args.log_type)
         try:
-            client = LazyTangleApiClient(
+            client = _client_from_options(
                 base_url=args.base_url,
                 token=args.token,
                 auth_header=args.auth_header,
