@@ -8,9 +8,10 @@ notification plumbing, and a separate ``publish-all`` CLI are kept downstream.
 
 from __future__ import annotations
 
+import inspect
 import os
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -59,19 +60,58 @@ class ProcessingResult:
         return {key: value for key, value in payload.items() if value is not None}
 
 
+@dataclass(frozen=True)
+class ComponentPublishContext:
+    """Structured context passed to component publish hooks.
+
+    The context is additive: hooks may keep the original historical signatures,
+    or add a keyword-only ``context`` parameter to receive publisher metadata,
+    batch configuration, and accumulated per-component results.
+    """
+
+    publisher: "ComponentPublisher"
+    dry_run: bool
+    git_remote_sha: str | None = None
+    git_remote_branch: str | None = None
+    git_remote_url: str | None = None
+    git_repo: str | None = None
+    git_root: str | None = None
+    published_by: str | None = None
+    batch_config: Sequence[Mapping[str, Any]] | None = None
+    component_config: Mapping[str, Any] | None = None
+    component_path: str | None = None
+    result: ProcessingResult | None = None
+    results: Sequence[tuple[str, ProcessingResult]] = field(default_factory=tuple)
+
+
 class ComponentPublishHook(Protocol):
     """Extension hook for downstream publishers.
 
     Downstream packages can implement one or more methods to observe publish
     batches (for example, to send Slack summaries) without OSS importing or
-    knowing about those systems.
+    knowing about those systems. Implementations that need richer metadata may
+    add ``context: ComponentPublishContext | None = None`` as a keyword
+    parameter; hooks without that parameter continue to work.
     """
 
-    def before_batch(self, components_config: Sequence[Mapping[str, Any]]) -> None: ...
+    def before_batch(
+        self,
+        components_config: Sequence[Mapping[str, Any]],
+        context: ComponentPublishContext | None = None,
+    ) -> None: ...
 
-    def after_component(self, component_path: str, result: ProcessingResult) -> None: ...
+    def after_component(
+        self,
+        component_path: str,
+        result: ProcessingResult,
+        context: ComponentPublishContext | None = None,
+    ) -> None: ...
 
-    def after_batch(self, results: Sequence[tuple[str, ProcessingResult]]) -> None: ...
+    def after_batch(
+        self,
+        results: Sequence[tuple[str, ProcessingResult]],
+        context: ComponentPublishContext | None = None,
+    ) -> None: ...
 
 
 # ============================================================================
@@ -239,20 +279,26 @@ class ComponentPublisher:
         git_remote_sha: str | None = None,
         git_remote_branch: str | None = None,
         git_remote_url: str | None = None,
+        git_repo: str | None = None,
         git_root: str | Path | None = None,
         published_by: str | None = None,
         client: Any = None,
+        client_factory: Callable[[], Any] | None = None,
         hooks: Sequence[ComponentPublishHook] | None = None,
         logger: Logger | None = None,
     ) -> None:
         """Initialize the ComponentPublisher.
 
         Args mirror the generic ``tangle-deploy`` publisher shape, with
-        Shopify/Slack-specific fields intentionally omitted.
+        Shopify/Slack-specific fields intentionally omitted. ``client_factory``
+        is a downstream seam for lazily constructing a custom authenticated
+        client; subclasses may also override :meth:`_get_client` for more
+        control.
         """
 
         self.dry_run = dry_run
         self._client = client
+        self._client_factory = client_factory
         self.published_by = published_by
         self.hooks = list(hooks or [])
         self.log = logger or get_default_logger()
@@ -263,11 +309,20 @@ class ComponentPublisher:
         self.git_remote_sha = git_remote_sha or git_info.get("git_remote_sha")
         self.git_remote_branch = git_remote_branch or git_info.get("git_remote_branch")
         self.git_remote_url = git_remote_url or git_info.get("git_remote_url")
+        self.git_repo = git_repo
 
     def _get_client(self) -> Any | None:
-        """Get or create a TangleApiClient instance."""
+        """Get or create a Tangle API client instance.
+
+        Downstream packages can either pass ``client_factory`` to the
+        constructor or subclass and override this method to provide custom auth
+        and lazy client construction.
+        """
 
         if self._client is None and not self.dry_run:
+            if self._client_factory is not None:
+                self._client = self._client_factory()
+                return self._client
             try:
                 from .client import TangleApiClient
             except ModuleNotFoundError as exc:
@@ -483,7 +538,8 @@ class ComponentPublisher:
         self.log.info(f"📤 Publishing {len(components_config)} component(s) to Tangle API")
         self.log.info("=" * 60)
 
-        self._run_hook("before_batch", components_config)
+        batch_context = self._publish_context(batch_config=components_config)
+        self._run_hook("before_batch", components_config, context=batch_context)
         all_results: list[tuple[str, ProcessingResult]] = []
 
         for config in components_config:
@@ -502,7 +558,18 @@ class ComponentPublisher:
                     reason="Missing 'component_path' in configuration",
                 )
                 all_results.append(("<missing_path>", error_result))
-                self._run_hook("after_component", "<missing_path>", error_result)
+                self._run_hook(
+                    "after_component",
+                    "<missing_path>",
+                    error_result,
+                    context=self._publish_context(
+                        batch_config=components_config,
+                        component_config=config,
+                        component_path="<missing_path>",
+                        result=error_result,
+                        results=all_results,
+                    ),
+                )
                 continue
 
             component_name = custom_name or Path(component_path).stem
@@ -535,7 +602,18 @@ class ComponentPublisher:
                 )
                 self.log.error(f"   ❌ Unexpected error: {exc}")
             all_results.append((str(component_path), result))
-            self._run_hook("after_component", str(component_path), result)
+            self._run_hook(
+                "after_component",
+                str(component_path),
+                result,
+                context=self._publish_context(
+                    batch_config=components_config,
+                    component_config=config,
+                    component_path=str(component_path),
+                    result=result,
+                    results=all_results,
+                ),
+            )
 
         success_count = sum(1 for _, result in all_results if result.outcome == ProcessingOutcome.SUCCESS)
         skip_count = sum(1 for _, result in all_results if result.outcome == ProcessingOutcome.SKIP)
@@ -557,7 +635,11 @@ class ComponentPublisher:
                 self.log.error(f"   • {component_name}: {result.reason}")
 
         self.results = all_results
-        self._run_hook("after_batch", all_results)
+        self._run_hook(
+            "after_batch",
+            all_results,
+            context=self._publish_context(batch_config=components_config, results=all_results),
+        )
 
         if len(all_results) == 0:
             self.log.warn("\n⚠️  No components specified in configuration")
@@ -570,10 +652,39 @@ class ComponentPublisher:
             return 1
         return 0
 
-    def _run_hook(self, method_name: str, *args: Any) -> None:
+    def _publish_context(
+        self,
+        *,
+        batch_config: Sequence[Mapping[str, Any]] | None = None,
+        component_config: Mapping[str, Any] | None = None,
+        component_path: str | None = None,
+        result: ProcessingResult | None = None,
+        results: Sequence[tuple[str, ProcessingResult]] | None = None,
+    ) -> ComponentPublishContext:
+        return ComponentPublishContext(
+            publisher=self,
+            dry_run=self.dry_run,
+            git_remote_sha=self.git_remote_sha,
+            git_remote_branch=self.git_remote_branch,
+            git_remote_url=self.git_remote_url,
+            git_repo=self.git_repo,
+            git_root=self._git_root,
+            published_by=self.published_by,
+            batch_config=batch_config,
+            component_config=component_config,
+            component_path=component_path,
+            result=result,
+            results=tuple(results or ()),
+        )
+
+    def _run_hook(self, method_name: str, *args: Any, context: ComponentPublishContext | None = None) -> None:
         for hook in self.hooks:
             method = getattr(hook, method_name, None)
-            if method:
+            if not method:
+                continue
+            if context is not None and _hook_accepts_context(method):
+                method(*args, context=context)
+            else:
                 method(*args)
 
 
@@ -588,11 +699,13 @@ def publish_component_to_tangle(
     git_remote_sha: str | None = None,
     git_remote_branch: str | None = None,
     git_remote_url: str | None = None,
+    git_repo: str | None = None,
     image: str | None = None,
     name: str | None = None,
     description: str | None = None,
     annotations: dict[str, str] | None = None,
     client: Any = None,
+    client_factory: Callable[[], Any] | None = None,
     published_by: str | None = None,
 ) -> ProcessingResult:
     """Publish one component using ``ComponentPublisher.publish_component``."""
@@ -602,7 +715,9 @@ def publish_component_to_tangle(
         git_remote_sha=git_remote_sha,
         git_remote_branch=git_remote_branch,
         git_remote_url=git_remote_url,
+        git_repo=git_repo,
         client=client,
+        client_factory=client_factory,
         published_by=published_by,
     )
     return publisher.publish_component(
@@ -623,8 +738,10 @@ def publish_component(client: Any, component_path: str | Path, **kwargs: Any) ->
         git_remote_branch=kwargs.pop("git_remote_branch", None),
         git_remote_url=kwargs.pop("git_remote_url", None),
         git_root=kwargs.pop("git_root", None),
+        git_repo=kwargs.pop("git_repo", None),
         published_by=kwargs.pop("published_by", None),
         client=client,
+        client_factory=kwargs.pop("client_factory", None),
         logger=kwargs.pop("logger", None),
     )
     return publisher.publish_component(component_path, **kwargs)
@@ -693,6 +810,19 @@ def prepare_component_for_publish(
 # ============================================================================
 
 
+def _hook_accepts_context(method: Any) -> bool:
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "context":
+            return True
+    return False
+
+
 def _component_spec_from_yaml(
     yaml_content: str,
     *,
@@ -747,6 +877,7 @@ def _to_plain(value: Any) -> Any:
 
 
 __all__ = [
+    "ComponentPublishContext",
     "ComponentPublishHook",
     "ComponentPublisher",
     "ProcessingOutcome",

@@ -9,8 +9,10 @@ import yaml
 from tangle_api.generated.models import ComponentSpec
 
 from tangle_cli.component_publisher import (
+    ComponentPublishContext,
     ComponentPublisher,
     ProcessingOutcome,
+    ProcessingResult,
     deprecate_component,
     deprecate_old_components,
     perform_version_check,
@@ -104,6 +106,39 @@ def test_publish_yaml_parsing_error(tmp_path: Path) -> None:
 
     assert result.outcome == ProcessingOutcome.ERROR
     assert result.reason is not None
+
+
+def test_client_factory_lazily_creates_downstream_client(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml")
+    client = FakeClient()
+    calls = []
+
+    def client_factory() -> FakeClient:
+        calls.append("created")
+        return client
+
+    publisher = ComponentPublisher(client_factory=client_factory)
+
+    assert calls == []
+    result = publisher.publish_component(component_path)
+
+    assert result.outcome == ProcessingOutcome.SUCCESS
+    assert calls == ["created"]
+    assert client.create_calls
+
+
+def test_client_factory_is_not_called_for_dry_run(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml")
+    calls = []
+
+    def client_factory() -> FakeClient:
+        calls.append("created")
+        return FakeClient()
+
+    result = publish_component_to_tangle(component_path, dry_run=True, client_factory=client_factory)
+
+    assert result.outcome == ProcessingOutcome.SUCCESS
+    assert calls == []
 
 
 def test_client_creation_failure(monkeypatch, tmp_path: Path) -> None:
@@ -292,6 +327,73 @@ class RecordingHook:
 
     def after_batch(self, results: list[tuple[str, ProcessingResult]]) -> None:
         self.events.append(("after", len(results)))
+
+
+class ContextHook:
+    def __init__(self) -> None:
+        self.contexts: list[ComponentPublishContext] = []
+
+    def before_batch(self, components_config: list[dict[str, Any]], *, context: ComponentPublishContext) -> None:
+        self.contexts.append(context)
+
+    def after_component(
+        self,
+        component_path: str,
+        result: ProcessingResult,
+        *,
+        context: ComponentPublishContext,
+    ) -> None:
+        self.contexts.append(context)
+
+    def after_batch(
+        self,
+        results: list[tuple[str, ProcessingResult]],
+        *,
+        context: ComponentPublishContext,
+    ) -> None:
+        self.contexts.append(context)
+
+
+class KwargsContextHook:
+    def __init__(self) -> None:
+        self.contexts: list[ComponentPublishContext] = []
+
+    def after_batch(self, results: list[tuple[str, ProcessingResult]], **kwargs: Any) -> None:
+        self.contexts.append(kwargs["context"])
+
+
+def test_publish_components_passes_structured_context_to_context_aware_hooks(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", name="demo", version="1.0")
+    hook = ContextHook()
+    kwargs_hook = KwargsContextHook()
+    publisher = ComponentPublisher(
+        dry_run=True,
+        hooks=[hook, kwargs_hook],
+        git_remote_sha="sha",
+        git_remote_branch="main",
+        git_remote_url="https://github.com/Shopify/discovery",
+        git_repo="Shopify/discovery",
+        git_root=tmp_path,
+        published_by="alice@example.com",
+    )
+
+    exit_code = publisher.publish_components([{"component_path": component_path, "name": "Demo"}])
+
+    assert exit_code == 0
+    before_context, component_context, after_context = hook.contexts
+    assert before_context.git_remote_sha == "sha"
+    assert before_context.git_remote_branch == "main"
+    assert before_context.git_remote_url == "https://github.com/Shopify/discovery"
+    assert before_context.git_repo == "Shopify/discovery"
+    assert before_context.git_root == str(tmp_path)
+    assert before_context.published_by == "alice@example.com"
+    assert before_context.batch_config == [{"component_path": component_path, "name": "Demo"}]
+    assert component_context.component_path == str(component_path)
+    assert component_context.component_config == {"component_path": component_path, "name": "Demo"}
+    assert component_context.result is publisher.results[0][1]
+    assert component_context.results == tuple(publisher.results)
+    assert after_context.results == tuple(publisher.results)
+    assert kwargs_hook.contexts == [after_context]
 
 
 def test_publish_components_batches_configs_and_runs_hooks(tmp_path: Path) -> None:
