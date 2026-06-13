@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -9,7 +10,7 @@ import pytest
 import yaml
 
 from tangle_cli import cli, pipeline_runs_cli
-from tangle_cli.pipeline_runs import PipelineRunManager, PipelineRunError
+from tangle_cli.pipeline_runs import PipelineRunHooks, PipelineRunManager, PipelineRunError
 
 
 def run_app(app, args: list[str]) -> None:
@@ -597,6 +598,350 @@ def test_pipeline_runs_submit_trusted_hydration_allows_untrusted_local_from_pyth
     assert regenerated == [outside_python.resolve()]
     submitted_task = fake_client.created[0]["root_task"]["componentRef"]["spec"]["implementation"]["graph"]["tasks"]["generated"]
     assert submitted_task["componentRef"]["name"] == "Submit Generated Component"
+
+
+def test_pipeline_runs_build_submit_body_from_prepared_spec_and_run_name_template() -> None:
+    class Hooks(PipelineRunHooks):
+        def prepare_pipeline_spec(self, pipeline_spec, *, pipeline_path, run_args, hydrate):
+            prepared = dict(pipeline_spec)
+            prepared.setdefault("metadata", {}).setdefault("annotations", {})["prepared"] = "yes"
+            return prepared
+
+        def prepare_run_arguments(self, pipeline_spec, run_args):
+            merged = dict(run_args or {})
+            merged["timestamp"] = "2026-06-13"
+            return merged
+
+    manager = PipelineRunManager(client=FakeClient(), hooks=Hooks())
+    body = manager.build_submit_body_from_spec(
+        {
+            "name": "Original",
+            "inputs": [{"name": "timestamp", "type": "String"}],
+            "metadata": {"annotations": {"run-name-template": "run-${arguments.timestamp}"}},
+            "implementation": {"graph": {"tasks": {}}},
+        },
+        run_args={},
+        annotations={"team": "oss"},
+        hydrate=False,
+    )
+
+    spec = body["root_task"]["componentRef"]["spec"]
+    assert spec["name"] == "run-2026-06-13"
+    assert spec["metadata"]["annotations"]["prepared"] == "yes"
+    assert body["root_task"]["arguments"] == {"timestamp": "2026-06-13"}
+    assert body["annotations"] == {"team": "oss"}
+
+
+def test_pipeline_runs_submit_error_hook_gets_context() -> None:
+    class FailingClient(FakeClient):
+        def pipeline_runs_create(self, body: Any = None) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+    errors = []
+
+    class Hooks(PipelineRunHooks):
+        def on_submit_error(self, error, *, context):
+            errors.append((str(error), context.run_name, context.pipeline_spec["name"]))
+
+    manager = PipelineRunManager(client=FailingClient(), hooks=Hooks())
+
+    with pytest.raises(RuntimeError, match="boom"):
+        manager.submit_pipeline_spec(
+            {"name": "Explodes", "implementation": {"graph": {"tasks": {}}}},
+            hydrate=False,
+        )
+
+    assert errors == [("boom", "Explodes", "Explodes")]
+
+
+def test_pipeline_runs_wait_uses_graph_state_and_poll_hooks() -> None:
+    events = []
+
+    class GraphClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-graph",
+                "execution_status_stats": {"RUNNING": 1},
+            }
+
+        def executions_graph_execution_state(self, id: str) -> dict[str, Any]:
+            return {"status_totals": {"SUCCEEDED": 2}}
+
+    class Hooks(PipelineRunHooks):
+        def before_wait(self, context):
+            events.append(("before_wait", context.run_id))
+
+        def after_poll(self, poll, context):
+            events.append(("after_poll", poll.status_counts, poll.total, poll.terminal))
+
+        def on_terminal(self, poll, context):
+            events.append(("terminal", poll.status))
+
+        def after_wait_context(self, result, context):
+            events.append(("after_wait", result["status"]))
+
+    manager = PipelineRunManager(client=GraphClient(), hooks=Hooks())
+
+    result = manager.wait_for_completion(
+        "run-graph",
+        max_wait=None,
+        poll_interval=1,
+        use_graph_state=True,
+    )
+
+    assert result["status"] == "SUCCEEDED"
+    assert events == [
+        ("before_wait", "run-graph"),
+        ("after_poll", {"SUCCEEDED": 2}, 2, True),
+        ("terminal", "SUCCEEDED"),
+        ("after_wait", "SUCCEEDED"),
+    ]
+
+
+def test_pipeline_runs_fail_fast_hook_runs_before_lifecycle_release(tmp_path: Path) -> None:
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    events = []
+
+    class RecordingContext:
+        def __enter__(self):
+            events.append("enter")
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append("exit")
+            return False
+
+    class Hooks(PipelineRunHooks):
+        def around_run(self, context):
+            return RecordingContext()
+
+        def after_poll(self, poll, context):
+            events.append("poll")
+            raise PipelineRunError("fail fast")
+
+        def on_fail_fast_before_release(self, context, error):
+            events.append("failfast")
+
+        def after_run_lifecycle(self, context, *, success, error=None):
+            events.append("after_lifecycle")
+
+    manager = PipelineRunManager(client=FakeClient(), hooks=Hooks())
+
+    with pytest.raises(PipelineRunError, match="fail fast"):
+        manager.run_pipeline(
+            pipeline_path,
+            run_args={"required": "value"},
+            hydrate=False,
+            wait=True,
+            max_attempts=1,
+            poll_interval=1,
+        )
+
+    assert events == ["enter", "poll", "failfast", "exit", "after_lifecycle"]
+
+
+def test_pipeline_runs_early_exit_hook_runs_before_lifecycle_release(tmp_path: Path) -> None:
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    events = []
+
+    class RecordingContext:
+        def __enter__(self):
+            events.append("enter")
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append("exit")
+            return False
+
+    class RunningClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-1",
+                "execution_status_stats": {"RUNNING": 1},
+            }
+
+    class Hooks(PipelineRunHooks):
+        def around_run(self, context):
+            return RecordingContext()
+
+        def after_poll(self, poll, context):
+            events.append("poll")
+
+        def should_exit_early(self, poll, context):
+            return True
+
+        def on_early_exit_before_release(self, poll, context):
+            events.append("early_cleanup")
+
+        def after_run_lifecycle(self, context, *, success, error=None):
+            events.append("after_lifecycle")
+
+    manager = PipelineRunManager(client=RunningClient(), hooks=Hooks())
+
+    result = manager.run_pipeline(
+        pipeline_path,
+        run_args={"required": "value"},
+        hydrate=False,
+        wait=True,
+        poll_interval=1,
+    )
+
+    assert result["wait"]["early_exit"] is True
+    assert events == ["enter", "poll", "early_cleanup", "exit", "after_lifecycle"]
+
+
+def test_pipeline_runs_retry_cancel_previous_run_before_lifecycle_release(tmp_path: Path) -> None:
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    events = []
+
+    class EventClient(FakeClient):
+        def pipeline_runs_cancel(self, id: str) -> None:
+            events.append(("cancel", id))
+            return super().pipeline_runs_cancel(id)
+
+    class RecordingContext:
+        def __enter__(self):
+            events.append(("enter", None))
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append(("exit", None))
+            return False
+
+    class Hooks(PipelineRunHooks):
+        def around_run(self, context):
+            return RecordingContext()
+
+        def after_poll(self, poll, context):
+            events.append(("poll", context.attempt))
+            if context.attempt == 1:
+                raise PipelineRunError("retry me")
+
+        def should_cancel_previous_run(self, context, error, *, next_attempt):
+            events.append(("should_cancel", context.run_id))
+            return True
+
+        def before_retry(self, context, error, *, next_attempt):
+            events.append(("before_retry", context.run_id))
+
+        def after_run_lifecycle(self, context, *, success, error=None):
+            events.append(("after_lifecycle", context.attempt))
+
+    client = EventClient()
+    manager = PipelineRunManager(client=client, hooks=Hooks())
+
+    manager.run_pipeline(
+        pipeline_path,
+        run_args={"required": "value"},
+        hydrate=False,
+        wait=True,
+        max_attempts=2,
+        poll_interval=1,
+    )
+
+    assert events[:7] == [
+        ("enter", None),
+        ("poll", 1),
+        ("should_cancel", "run-1"),
+        ("cancel", "run-1"),
+        ("before_retry", "run-1"),
+        ("exit", None),
+        ("after_lifecycle", 1),
+    ]
+
+
+def test_pipeline_runs_legacy_after_wait_only_fires_for_terminal_results(monkeypatch) -> None:
+    legacy_results = []
+
+    class RunningClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-1",
+                "execution_status_stats": {"RUNNING": 1},
+            }
+
+    class TimeoutHooks(PipelineRunHooks):
+        def after_wait(self, result):
+            legacy_results.append(result)
+
+    manager = PipelineRunManager(client=RunningClient(), hooks=TimeoutHooks())
+    result = manager.wait_for_completion("run-1", max_wait=0, poll_interval=1)
+    assert result["timed_out"] is True
+    assert legacy_results == []
+
+    class EarlyExitHooks(TimeoutHooks):
+        def should_exit_early(self, poll, context):
+            return True
+
+    manager = PipelineRunManager(client=RunningClient(), hooks=EarlyExitHooks())
+    result = manager.wait_for_completion("run-1", max_wait=1, poll_interval=1)
+    assert result["early_exit"] is True
+    assert legacy_results == []
+
+    manager = PipelineRunManager(client=FakeClient(), hooks=TimeoutHooks())
+    result = manager.wait_for_completion("run-1", max_wait=1, poll_interval=1)
+    assert result["status"] == "SUCCEEDED"
+    assert len(legacy_results) == 1
+
+
+def test_pipeline_runs_run_pipeline_lifecycle_and_retry_hooks(tmp_path: Path) -> None:
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    events = []
+
+    class Hooks(PipelineRunHooks):
+        def around_run(self, context):
+            events.append(("around", context.attempt))
+            return nullcontext()
+
+        def before_run_lifecycle(self, context):
+            events.append(("before_lifecycle", context.attempt))
+
+        def after_poll(self, poll, context):
+            events.append(("poll", context.attempt, poll.status))
+            if context.attempt == 1:
+                raise PipelineRunError("fail first wait")
+
+        def should_cancel_previous_run(self, context, error, *, next_attempt):
+            events.append(("should_cancel", context.run_id, next_attempt))
+            return True
+
+        def before_retry(self, context, error, *, next_attempt):
+            events.append(("before_retry", context.run_id, next_attempt, str(error)))
+
+        def after_retry_submit(self, context):
+            events.append(("after_retry_submit", context.run_id, context.attempt))
+
+        def after_run_lifecycle(self, context, *, success, error=None):
+            events.append(("after_lifecycle", context.attempt, success, str(error) if error else None))
+
+    client = FakeClient()
+    manager = PipelineRunManager(client=client, hooks=Hooks())
+
+    result = manager.run_pipeline(
+        pipeline_path,
+        run_args={"required": "value"},
+        hydrate=False,
+        wait=True,
+        max_attempts=2,
+        poll_interval=1,
+    )
+
+    assert result["response"]["id"] == "run-1"
+    assert result["wait"]["status"] == "SUCCEEDED"
+    assert client.cancelled == ["run-1"]
+    assert events == [
+        ("before_lifecycle", 1),
+        ("around", 1),
+        ("poll", 1, "SUCCEEDED"),
+        ("should_cancel", "run-1", 2),
+        ("before_retry", "run-1", 2, "fail first wait"),
+        ("after_lifecycle", 1, False, "fail first wait"),
+        ("before_lifecycle", 2),
+        ("around", 2),
+        ("after_retry_submit", "run-1", 2),
+        ("poll", 2, "SUCCEEDED"),
+        ("after_lifecycle", 2, True, None),
+    ]
 
 
 def test_pipeline_run_status_uses_deterministic_precedence() -> None:
