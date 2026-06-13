@@ -22,6 +22,8 @@ import yaml
 
 from .logger import Logger, get_default_logger
 from .pipeline_hydrator import HydrationError, PipelineHydrator
+from .pipeline_run_details import get_graph_state_output, get_run_details_output
+from .pipeline_run_search import search_pipeline_runs
 from .utils import dump_yaml
 
 _TERMINAL_STATUSES = ("FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "SKIPPED", "SUCCEEDED")
@@ -697,13 +699,16 @@ class PipelineRunManager:
         *,
         include_annotations: bool = False,
         include_execution_state: bool = False,
+        include_implementations: bool = False,
+        execution_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.to_plain(
-            self.client.get_run_details(
-                run_id,
-                include_annotations=include_annotations,
-                include_execution_state=include_execution_state,
-            )
+        return get_run_details_output(
+            self.client,
+            run_id,
+            include_implementations=include_implementations,
+            include_annotations=include_annotations,
+            include_execution_state=include_execution_state,
+            execution_id=execution_id,
         )
 
     def cancel_run(self, run_id: str) -> dict[str, Any]:
@@ -711,6 +716,9 @@ class PipelineRunManager:
 
     def graph_state(self, execution_id: str) -> dict[str, Any]:
         return self.to_plain(self.client.executions_graph_execution_state(execution_id))
+
+    def graph_state_output(self, run_ids: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
+        return get_graph_state_output(self.client, run_ids, timeout=timeout)
 
     def logs(self, execution_id: str) -> dict[str, Any]:
         return self.to_plain(self.hooks.fetch_logs(self.client, execution_id))
@@ -732,6 +740,33 @@ class PipelineRunManager:
                 include_pipeline_names=include_pipeline_names,
                 include_execution_stats=include_execution_stats,
             )
+        )
+
+    def search_pipeline_runs(
+        self,
+        *,
+        name: str | None = None,
+        created_by: str | None = None,
+        annotations: dict[str, str | None] | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        local_time: bool = False,
+        query: dict[str, Any] | None = None,
+        limit: int = 10,
+        page_token: str | None = None,
+    ) -> dict[str, Any]:
+        return search_pipeline_runs(
+            client=self.client,
+            name=name,
+            created_by=created_by,
+            annotations=annotations,
+            start_date=start_date,
+            end_date=end_date,
+            local_time=local_time,
+            query=query,
+            limit=limit,
+            page_token=page_token,
+            logger=self.logger,
         )
 
     def annotations_list(self, run_id: str) -> dict[str, Any]:

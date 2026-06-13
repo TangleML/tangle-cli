@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 from typing import Annotated, Any
 
@@ -25,6 +26,7 @@ from .cli_options import (
     TokenOption,
 )
 from .logger import Logger, logger_for_log_type
+from .pipeline_run_search import normalize_query_input, parse_annotation
 from .pipeline_runs import (
     PipelineRunError,
     PipelineRunHooks,
@@ -180,6 +182,8 @@ def pipeline_runs_submit(
 def pipeline_runs_details(
     run_id: str | None = None,
     *,
+    execution_id: str | None = None,
+    include_implementations: bool | None = None,
     include_annotations: bool | None = None,
     include_execution_state: bool | None = None,
     base_url: BaseUrlOption = None,
@@ -192,6 +196,8 @@ def pipeline_runs_details(
     """Print run details, including root execution details."""
     specs = {
         "run_id": (run_id,),
+        "execution_id": (execution_id, None),
+        "include_implementations": (include_implementations, None),
         "include_annotations": (include_annotations, None),
         "include_execution_state": (include_execution_state, None),
         "log_type": (log_type, "console"),
@@ -205,6 +211,8 @@ def pipeline_runs_details(
             args.run_id,
             include_annotations=bool(args.include_annotations),
             include_execution_state=bool(args.include_execution_state),
+            include_implementations=bool(args.include_implementations),
+            execution_id=args.execution_id,
         ),
     )
 
@@ -340,9 +348,25 @@ def pipeline_runs_search(
     query: str | None = None,
     *,
     filter_query: str | None = None,
+    name: str | None = None,
+    created_by: str | None = None,
+    annotation: Annotated[
+        list[str] | None,
+        Parameter(help="Annotation filter as key or key=value. Repeat for multiple.", negative_iterable=()),
+    ] = None,
+    annotations_json: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    local_time: bool | None = None,
+    raw_query: Annotated[
+        str | None,
+        Parameter(name="--query", help="Raw filter_query JSON, plain or URL-encoded."),
+    ] = None,
+    limit: int | None = None,
     page_token: str | None = None,
     include_pipeline_names: bool | None = None,
     include_execution_stats: bool | None = None,
+    output: str | None = None,
     base_url: BaseUrlOption = None,
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
@@ -350,28 +374,82 @@ def pipeline_runs_search(
     config: ConfigOption = None,
     log_type: LogTypeOption = "console",
 ) -> None:
-    """Search/list pipeline runs using the Tangle API filters."""
+    """Search/list pipeline runs using simple or rich Tangle API filters."""
     specs = {
         "query": ("filter", query, None, False),
         "filter_query": (filter_query, None),
+        "name": (name, None),
+        "created_by": (created_by, None),
+        "annotation": (annotation, None),
+        "annotations_json": (annotations_json, None),
+        "start_date": (start_date, None),
+        "end_date": (end_date, None),
+        "local_time": (local_time, None),
+        "raw_query": (raw_query, None),
+        "limit": (limit, None),
         "page_token": (page_token, None),
         "include_pipeline_names": (include_pipeline_names, None),
         "include_execution_stats": (include_execution_stats, None),
+        "output": (output, "json"),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
-    _run_manager_action(
-        config,
-        base_url,
-        specs,
-        lambda manager, args: manager.search_runs(
-            filter=args.query,
-            filter_query=args.filter_query,
+
+    def action(manager: PipelineRunManager, args: ArgsContainer) -> object:
+        rich_search = any(
+            getattr(args, attr)
+            for attr in (
+                "name",
+                "created_by",
+                "annotation",
+                "annotations_json",
+                "start_date",
+                "end_date",
+                "raw_query",
+                "limit",
+            )
+        )
+        if not rich_search:
+            return manager.search_runs(
+                filter=args.query,
+                filter_query=args.filter_query,
+                page_token=args.page_token,
+                include_pipeline_names=args.include_pipeline_names,
+                include_execution_stats=args.include_execution_stats,
+            )
+
+        annotations: dict[str, str | None] | None = None
+        if args.annotation:
+            annotations = {}
+            for item in args.annotation:
+                key, value = parse_annotation(str(item))
+                annotations[key] = value
+        if args.annotations_json:
+            loaded = json.loads(args.annotations_json)
+            if not isinstance(loaded, dict):
+                raise PipelineRunError("--annotations-json must be a JSON object")
+            annotations = annotations or {}
+            annotations.update({str(key): value for key, value in loaded.items()})
+        parsed_query = normalize_query_input(args.raw_query) if args.raw_query else None
+        result = manager.search_pipeline_runs(
+            name=args.name,
+            created_by=args.created_by,
+            annotations=annotations,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            local_time=bool(args.local_time),
+            query=parsed_query,
+            limit=int(args.limit or 10),
             page_token=args.page_token,
-            include_pipeline_names=args.include_pipeline_names,
-            include_execution_stats=args.include_execution_stats,
-        ),
-    )
+        )
+        if "error" in result:
+            raise PipelineRunError(str(result["error"]))
+        if str(args.output or "json").lower() == "table":
+            print(result.get("cli_table", ""))
+            return None
+        return result
+
+    _run_manager_action(config, base_url, specs, action)
 
 
 @app.command(name="export")
