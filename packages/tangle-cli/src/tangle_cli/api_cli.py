@@ -56,7 +56,6 @@ from .api_schema import (
     _unwrap_nullable_schema,
 )
 from .api_transport import (
-    DEFAULT_API_URL,
     DEFAULT_TIMEOUT_SECONDS,
     _ambient_auth_env_present,
     _env_header_entries,
@@ -73,41 +72,16 @@ from .api_transport import (
     default_token,
     request_operation,
 )
+from .cli_helpers import api_arg_specs, load_args_or_exit
+from .cli_options import (
+    AuthHeaderOption,
+    BaseUrlOption,
+    ConfigOption,
+    HeaderOption,
+    TokenOption,
+)
 from .openapi.parser import load_openapi_schema as load_bundled_openapi_schema
 
-BaseUrlOption = Annotated[
-    str | None,
-    Parameter(
-        help=(
-            "Tangle API base URL. Defaults to TANGLE_API_URL, then "
-            f"{DEFAULT_API_URL}."
-        )
-    ),
-]
-TokenOption = Annotated[
-    str | None,
-    Parameter(help="Bearer token. Defaults to TANGLE_API_TOKEN."),
-]
-AuthHeaderOption = Annotated[
-    str | None,
-    Parameter(
-        help=(
-            "Authorization header value, e.g. 'Bearer TOKEN' or 'Basic BASE64'. "
-            "Defaults to TANGLE_API_AUTH_HEADER or TANGLE_AUTH_HEADER."
-        )
-    ),
-]
-HeaderOption = Annotated[
-    list[str] | None,
-    Parameter(
-        alias="-H",
-        help=(
-            "Custom request header as 'Name: value'. Repeat for multiple. "
-            "Applied after TANGLE_API_HEADERS."
-        ),
-        negative_iterable=(),
-    ),
-]
 BodyOption = Annotated[
     str | None,
     Parameter(help="JSON request body, or @path/to/file.json."),
@@ -123,32 +97,6 @@ SchemaSourceOption = Annotated[
         )
     ),
 ]
-ConfigOption = Annotated[
-    str | None,
-    Parameter(help="YAML/JSON config file providing command defaults."),
-]
-
-
-def _load_args(config: str | None, **kwargs: Any) -> list[ArgsContainer]:
-    try:
-        return ArgsContainer.load(config, **kwargs)
-    except ConfigFileError as exc:
-        raise SystemExit(f"Config error: {exc}") from exc
-
-
-def _common_api_arg_specs(
-    *,
-    base_url: str | None = None,
-    token: str | None = None,
-    auth_header: str | None = None,
-    header: list[str] | None = None,
-) -> dict[str, tuple[Any, ...]]:
-    return {
-        "base_url": (base_url, None),
-        "token": (token, None),
-        "auth_header": (auth_header, None),
-        "header": (header, None),
-    }
 
 
 def build_app(schema: dict[str, Any] | None = None) -> App:
@@ -215,9 +163,9 @@ def _register_refresh_command(api_app: App) -> None:
     ) -> None:
         """Fetch /openapi.json and update the local schema cache."""
 
-        for args in _load_args(
+        for args in load_args_or_exit(
             config,
-            **_common_api_arg_specs(
+            **api_arg_specs(
                 base_url=base_url,
                 token=token,
                 auth_header=auth_header,
@@ -256,7 +204,7 @@ def _register_reset_cache_command(api_app: App) -> None:
     def reset_cache(*, base_url: BaseUrlOption = None, config: ConfigOption = None) -> None:
         """Delete the cached live OpenAPI schema for a base URL."""
 
-        for args in _load_args(config, base_url=(base_url, None)):
+        for args in load_args_or_exit(config, base_url=(base_url, None)):
             normalized_base_url = (
                 _normalize_base_url(args.base_url) if args.base_url else default_base_url()
             )
@@ -455,14 +403,14 @@ def _operation_args_from_config(
     if operation.has_request_body:
         specs["body"] = (values.get("body"), None)
     specs.update(
-        _common_api_arg_specs(
+        api_arg_specs(
             base_url=values.get("base_url"),
             token=values.get("token"),
             auth_header=values.get("auth_header"),
             header=values.get("header"),
         )
     )
-    resolved = _load_args(config, **specs)
+    resolved = load_args_or_exit(config, **specs)
     for args in resolved:
         for parameter in operation.parameters:
             if parameter.required or parameter.default is None:
@@ -559,7 +507,7 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
             )
         return cached
 
-    cache_base_url = _auto_cache_base_url(configured_base_url, first_command, help_requested)
+    cache_base_url = _auto_cache_base_url(configured_base_url, help_requested)
     cached = load_cached_schema(cache_base_url) if cache_base_url else None
     try:
         official = load_bundled_openapi_schema()
@@ -588,25 +536,37 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
 
 def _auto_cache_base_url(
     configured_base_url: str | None,
-    first_command: str | None,
     help_requested: bool,
 ) -> str | None:
     if configured_base_url:
         return configured_base_url
-    if not _ambient_auth_env_present():
-        return default_base_url()
-    if help_requested:
+    if help_requested and _ambient_auth_env_present() and not os.environ.get("TANGLE_API_URL"):
         return None
-    if first_command is not None:
-        # Preserve the actionable transport guard for real generated command
-        # dispatch while avoiding an implicit localhost probe for help-only
-        # invocations with ambient credentials.
-        return default_base_url()
-    return None
+    return default_base_url()
 
 
 def _api_tail_requests_help(api_tail: list[str]) -> bool:
-    return any(arg in {"--help", "-h"} for arg in api_tail)
+    skip_next = False
+    options_with_values = {
+        "--base-url",
+        "--api-url",
+        "--token",
+        "--auth-header",
+        "--header",
+        "-H",
+        "--schema-source",
+        "--config",
+    }
+    for arg in api_tail:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in options_with_values:
+            skip_next = True
+            continue
+        if arg in {"--help", "-h"}:
+            return True
+    return False
 
 
 def _missing_official_schema_message() -> str:

@@ -7,7 +7,14 @@ from typing import Annotated
 
 from cyclopts import App, Parameter
 
-from .args_container import ArgsContainer, ConfigFileError
+from .cli_helpers import load_config_or_exit, optional_path
+from .cli_options import (
+    AuthHeaderOption,
+    BaseUrlOption,
+    ConfigOption,
+    HeaderOption,
+    TokenOption,
+)
 from .pipelines import (
     PipelineValidationError,
     generate_mermaid,
@@ -15,37 +22,6 @@ from .pipelines import (
     layout_pipeline_file,
     validate_pipeline_file,
 )
-
-BaseUrlOption = Annotated[
-    str | None,
-    Parameter(help="Tangle API base URL. Defaults to TANGLE_API_URL, then localhost."),
-]
-TokenOption = Annotated[
-    str | None,
-    Parameter(help="Bearer token. Defaults to TANGLE_API_TOKEN."),
-]
-AuthHeaderOption = Annotated[
-    str | None,
-    Parameter(
-        help=(
-            "Authorization header value, e.g. 'Bearer TOKEN' or 'Basic BASE64'. "
-            "Defaults to TANGLE_API_AUTH_HEADER or TANGLE_AUTH_HEADER."
-        )
-    ),
-]
-HeaderOption = Annotated[
-    list[str] | None,
-    Parameter(
-        name="--header",
-        alias="-H",
-        help="Custom request header as 'Name: value'. Repeat for multiple.",
-        negative_iterable=(),
-    ),
-]
-ConfigOption = Annotated[
-    str | None,
-    Parameter(help="YAML/JSON config file providing command defaults."),
-]
 
 app = App(
     name="pipelines",
@@ -75,36 +51,14 @@ def pipelines_diagram(pipeline_path: pathlib.Path) -> None:
     print(generate_mermaid(pipeline))
 
 
-def _load_config(config: str | None) -> dict[str, object]:
-    if config is None:
-        return {}
-    try:
-        configs = ArgsContainer._load_config_file(config)
-    except ConfigFileError as exc:
-        raise SystemExit(f"Config error: {exc}") from exc
-    return configs[0] if configs else {}
-
-
-def _config_value(config: dict[str, object], key: str) -> object | None:
-    return config.get(key) if key in config else None
-
-
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
-
-
-def _optional_path(value: pathlib.Path | str | object | None) -> pathlib.Path | None:
-    if isinstance(value, pathlib.Path):
-        return value
-    if isinstance(value, str):
-        return pathlib.Path(value)
-    return None
 
 
 def _header_entries(cli_header: list[str] | None, config: dict[str, object]) -> list[str] | None:
     if cli_header is not None:
         return cli_header
-    config_header = _config_value(config, "header")
+    config_header = config.get("header")
     if isinstance(config_header, list):
         return [str(entry) for entry in config_header]
     if isinstance(config_header, str):
@@ -154,26 +108,26 @@ def pipelines_hydrate(
 ) -> None:
     """Hydrate a local pipeline YAML file."""
 
-    config_values = _load_config(config)
-    config_base_url = _optional_str(_config_value(config_values, "base_url"))
+    config_values = load_config_or_exit(config)
+    config_base_url = _optional_str(config_values.get("base_url"))
     resolved_base_url = base_url if base_url is not None else config_base_url
     include_env_credentials = not (base_url is None and config_base_url is not None)
-    resolved_var = var if var is not None else _config_value(config_values, "var")
+    resolved_var = var if var is not None else config_values.get("var")
     resolved_token = token
     if resolved_token is None:
-        resolved_token = _optional_str(_config_value(config_values, "token"))
+        resolved_token = _optional_str(config_values.get("token"))
 
     try:
         result = hydrate_pipeline_file(
             pipeline_path,
-            output=output or _optional_path(_config_value(config_values, "output")),
+            output=output or optional_path(config_values.get("output")),
             overrides=_parse_vars(resolved_var),
             base_url=resolved_base_url,
             token=resolved_token,
             auth_header=(
                 auth_header
                 if auth_header is not None
-                else _optional_str(_config_value(config_values, "auth_header"))
+                else _optional_str(config_values.get("auth_header"))
             ),
             header=_header_entries(header, config_values),
             include_env_credentials=include_env_credentials,

@@ -60,6 +60,59 @@ def test_generated_graph_state_response_extensions_work_at_runtime() -> None:
 
 
 
+@pytest.mark.parametrize("value", [None, "0", "false"])
+def test_static_client_does_not_log_bodies_when_verbose_false(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+) -> None:
+    if value is None:
+        monkeypatch.delenv("TANGLE_VERBOSE", raising=False)
+    else:
+        monkeypatch.setenv("TANGLE_VERBOSE", value)
+    logger = CaptureLogger()
+    session = FakeSession([response({"token": "response-secret"})])
+    client = TangleApiClient("https://api.test", session=session, logger=logger)
+
+    client._make_request(
+        "POST",
+        "/api/pipeline_runs/",
+        json_data={"token": "request-secret", "name": "demo"},
+    )
+
+    assert logger.get_logs() is None
+
+
+def test_static_client_verbose_env_logs_redacted_exchange(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TANGLE_VERBOSE", "1")
+    logger = CaptureLogger()
+    session = FakeSession([response({"id": "run-1", "token": "response-secret"})])
+    client = TangleApiClient(
+        "https://api.test",
+        session=session,
+        logger=logger,
+        auth_header="Bearer request-secret",
+        header=["Cloud-Auth: cloud-secret", "X-Api-Key: api-secret"],
+    )
+
+    client._make_request(
+        "POST",
+        "/api/pipeline_runs/",
+        json_data={"name": "demo", "token": "request-secret"},
+    )
+
+    logs = logger.get_logs() or ""
+    assert "[tangle-api] request: POST https://api.test/api/pipeline_runs/" in logs
+    assert "request body" in logs
+    assert "response body" in logs
+    assert "demo" in logs
+    assert "run-1" in logs
+    assert "request-secret" not in logs
+    assert "response-secret" not in logs
+    assert "cloud-secret" not in logs
+    assert "api-secret" not in logs
+    assert "<redacted>" in logs
+
+
 def test_public_static_client_import_and_generated_operation() -> None:
     session = FakeSession([
         response({"id": "run-1", "root_execution_id": "exec-1", "created_by": "alice"})

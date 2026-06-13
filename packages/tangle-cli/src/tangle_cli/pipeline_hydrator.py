@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
-from jinja2 import Environment, FileSystemLoader
 
 from . import utils
 from .api_transport import DEFAULT_TIMEOUT_SECONDS
@@ -89,6 +88,8 @@ def render_template(
 
     Ported from TD's ``render_template`` helper, including ``include_raw``.
     """
+
+    from jinja2 import Environment, FileSystemLoader
 
     template_dir = template_path.parent
     template_name = template_path.name
