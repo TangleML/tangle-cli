@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Annotated, Any, Callable
 
 from cyclopts import App, Parameter
@@ -114,8 +115,10 @@ def _secret_mutation_specs(
 
 
 def _confirm_delete(secret_name: str) -> None:
+    prompt = f"Are you sure you want to delete secret '{secret_name}'? [y/N]: "
+    print(prompt, end="", file=sys.stderr, flush=True)
     try:
-        response = input(f"Are you sure you want to delete secret '{secret_name}'? [y/N]: ")
+        response = input()
     except EOFError as exc:  # pragma: no cover - defensive for non-interactive shells
         raise SystemExit("Delete cancelled") from exc
     if response.strip().lower() not in {"y", "yes"}:
