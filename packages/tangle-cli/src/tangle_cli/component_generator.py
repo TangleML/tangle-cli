@@ -7,7 +7,11 @@ from typing import Any
 
 import yaml
 
-DEFAULT_CONTAINER_IMAGE = "python:3.12"
+# Pin the default runtime image by digest so generated component YAML is reproducible.
+# The tag documents the Python line; the digest pins the linux/amd64 image
+# used by Tangle execution. Authors can still pass --image to choose a
+# different runtime explicitly.
+DEFAULT_CONTAINER_IMAGE = "python:3.12@sha256:b8163b64b37051de76577219aa4d5e9b95dc12a2e6c8cb438793c7adb3026016"
 
 
 def find_dependencies_file(python_file: Path) -> Path | None:

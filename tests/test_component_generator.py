@@ -10,6 +10,7 @@ import yaml
 from tangle_cli import cli
 from tangle_cli.component_from_func import generate_component_yaml
 from tangle_cli.component_generator import (
+    DEFAULT_CONTAINER_IMAGE,
     determine_output_path,
     find_dependencies_file,
     regenerate_yaml,
@@ -140,6 +141,18 @@ def test_complete_generation_flow(monkeypatch, tmp_path: Path, use_cli: bool):
         assert regenerate_yaml(py_file, image="test-image:latest") is True
 
     _assert_yaml_matches(yaml_file, SNAPSHOTS_DIR / "complete_generation.expected.yaml")
+
+
+def test_regenerate_yaml_default_image_is_pinned(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("tangle_cli.utils._fill_from_ci_env", lambda info: None)
+    py_file = tmp_path / "test_component.py"
+    py_file.write_text(DUMMY_PYTHON_COMPONENT, encoding="utf-8")
+
+    assert regenerate_yaml(py_file) is True
+
+    generated = yaml.safe_load((tmp_path / "test-component.yaml").read_text(encoding="utf-8"))
+    assert generated["implementation"]["container"]["image"] == DEFAULT_CONTAINER_IMAGE
+    assert "@sha256:" in generated["implementation"]["container"]["image"]
 
 
 def test_generate_component_yaml_default_emits_generation_annotations_and_oss_paths(
