@@ -19,7 +19,7 @@ from typing import Any, Mapping
 import yaml
 
 from .logger import Logger, get_default_logger
-from .pipeline_hydrator import PipelineHydrator
+from .pipeline_hydrator import HydrationError, PipelineHydrator
 from .utils import dump_yaml
 
 _TERMINAL_STATUSES = ("FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "SKIPPED", "SUCCEEDED")
@@ -45,6 +45,8 @@ class PipelineRunHooks:
     """
 
     logger: Logger = field(default_factory=get_default_logger)
+    trusted_python_sources: list[str] = field(default_factory=list)
+    allow_all_hydration: bool = False
 
     def read_pipeline_yaml(self, pipeline_path: str | Path) -> dict[str, Any]:
         path_text = str(pipeline_path)
@@ -70,8 +72,13 @@ class PipelineRunHooks:
             client=client,
             resolution_overrides=resolution_overrides,
             logger=self.logger,
+            trusted_python_sources=self.trusted_python_sources,
+            allow_all_hydration=self.allow_all_hydration,
         )
-        return hydrator.hydrate_file(pipeline_path).data
+        try:
+            return hydrator.hydrate_file(pipeline_path).data
+        except HydrationError as exc:
+            raise PipelineRunError(str(exc)) from exc
 
     def prepare_run_arguments(
         self,

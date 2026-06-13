@@ -38,6 +38,33 @@ annotations_app = App(name="annotations", help="Work with pipeline-run annotatio
 app.command(annotations_app)
 
 
+def _trusted_hydration_config(args: ArgsContainer) -> dict[str, Any]:
+    config = getattr(args, "_config", {}).get("trusted_hydration", {})
+    return config if isinstance(config, dict) else {}
+
+
+def _trusted_sources_for_args(args: ArgsContainer) -> list[str]:
+    sources: list[str] = []
+    config_sources = _trusted_hydration_config(args).get("trusted_python_sources", [])
+    if isinstance(config_sources, str):
+        sources.append(config_sources)
+    elif isinstance(config_sources, list):
+        sources.extend(str(source) for source in config_sources)
+    cli_sources = getattr(args, "trusted_source", None)
+    if isinstance(cli_sources, str):
+        sources.append(cli_sources)
+    elif isinstance(cli_sources, list):
+        sources.extend(str(source) for source in cli_sources)
+    return [source for source in sources if source]
+
+
+def _allow_all_hydration_for_args(args: ArgsContainer) -> bool:
+    if bool(getattr(args, "trusted_hydration_cli", False)):
+        return True
+    config = _trusted_hydration_config(args)
+    return bool(config.get("allow_all", False))
+
+
 def _manager(args: ArgsContainer, *, cli_base_url: str | None, logger: Logger) -> PipelineRunManager:
     client = LazyTangleApiClient(
         base_url=args.base_url,
@@ -47,7 +74,15 @@ def _manager(args: ArgsContainer, *, cli_base_url: str | None, logger: Logger) -
         include_env_credentials=include_env_credentials_for_args(args, cli_base_url),
         command_name="pipeline-run commands",
     )
-    return PipelineRunManager(client=client, hooks=PipelineRunHooks(logger=logger), logger=logger)
+    return PipelineRunManager(
+        client=client,
+        hooks=PipelineRunHooks(
+            logger=logger,
+            trusted_python_sources=_trusted_sources_for_args(args),
+            allow_all_hydration=_allow_all_hydration_for_args(args),
+        ),
+        logger=logger,
+    )
 
 
 def _run_manager_action(config: str | None, cli_base_url: str | None, specs: dict[str, tuple[Any, ...]], fn):
@@ -89,6 +124,21 @@ def pipeline_runs_submit(
         str | None,
         Parameter(help="Downstream extension point; unsupported by the OSS default hooks."),
     ] = None,
+    trusted_source: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--trusted-source",
+            help="Trusted local_from_python source root or glob. Repeat for multiple.",
+            negative_iterable=(),
+        ),
+    ] = None,
+    trusted_hydration: Annotated[
+        bool | None,
+        Parameter(
+            name="--trusted-hydration",
+            help="Allow all local_from_python execution during hydration for trusted inputs.",
+        ),
+    ] = None,
     base_url: BaseUrlOption = None,
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
@@ -106,6 +156,8 @@ def pipeline_runs_submit(
         "hydrate": (hydrate, True),
         "dry_run": (dry_run, None),
         "run_as": (run_as, None),
+        "trusted_source": (trusted_source, None),
+        "trusted_hydration_cli": ("trusted_hydration_cli", trusted_hydration, None, False),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
