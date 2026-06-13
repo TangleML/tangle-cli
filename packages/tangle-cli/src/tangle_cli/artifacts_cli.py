@@ -69,8 +69,6 @@ def artifacts_get(
         ),
     )
 
-    from .artifacts import _serialize_artifacts, get_artifacts
-
     results: list[dict[str, Any]] = []
     for args in all_args:
         logger, finalize_logs = logger_for_log_type(args.log_type)
@@ -83,6 +81,10 @@ def artifacts_get(
                 include_env_credentials=include_env_credentials_for_args(args, base_url),
                 command_name="artifact commands",
             )
+            if require_available := getattr(client, "require_available", None):
+                require_available()
+            from .artifacts import _serialize_artifacts, get_artifacts
+
             try:
                 artifacts = get_artifacts(args.run_id, args.query, client=client)
             except RuntimeError as exc:

@@ -129,6 +129,42 @@ def test_sdk_artifacts_get_cli_base_url_keeps_env_credentials(monkeypatch, tmp_p
     assert client_calls[-1]["include_env_credentials"] is True
 
 
+def test_sdk_artifacts_get_missing_native_api_uses_friendly_error(monkeypatch, tmp_path) -> None:
+    config = tmp_path / "artifacts.yaml"
+    config.write_text(
+        "run_id: run-config\nquery: '{\"artifact_ids\": [\"artifact-config\"]}'\n",
+        encoding="utf-8",
+    )
+    import tangle_cli
+
+    for attr in ("artifacts", "client", "models"):
+        if hasattr(tangle_cli, attr):
+            monkeypatch.delattr(tangle_cli, attr)
+    for name in list(sys.modules):
+        if name in {"tangle_cli.artifacts", "tangle_cli.client", "tangle_cli.models"} or name.startswith("tangle_api"):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+
+    original_import = builtins.__import__
+
+    def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "tangle_api" or name.startswith("tangle_api."):
+            raise ModuleNotFoundError("No module named 'tangle_api'", name="tangle_api")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    app = cli.build_app()
+
+    try:
+        app(["sdk", "artifacts", "get", "--config", str(config)])
+    except SystemExit as exc:
+        message = str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("expected missing native API to fail")
+
+    assert "Native generated Tangle API bindings are required for artifact commands" in message
+    assert "Install tangle-cli[native]" in message
+
+
 def test_sdk_artifacts_get_cli_requires_query(tmp_path) -> None:
     config = tmp_path / "artifacts.yaml"
     config.write_text("run_id: run-config\n", encoding="utf-8")

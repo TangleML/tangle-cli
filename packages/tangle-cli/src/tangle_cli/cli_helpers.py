@@ -96,6 +96,11 @@ class LazyTangleApiClient:
             self._client = TangleApiClient(**kwargs)
         return self._client
 
+    def require_available(self) -> None:
+        """Materialize the client so CLI commands fail before native helper imports."""
+
+        self._get_client()
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._get_client(), name)
 

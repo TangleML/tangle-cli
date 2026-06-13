@@ -72,6 +72,8 @@ def published_components_search(
                 include_env_credentials=include_env_credentials_for_args(args, base_url),
                 command_name="published-component commands",
             )
+            if require_available := getattr(client, "require_available", None):
+                require_available()
             from .component_inspector import search_components
 
             print_json(
@@ -136,6 +138,8 @@ def published_components_inspect(
                 include_env_credentials=include_env_credentials_for_args(args, base_url),
                 command_name="published-component commands",
             )
+            if require_available := getattr(client, "require_available", None):
+                require_available()
             if args.digest:
                 from .component_inspector import inspect_by_digest
 
@@ -193,6 +197,8 @@ def published_components_library(
                 include_env_credentials=include_env_credentials_for_args(args, base_url),
                 command_name="published-component commands",
             )
+            if require_available := getattr(client, "require_available", None):
+                require_available()
             from .component_inspector import get_standard_library
 
             print_json(get_standard_library(client))

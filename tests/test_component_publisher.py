@@ -16,6 +16,7 @@ from tangle_cli.component_publisher import (
     perform_version_check,
     publish_component_to_tangle,
 )
+from tangle_cli.logger import CaptureLogger, NullLogger
 
 
 @dataclass
@@ -177,6 +178,39 @@ def test_version_check_skips_unchanged_owner_scoped_version() -> None:
     assert result.outcome == ProcessingOutcome.SKIP
     assert result.latest_version == "1.0"
     assert "unchanged" in (result.reason or "")
+
+
+def test_version_check_progress_uses_logger_not_tangle_verbose(monkeypatch, capsys) -> None:
+    spec = ComponentSpec.from_yaml("name: demo\nmetadata:\n  annotations:\n    version: '1.0'\n")
+    client = FakeClient()
+    client.existing = [ExistingComponent("sha256:old")]
+    client.component_versions = {"sha256:old": "1.0"}
+
+    monkeypatch.setenv("TANGLE_VERBOSE", "1")
+    result = perform_version_check(
+        spec=spec,
+        dry_run=False,
+        client=client,
+        logger=NullLogger(),
+    )
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    assert capsys.readouterr().err == ""
+
+    monkeypatch.setenv("TANGLE_VERBOSE", "0")
+    capture = CaptureLogger()
+    result = perform_version_check(
+        spec=spec,
+        dry_run=False,
+        client=client,
+        logger=capture,
+    )
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    logs = capture.get_logs() or ""
+    assert "Local version: 1.0" in logs
+    assert "Remote version: 1.0" in logs
+    assert "Skipping: Version 1.0 unchanged" in logs
 
 
 def test_successful_publish_deprecates_owner_scoped_old_versions(tmp_path: Path) -> None:

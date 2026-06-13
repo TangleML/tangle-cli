@@ -1,4 +1,6 @@
+import builtins
 import json
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import ANY
@@ -349,6 +351,64 @@ def test_published_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_p
             "logger": ANY,
         }
     ]
+
+
+def test_published_components_missing_native_api_uses_friendly_error(monkeypatch):
+    import tangle_cli
+
+    for attr in ("component_inspector", "client", "models"):
+        if hasattr(tangle_cli, attr):
+            monkeypatch.delattr(tangle_cli, attr)
+    for name in list(sys.modules):
+        if name in {
+            "tangle_cli.component_inspector",
+            "tangle_cli.client",
+            "tangle_cli.models",
+        } or name.startswith("tangle_api"):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+
+    original_import = builtins.__import__
+
+    def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "tangle_api" or name.startswith("tangle_api."):
+            raise ModuleNotFoundError("No module named 'tangle_api'", name="tangle_api")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    app = cli.build_app()
+
+    for command in (
+        ["sdk", "published-components", "search", "demo"],
+        ["sdk", "published-components", "inspect", "demo"],
+        ["sdk", "published-components", "library"],
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            app(command)
+        message = str(exc_info.value)
+        assert "Native generated Tangle API bindings are required for published-component commands" in message
+        assert "Install tangle-cli[native]" in message
+
+
+def test_published_components_publish_log_type_none_suppresses_progress(tmp_path: Path, capsys):
+    component_path = _write_component(tmp_path / "component.yaml", name="Quiet")
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "published-components",
+            "publish",
+            str(component_path),
+            "--dry-run",
+            "--log-type",
+            "none",
+        ],
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["status"] == "success"
+    assert captured.err == ""
 
 
 def test_components_and_published_components_help_reflect_api_split(capsys):
