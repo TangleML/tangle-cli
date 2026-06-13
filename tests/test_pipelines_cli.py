@@ -67,6 +67,7 @@ def test_sdk_help_includes_pipelines(capsys):
     assert "components" in output
     assert "pipelines" in output
     assert "published-components" in output
+    assert "secrets" in output
 
 
 def test_sdk_pipelines_help_lists_local_commands(capsys):
