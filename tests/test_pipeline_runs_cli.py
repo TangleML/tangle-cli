@@ -41,6 +41,7 @@ def _write_pipeline(path: Path) -> Path:
 
 class FakeClient:
     def __init__(self) -> None:
+        self.base_url = "https://tangle.example"
         self.created: list[Any] = []
         self.cancelled: list[str] = []
         self.annotation_sets: list[tuple[str, str, Any]] = []
@@ -77,6 +78,9 @@ class FakeClient:
     def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
         self.list_calls.append(kwargs)
         return {"pipeline_runs": [{"id": "run-1"}], "next_page_token": None}
+
+    def users_me(self) -> SimpleNamespace:
+        return SimpleNamespace(id="alice@example.com")
 
     def pipeline_runs_annotations(self, id: str) -> dict[str, Any]:
         return {"owner": "alice", "id": id}
@@ -471,6 +475,137 @@ def test_pipeline_runs_commands_call_generated_operations(monkeypatch, tmp_path:
     output = tmp_path / "export.yaml"
     run_app(app, ["sdk", "pipeline-runs", "export", "run-1", "--output", str(output)])
     assert yaml.safe_load(output.read_text(encoding="utf-8"))["name"] == "Exported"
+
+
+def test_pipeline_runs_rich_search_builds_filters_and_formats_pages() -> None:
+    class SearchClient(FakeClient):
+        def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
+            self.list_calls.append(kwargs)
+            if kwargs.get("page_token") is None:
+                return {
+                    "pipeline_runs": [
+                        {
+                            "id": "run-abcdef123456",
+                            "pipeline_name": "Orders Pipeline",
+                            "created_by": "alice@example.com",
+                            "created_at": "2026-06-13T12:34:56Z",
+                        }
+                    ],
+                    "next_page_token": "page-2",
+                }
+            return {
+                "pipeline_runs": [
+                    {
+                        "id": "run-fedcba654321",
+                        "pipeline_name": "Orders Pipeline Retry",
+                        "created_by": "alice@example.com",
+                        "created_at": "2026-06-13T13:34:56Z",
+                    }
+                ],
+                "next_page_token": None,
+            }
+
+    client = SearchClient()
+    manager = PipelineRunManager(client=client)
+
+    result = manager.search_pipeline_runs(
+        name="Orders",
+        created_by="me",
+        annotations={"team": "search", "debug": None},
+        start_date="2026-06-13T00:00:00Z",
+        end_date="2026-06-14T00:00:00Z",
+        limit=2,
+    )
+
+    assert result["count"] == 2
+    assert result["runs"][0]["run_url"] == "https://tangle.example/runs/run-abcdef123456"
+    assert result["pages"][0]["next_page_token"] == "page-2"
+    assert "Pipeline Run Search Results" in result["cli_table"]
+    filter_query = json.loads(client.list_calls[0]["filter_query"])
+    assert filter_query == {
+        "and": [
+            {"value_contains": {"key": "system/pipeline_run.name", "value_substring": "Orders"}},
+            {"value_equals": {"key": "system/pipeline_run.created_by", "value": "alice@example.com"}},
+            {"value_contains": {"key": "team", "value_substring": "search"}},
+            {"key_exists": {"key": "debug"}},
+            {
+                "time_range": {
+                    "key": "system/pipeline_run.date.created_at",
+                    "start_time": "2026-06-13T00:00:00Z",
+                    "end_time": "2026-06-14T00:00:00Z",
+                }
+            },
+        ]
+    }
+    assert client.list_calls[0]["include_pipeline_names"] is True
+    assert client.list_calls[1]["page_token"] == "page-2"
+
+
+def test_pipeline_runs_search_cli_table_output(monkeypatch, capsys) -> None:
+    class SearchClient(FakeClient):
+        def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
+            self.list_calls.append(kwargs)
+            return {
+                "pipeline_runs": [
+                    {
+                        "id": "run-1",
+                        "pipeline_name": "Demo",
+                        "created_by": "alice@example.com",
+                        "created_at": "2026-06-13T12:34:56Z",
+                    }
+                ],
+                "next_page_token": None,
+            }
+
+    fake_client = SearchClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "search",
+            "--name",
+            "Demo",
+            "--annotation",
+            "team=search",
+            "--output",
+            "table",
+        ],
+    )
+
+    output = capsys.readouterr().out
+    assert "Pipeline Run Search Results" in output
+    assert "https://tangle.example/runs/run-1" in output
+    assert json.loads(fake_client.list_calls[0]["filter_query"])["and"][0] == {
+        "value_contains": {"key": "system/pipeline_run.name", "value_substring": "Demo"}
+    }
+
+
+def test_pipeline_runs_details_and_graph_state_helpers() -> None:
+    manager = PipelineRunManager(client=FakeClient())
+
+    details = manager.get_run_details("run-1", include_annotations=True, include_execution_state=True)
+    assert details == {"run": {"id": "run-1"}, "kwargs": {
+        "include_annotations": True,
+        "include_execution_state": True,
+    }}
+
+    graph = manager.graph_state_output(["run-1"], timeout=1)
+    assert graph == {
+        "results": [
+            {
+                "run_id": "run-1",
+                "root_execution_id": "exec-1",
+                "status_totals": None,
+                "failed_execution_ids": None,
+                "per_execution": None,
+                "error": None,
+            }
+        ]
+    }
 
 
 def _write_submit_local_from_python_pipeline(
