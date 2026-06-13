@@ -249,24 +249,52 @@ def test_sdk_secrets_update_rejects_missing_value() -> None:
     assert "either --value or --from-env is required" in str(exc_info.value)
 
 
-def test_sdk_secrets_delete_prompts_unless_forced(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(builtins, "input", lambda prompt: "n")
+def test_sdk_secrets_delete_prompts_unless_forced(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(builtins, "input", lambda: "n")
     app = cli.build_app()
 
     with pytest.raises(SystemExit) as exc_info:
         app(["sdk", "secrets", "delete", "API_TOKEN"])
 
+    captured = capsys.readouterr()
     assert "Delete cancelled" in str(exc_info.value)
+    assert "Are you sure you want to delete secret 'API_TOKEN'? [y/N]: " in captured.err
+    assert "Are you sure" not in captured.out
     assert FakeLazyTangleApiClient.instances[0].calls == []
 
 
-def test_sdk_secrets_delete_force_calls_generated_operation(capsys: pytest.CaptureFixture[str]) -> None:
+def test_sdk_secrets_delete_confirmed_prompt_goes_to_stderr_and_stdout_is_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(builtins, "input", lambda: "yes")
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "secrets", "delete", "API_TOKEN"])
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result == {"status": "success", "action": "deleted", "secret_name": "API_TOKEN"}
+    assert "Are you sure you want to delete secret 'API_TOKEN'? [y/N]: " in captured.err
+    assert "Are you sure" not in captured.out
+    assert FakeLazyTangleApiClient.instances[0].calls == [
+        {"method": "secrets_delete", "secret_name": "API_TOKEN"}
+    ]
+
+
+def test_sdk_secrets_delete_force_calls_generated_operation_without_prompt(capsys: pytest.CaptureFixture[str]) -> None:
     app = cli.build_app()
 
     run_app(app, ["sdk", "secrets", "delete", "API_TOKEN", "--force"])
 
-    result = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
     assert result == {"status": "success", "action": "deleted", "secret_name": "API_TOKEN"}
+    assert "Are you sure" not in captured.out
+    assert "Are you sure" not in captured.err
     assert FakeLazyTangleApiClient.instances[0].calls == [
         {"method": "secrets_delete", "secret_name": "API_TOKEN"}
     ]
