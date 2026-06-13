@@ -472,6 +472,26 @@ def test_pipeline_runs_commands_call_generated_operations(monkeypatch, tmp_path:
     assert yaml.safe_load(output.read_text(encoding="utf-8"))["name"] == "Exported"
 
 
+def test_pipeline_run_status_uses_deterministic_precedence() -> None:
+    run = {
+        "execution_status_stats": {
+            "QUEUED": 3,
+            "PENDING": 2,
+            "RUNNING": 1,
+        }
+    }
+    assert PipelineRunManager.status_from_run(run) == "RUNNING"
+
+    terminal_run = {
+        "execution_status_stats": {
+            "SUCCEEDED": 3,
+            "SKIPPED": 2,
+            "FAILED": 1,
+        }
+    }
+    assert PipelineRunManager.status_from_run(terminal_run) == "FAILED"
+
+
 def test_pipeline_runs_wait_is_bounded_and_testable(monkeypatch):
     fake_client = FakeClient()
     manager = PipelineRunManager(client=fake_client)

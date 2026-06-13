@@ -22,8 +22,8 @@ from .logger import Logger, get_default_logger
 from .pipeline_hydrator import PipelineHydrator
 from .utils import dump_yaml
 
-_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED", "CANCELED", "SYSTEM_ERROR", "SKIPPED"}
-_ACTIVE_STATUSES = {"RUNNING", "PENDING", "QUEUED", "CANCELLING", "CANCELING"}
+_TERMINAL_STATUSES = ("FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "SKIPPED", "SUCCEEDED")
+_ACTIVE_STATUSES = ("RUNNING", "CANCELLING", "CANCELING", "PENDING", "QUEUED")
 
 
 class PipelineRunError(RuntimeError):
