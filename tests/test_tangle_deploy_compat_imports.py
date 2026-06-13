@@ -31,6 +31,13 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
         get_artifacts,
     )
     from tangle_cli.module_bundler import ModuleBundler
+    from tangle_cli.secrets import (
+        _resolve_secret_value,
+        create_secret,
+        delete_secret,
+        list_secrets,
+        update_secret,
+    )
     from tangle_cli.version_manager import bump_version
     from tangle_cli.component_inspector import (
         get_standard_library,
@@ -133,6 +140,11 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     assert callable(_collect_execution_artifacts)
     assert callable(_serialize_artifacts)
     assert callable(get_artifacts)
+    assert callable(_resolve_secret_value)
+    assert callable(list_secrets)
+    assert callable(create_secret)
+    assert callable(update_secret)
+    assert callable(delete_secret)
     assert callable(get_standard_library)
     assert callable(inspect_by_digest)
     assert callable(inspect_by_name)

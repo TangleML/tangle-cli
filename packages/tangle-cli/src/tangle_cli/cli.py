@@ -6,6 +6,7 @@ from . import components_cli
 from . import pipeline_runs_cli
 from . import pipelines_cli
 from . import published_components_cli
+from . import secrets_cli
 
 
 def build_sdk_app() -> App:
@@ -20,6 +21,7 @@ def build_sdk_app() -> App:
     sdk_app.command(pipelines_cli.app)
     sdk_app.command(pipeline_runs_cli.app)
     sdk_app.command(published_components_cli.app)
+    sdk_app.command(secrets_cli.app)
     return sdk_app
 
 
