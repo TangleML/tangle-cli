@@ -879,7 +879,7 @@ def test_generate_operations_request_body_schema_override_preserves_raw_body(mon
     assert client.calls[0][1]["json_data"] is payload
 
 
-def test_generate_operations_without_request_body_override_keeps_body_kwargs(tmp_path) -> None:
+def test_generate_operations_without_request_body_override_omits_unset_optional_body_kwargs(monkeypatch, tmp_path) -> None:
     openapi = tmp_path / "openapi.json"
     out = tmp_path / "normal_body_api"
     openapi.write_text(
@@ -894,7 +894,10 @@ def test_generate_operations_without_request_body_override_keeps_body_kwargs(tmp
                                 "application/json": {
                                     "schema": {
                                         "type": "object",
-                                        "properties": {"query": {"type": "string"}},
+                                        "properties": {
+                                            "query": {"type": "string"},
+                                            "limit": {"type": "integer"},
+                                        },
                                     }
                                 }
                             }
@@ -910,9 +913,84 @@ def test_generate_operations_without_request_body_override_keeps_body_kwargs(tmp
     codegen.generate(openapi, out)
 
     operations = (out / "operations.py").read_text(encoding="utf-8")
-    assert "def search_create(self, query: Any = None)" in operations
-    assert "json_data={'query': query}" in operations
+    assert "def search_create(self," in operations
+    assert "query: Any = None" in operations
+    assert "limit: Any = None" in operations
+    assert "json_data={key: value for key, value in {'limit': limit, 'query': query}.items() if value is not None}" in operations
     assert "body: dict[str, Any] | None" not in operations
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    generated_operations = importlib.import_module("normal_body_api.operations")
+
+    class Client(generated_operations.GeneratedTangleApiOperations):
+        def __init__(self) -> None:
+            self.calls = []
+
+        def _request_json(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return {"ok": True}
+
+    client = Client()
+    client.search_create(query="widgets")
+    client.search_create()
+
+    assert client.calls[0][1]["json_data"] == {"query": "widgets"}
+    assert client.calls[1][1]["json_data"] == {}
+
+
+def test_generate_operations_preserves_required_body_kwargs(monkeypatch, tmp_path) -> None:
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "required_body_api"
+    openapi.write_text(
+        json.dumps({
+            "openapi": "3.1.0",
+            "paths": {
+                "/api/secrets": {
+                    "post": {
+                        "operationId": "create_secret",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["secret_value"],
+                                        "properties": {
+                                            "secret_value": {"type": "string"},
+                                            "description": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            },
+            "components": {"schemas": {}},
+        }),
+        encoding="utf-8",
+    )
+
+    codegen.generate(openapi, out)
+
+    operations = (out / "operations.py").read_text(encoding="utf-8")
+    assert "def secrets_create(self, secret_value: Any, description: Any = None)" in operations
+    assert "json_data={**{'secret_value': secret_value}, **{key: value for key, value in {'description': description}.items() if value is not None}}" in operations
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    generated_operations = importlib.import_module("required_body_api.operations")
+
+    class Client(generated_operations.GeneratedTangleApiOperations):
+        def __init__(self) -> None:
+            self.calls = []
+
+        def _request_json(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return {"ok": True}
+
+    client = Client()
+    client.secrets_create("secret")
+
+    assert client.calls[0][1]["json_data"] == {"secret_value": "secret"}
 
 
 def test_codegen_main_accepts_request_body_schema_file(monkeypatch, tmp_path) -> None:

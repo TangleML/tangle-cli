@@ -69,7 +69,7 @@ def test_published_components_publish_cli_wiring_and_config_precedence(monkeypat
         raise AssertionError("dry-run publish must not create an API client")
 
     FakePublisher.instances = []
-    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
 
     app = cli.build_app()
@@ -122,7 +122,7 @@ def test_published_components_publish_config_base_url_suppresses_env_credentials
         client_calls.append(kwargs)
         return fake_client
 
-    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
 
     app = cli.build_app()
@@ -158,7 +158,7 @@ def test_published_components_publish_cli_base_url_keeps_env_credentials(monkeyp
         client_calls.append(kwargs)
         return object()
 
-    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
 
     app = cli.build_app()
@@ -254,7 +254,7 @@ def test_published_components_publish_config_array_uses_per_entry_controls(monke
         client_calls.append(kwargs)
         return fake_client
 
-    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "ComponentPublisher", FakePublisher)
 
     app = cli.build_app()
@@ -321,7 +321,7 @@ def test_published_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_p
         deprecate_calls.append({"client": client, "digest": digest, **kwargs})
         return {"success": True, "digest": digest, "superseded_by": kwargs.get("superseded_by")}
 
-    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
     monkeypatch.setattr(published_components_cli, "deprecate_component", fake_deprecate_component)
 
     app = cli.build_app()

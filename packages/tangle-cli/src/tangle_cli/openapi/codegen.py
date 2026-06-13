@@ -617,7 +617,7 @@ def _param_signature(
     has_request_body: bool,
     *,
     raw_body_override: bool = False,
-) -> tuple[str, list[str], list[str], list[str], bool]:
+) -> tuple[str, list[str], list[str], list[str], set[str], bool]:
     required: list[Any] = []
     optional: list[Any] = []
     for parameter in parameters:
@@ -628,6 +628,7 @@ def _param_signature(
     path_names: list[str] = []
     query_names: list[str] = []
     body_names: list[str] = []
+    required_body_names: set[str] = set()
     for parameter in ordered:
         name = _safe_identifier(parameter.local_name)
         if name in seen:
@@ -643,17 +644,33 @@ def _param_signature(
             query_names.append(name)
         elif parameter.location == "body":
             body_names.append(name)
+            if parameter.required:
+                required_body_names.add(name)
     include_body = has_request_body and not body_names
     if include_body:
         body_annotation = "dict[str, Any] | None" if raw_body_override else "Any"
         signature_parts.append(f"body: {body_annotation} = None")
-    return ", ".join(signature_parts), path_names, query_names, body_names, include_body
+    return ", ".join(signature_parts), path_names, query_names, body_names, required_body_names, include_body
 
 
 def _dict_literal(names: list[str]) -> str:
     if not names:
         return "None"
     return "{" + ", ".join(f"{name!r}: {name}" for name in names) + "}"
+
+
+def _body_dict_literal(names: list[str], required_names: set[str]) -> str:
+    if not names:
+        return "None"
+    optional_names = [name for name in names if name not in required_names]
+    if not optional_names:
+        return _dict_literal(names)
+    optional_literal = _dict_literal(optional_names)
+    optional_expr = f"key: value for key, value in {optional_literal}.items() if value is not None"
+    if not required_names:
+        return "{" + optional_expr + "}"
+    required_literal = _dict_literal([name for name in names if name in required_names])
+    return "{" + f"**{required_literal}, **{{{optional_expr}}}" + "}"
 
 
 def _validate_operation_path(path: str) -> None:
@@ -719,7 +736,7 @@ def generate_operations(
         if method_name in used_methods:
             raise RuntimeError(f"duplicate generated method {method_name}")
         used_methods.add(method_name)
-        signature, path_names, query_names, body_names, include_body = _param_signature(
+        signature, path_names, query_names, body_names, required_body_names, include_body = _param_signature(
             list(operation.parameters),
             operation.has_request_body,
             raw_body_override=bool(operation.operation.get("x-tangle-cli-request-body-schema-override")),
@@ -740,7 +757,7 @@ def generate_operations(
             f"            params={_dict_literal(query_names)},",
         ])
         if body_names:
-            lines.append(f"            json_data={_dict_literal(body_names)},")
+            lines.append(f"            json_data={_body_dict_literal(body_names, required_body_names)},")
         elif include_body:
             lines.append("            json_data=body,")
         else:

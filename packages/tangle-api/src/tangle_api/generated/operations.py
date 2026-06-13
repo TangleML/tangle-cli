@@ -292,7 +292,7 @@ class GeneratedTangleApiOperations:
             '/api/published_components/',
             path_params=None,
             params=None,
-            json_data={'digest': digest, 'name': name, 'tag': tag, 'text': text, 'url': url},
+            json_data={key: value for key, value in {'digest': digest, 'name': name, 'tag': tag, 'text': text, 'url': url}.items() if value is not None},
             response_model=PublishedComponentResponse,
         )
 

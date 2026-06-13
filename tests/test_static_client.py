@@ -487,6 +487,32 @@ def test_get_run_details_preserves_raw_graph_implementations_when_requested() ->
     assert execution.tasks["child"].raw["execution_id"] == "exec-child"
 
 
+def test_published_component_create_omits_unset_optional_body_fields() -> None:
+    session = FakeSession([
+        response({
+            "digest": "digest-1",
+            "name": "Demo",
+            "url": "https://example.test/component.yaml",
+        })
+    ])
+    client = TangleApiClient("https://api.test", session=session)
+
+    published = client.published_components_create(
+        name="Demo",
+        url="https://example.test/component.yaml",
+    )
+
+    assert isinstance(published, PublishedComponentResponse)
+    assert published.name == "Demo"
+    assert session.calls[0]["method"] == "POST"
+    assert session.calls[0]["url"] == "https://api.test/api/published_components/"
+    assert session.calls[0]["json"] == {
+        "name": "Demo",
+        "url": "https://example.test/component.yaml",
+    }
+    assert "digest" not in session.calls[0]["json"]
+
+
 def test_secret_native_operation_uses_static_generated_endpoint_shape() -> None:
     session = FakeSession([
         response({
