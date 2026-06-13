@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from tangle_cli.api_transport import (
+    _redact_headers,
     build_operation_request,
     default_base_url,
     request_operation,
@@ -125,6 +126,12 @@ def test_request_operation_does_not_log_bodies_when_verbose_false(
     assert capsys.readouterr().err == ""
 
 
+def test_redact_headers_matches_auth_segments_without_redacting_author_names() -> None:
+    headers = {"X-Gateway-Auth": "secret", "X-Author": "alice"}
+
+    assert _redact_headers(headers) == {"X-Gateway-Auth": "<redacted>", "X-Author": "alice"}
+
+
 def test_request_operation_verbose_env_logs_redacted_body(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -146,7 +153,7 @@ def test_request_operation_verbose_env_logs_redacted_body(
         {},
         base_url="https://api.test",
         auth_header="Bearer request-secret",
-        header_entries=["Cloud-Auth: cloud-secret"],
+        header_entries=["Cloud-Auth: cloud-secret", "X-Gateway-Auth: gateway-secret"],
         body={"name": "demo", "token": "request-token"},
     )
 
@@ -158,6 +165,7 @@ def test_request_operation_verbose_env_logs_redacted_body(
     assert "run-1" in logs
     assert "request-secret" not in logs
     assert "cloud-secret" not in logs
+    assert "gateway-secret" not in logs
     assert "request-token" not in logs
     assert "response-secret" not in logs
     assert "response-key" not in logs

@@ -225,7 +225,7 @@ def _ensure_tangle_deploy_authoring_shim() -> None:
     python_pipeline_mod = types.ModuleType("tangle_deploy.python_pipeline")
     for name in ("task", "pipeline", "subpipeline"):
         setattr(python_pipeline_mod, name, _identity_decorator)
-    for name in ("In", "Out", "TaskEnv"):
+    for name in ("In", "Out", "Outputs", "TaskEnv"):
         setattr(python_pipeline_mod, name, _AuthoringGeneric)
     setattr(python_pipeline_mod, "ref", lambda *args, **kwargs: None)
 
