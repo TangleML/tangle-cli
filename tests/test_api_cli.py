@@ -5,7 +5,7 @@ import sys
 import httpx
 import pytest
 
-from tangle_cli import api_cli, cli, component_inspector, components_cli, published_components_cli
+from tangle_cli import api_cli, cli, cli_helpers, component_inspector, components_cli, published_components_cli
 
 
 SCHEMA = {
@@ -294,7 +294,7 @@ def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, 
 
     monkeypatch.setattr(
         published_components_cli,
-        "_client_from_options",
+        "LazyTangleApiClient",
         fake_client_from_options,
     )
     monkeypatch.setattr(
@@ -418,7 +418,7 @@ def test_sdk_published_components_search_uses_config_with_cli_precedence(monkeyp
         client_calls.append(kwargs)
         return fake_client
 
-    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
     monkeypatch.setattr(
         component_inspector,
         "search_components",
@@ -452,6 +452,7 @@ def test_sdk_published_components_search_uses_config_with_cli_precedence(monkeyp
         "auth_header": "Bearer config-auth",
         "header": ["X-Config: yes"],
         "include_env_credentials": False,
+        "command_name": "published-component commands",
     }
 
 
@@ -474,7 +475,7 @@ def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tm
         client_calls.append(kwargs)
         return fake_client
 
-    monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    monkeypatch.setattr(published_components_cli, "LazyTangleApiClient", fake_client_from_options)
     monkeypatch.setattr(
         component_inspector,
         "inspect_by_digest",
@@ -510,16 +511,18 @@ def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tm
     assert client_calls[-1]["include_env_credentials"] is False
 
 
-def test_sdk_published_components_client_from_options_uses_static_client():
+def test_lazy_tangle_api_client_uses_static_client():
     from tangle_cli.client import TangleApiClient
 
-    client = published_components_cli._client_from_options(
+    proxy = cli_helpers.LazyTangleApiClient(
         base_url="https://api.test",
         token="token",
         auth_header="Bearer auth",
         header=["X-Test: yes"],
         include_env_credentials=False,
+        command_name="published-component commands",
     )
+    client = proxy._get_client()
 
     assert isinstance(client, TangleApiClient)
     assert client.base_url == "https://api.test"

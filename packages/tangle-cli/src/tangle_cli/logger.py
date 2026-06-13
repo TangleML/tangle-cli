@@ -91,6 +91,38 @@ def get_default_logger() -> ConsoleLogger:
 CliLogType = str  # Valid values: "console", "none", "file" (Literal not supported by typer)
 
 
+class LogFinalizer(Protocol):
+    def __call__(self) -> None: ...
+
+
+def logger_for_log_type(log_type: CliLogType) -> tuple[Logger, LogFinalizer]:
+    """Return a logger/finalizer pair for TD-compatible CLI log types.
+
+    ``console`` logs to stderr, ``none`` discards logs, and ``file`` captures
+    logs to a temporary file whose path is printed to stderr by the finalizer.
+    Callers that need custom structured stdout handling can use this lower-level
+    helper instead of :func:`run_with_logging`.
+    """
+
+    if log_type == "console":
+        return _default_logger, lambda: None
+    if log_type == "none":
+        return _null_logger, lambda: None
+    if log_type == "file":
+        capture = CaptureLogger()
+
+        def finalize() -> None:
+            if logs := capture.get_logs():
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".log", prefix="tangle_", delete=False,
+                ) as f:
+                    f.write(logs)
+                print(f"\nLogs written to: {f.name}", file=sys.stderr)
+
+        return capture, finalize
+    raise SystemExit("--log-type must be one of: console, none, file")
+
+
 def _print_result(result: Any) -> None:
     """Print a function result as JSON (dicts) or plain text.
 
@@ -124,24 +156,10 @@ def run_with_logging(
     *fn* receives a :class:`Logger` and should return a dict (or any value).
     Return ``None`` to suppress result output (useful when the logs *are* the output).
     """
-    if log_type == "console":
-        result = fn(_default_logger)
-        _print_result(result)
-        return
-
-    # "none" or "file" — capture logs, print result as JSON
-    capture = CaptureLogger() if log_type == "file" else None
-    logger: Logger = capture if capture is not None else _null_logger
+    logger, finalize = logger_for_log_type(log_type)
 
     try:
         result = fn(logger)
         _print_result(result)
     finally:
-        # Write captured logs to a temp file even if fn raised an exception
-        if capture is not None:
-            if logs := capture.get_logs():
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".log", prefix="tangle_", delete=False,
-                ) as f:
-                    f.write(logs)
-                print(f"\nLogs written to: {f.name}", file=sys.stderr)
+        finalize()

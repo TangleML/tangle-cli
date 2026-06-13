@@ -438,6 +438,7 @@ def bump_version(
                     strip_code=not has_original_code,
                     mode=generation_mode,
                     resolve_root=resolve_root,
+                    logger=log,
                 )
         else:
             log.error(f"❌ Python source not found: {python_path}")

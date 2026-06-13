@@ -7,9 +7,9 @@ from typing import Annotated, Any
 
 from cyclopts import App, Parameter
 
-from .api_transport import DEFAULT_TIMEOUT_SECONDS
 from .cli_helpers import (
     api_arg_specs,
+    LazyTangleApiClient,
     include_env_credentials_for_args,
     load_args_or_exit,
     optional_path,
@@ -20,45 +20,16 @@ from .cli_options import (
     BaseUrlOption,
     ConfigOption,
     HeaderOption,
+    LogTypeOption,
     TokenOption,
 )
+from .logger import logger_for_log_type
 from .component_publisher import ComponentPublisher, deprecate_component
 
 app = App(
     name="published-components",
     help="Inspect and search published Tangle components from the registry.",
 )
-
-
-def _client_from_options(
-    *,
-    base_url: str | None = None,
-    token: str | None = None,
-    auth_header: str | None = None,
-    header: list[str] | None = None,
-    include_env_credentials: bool = True,
-) -> Any:
-    """Create the static client used by published-component commands."""
-
-    try:
-        from .client import TangleApiClient
-    except ModuleNotFoundError as exc:
-        if exc.name == "tangle_api":
-            raise SystemExit(
-                "Native generated Tangle API bindings are required for "
-                "published-component commands. Install tangle-cli[native] "
-                "or provide a local tangle_api.generated package."
-            ) from exc
-        raise
-
-    return TangleApiClient(
-        base_url=base_url,
-        token=token,
-        auth_header=auth_header,
-        header=header,
-        timeout=DEFAULT_TIMEOUT_SECONDS,
-        include_env_credentials=include_env_credentials,
-    )
 
 
 @app.command(name="search")
@@ -73,6 +44,7 @@ def published_components_search(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Search published component metadata."""
 
@@ -82,6 +54,7 @@ def published_components_search(
         include_deprecated=(include_deprecated, None),
         published_by=(published_by, None),
         digest=(digest, None),
+        log_type=(log_type, "console"),
         **api_arg_specs(
             base_url=base_url,
             token=token,
@@ -89,24 +62,29 @@ def published_components_search(
             header=header,
         ),
     ):
-        client = _client_from_options(
-            base_url=args.base_url,
-            token=args.token,
-            auth_header=args.auth_header,
-            header=args.header,
-            include_env_credentials=include_env_credentials_for_args(args, base_url),
-        )
-        from .component_inspector import search_components
-
-        print_json(
-            search_components(
-                client,
-                name=args.name,
-                include_deprecated=bool(args.include_deprecated),
-                published_by=args.published_by,
-                digest=args.digest,
+        logger, finalize_logs = logger_for_log_type(args.log_type)
+        try:
+            client = LazyTangleApiClient(
+                base_url=args.base_url,
+                token=args.token,
+                auth_header=args.auth_header,
+                header=args.header,
+                include_env_credentials=include_env_credentials_for_args(args, base_url),
+                command_name="published-component commands",
             )
-        )
+            from .component_inspector import search_components
+
+            print_json(
+                search_components(
+                    client,
+                    name=args.name,
+                    include_deprecated=bool(args.include_deprecated),
+                    published_by=args.published_by,
+                    digest=args.digest,
+                )
+            )
+        finally:
+            finalize_logs()
 
 
 @app.command(name="inspect")
@@ -124,6 +102,7 @@ def published_components_inspect(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Inspect a published component by exact name or digest."""
 
@@ -136,6 +115,7 @@ def published_components_inspect(
         follow_deprecated=(follow_deprecated, None),
         full_spec=(full_spec, None),
         published_by=(published_by, None),
+        log_type=(log_type, "console"),
         **api_arg_specs(
             base_url=base_url,
             token=token,
@@ -143,37 +123,42 @@ def published_components_inspect(
             header=header,
         ),
     ):
-        if bool(args.name) == bool(args.digest):
-            raise SystemExit("Provide exactly one of NAME or --digest DIGEST")
+        logger, finalize_logs = logger_for_log_type(args.log_type)
+        try:
+            if bool(args.name) == bool(args.digest):
+                raise SystemExit("Provide exactly one of NAME or --digest DIGEST")
 
-        client = _client_from_options(
-            base_url=args.base_url,
-            token=args.token,
-            auth_header=args.auth_header,
-            header=args.header,
-            include_env_credentials=include_env_credentials_for_args(args, base_url),
-        )
-        if args.digest:
-            from .component_inspector import inspect_by_digest
-
-            result = inspect_by_digest(
-                client,
-                args.digest,
-                full_spec=bool(args.full_spec),
-                follow_deprecated=bool(args.follow_deprecated),
+            client = LazyTangleApiClient(
+                base_url=args.base_url,
+                token=args.token,
+                auth_header=args.auth_header,
+                header=args.header,
+                include_env_credentials=include_env_credentials_for_args(args, base_url),
+                command_name="published-component commands",
             )
-        else:
-            from .component_inspector import inspect_by_name
+            if args.digest:
+                from .component_inspector import inspect_by_digest
 
-            result = inspect_by_name(
-                client,
-                args.name or "",
-                include_all_versions=bool(args.all_versions),
-                include_deprecated=bool(args.include_deprecated),
-                full_spec=bool(args.full_spec),
-                published_by=args.published_by,
-            )
-        print_json(result)
+                result = inspect_by_digest(
+                    client,
+                    args.digest,
+                    full_spec=bool(args.full_spec),
+                    follow_deprecated=bool(args.follow_deprecated),
+                )
+            else:
+                from .component_inspector import inspect_by_name
+
+                result = inspect_by_name(
+                    client,
+                    args.name or "",
+                    include_all_versions=bool(args.all_versions),
+                    include_deprecated=bool(args.include_deprecated),
+                    full_spec=bool(args.full_spec),
+                    published_by=args.published_by,
+                )
+            print_json(result)
+        finally:
+            finalize_logs()
 
 
 @app.command(name="library")
@@ -184,11 +169,13 @@ def published_components_library(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Print the curated standard component library."""
 
     for args in load_args_or_exit(
         config,
+        log_type=(log_type, "console"),
         **api_arg_specs(
             base_url=base_url,
             token=token,
@@ -196,16 +183,21 @@ def published_components_library(
             header=header,
         ),
     ):
-        client = _client_from_options(
-            base_url=args.base_url,
-            token=args.token,
-            auth_header=args.auth_header,
-            header=args.header,
-            include_env_credentials=include_env_credentials_for_args(args, base_url),
-        )
-        from .component_inspector import get_standard_library
+        logger, finalize_logs = logger_for_log_type(args.log_type)
+        try:
+            client = LazyTangleApiClient(
+                base_url=args.base_url,
+                token=args.token,
+                auth_header=args.auth_header,
+                header=args.header,
+                include_env_credentials=include_env_credentials_for_args(args, base_url),
+                command_name="published-component commands",
+            )
+            from .component_inspector import get_standard_library
 
-        print_json(get_standard_library(client))
+            print_json(get_standard_library(client))
+        finally:
+            finalize_logs()
 
 
 @app.command(name="publish")
@@ -230,6 +222,7 @@ def published_components_publish(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Publish one component YAML file to a Tangle component registry."""
 
@@ -246,6 +239,7 @@ def published_components_publish(
         git_remote_url=(git_remote_url, None),
         git_root=(git_root, None, optional_path),
         published_by=(published_by, None),
+        log_type=(log_type, "console"),
         **api_arg_specs(
             base_url=base_url,
             token=token,
@@ -255,31 +249,37 @@ def published_components_publish(
     )
     results: list[dict[str, Any]] = []
     for args in all_args:
-        client = None if args.dry_run else _client_from_options(
-            base_url=args.base_url,
-            token=args.token,
-            auth_header=args.auth_header,
-            header=args.header,
-            include_env_credentials=include_env_credentials_for_args(args, base_url),
-        )
-        publisher = ComponentPublisher(
-            dry_run=bool(args.dry_run),
-            git_remote_sha=args.git_remote_sha,
-            git_remote_branch=args.git_remote_branch,
-            git_remote_url=args.git_remote_url,
-            git_root=args.git_root,
-            published_by=args.published_by,
-            client=client,
-        )
-        result = publisher.publish_component(
-            args.component_path,
-            image=args.image,
-            name=args.name,
-            description=args.description,
-            annotations=args.annotations,
-        )
-        result_dict = result.to_dict() if hasattr(result, "to_dict") else dict(result)
-        results.append({"component_path": str(args.component_path), **result_dict})
+        logger, finalize_logs = logger_for_log_type(args.log_type)
+        try:
+            client = None if args.dry_run else LazyTangleApiClient(
+                base_url=args.base_url,
+                token=args.token,
+                auth_header=args.auth_header,
+                header=args.header,
+                include_env_credentials=include_env_credentials_for_args(args, base_url),
+                command_name="published-component commands",
+            )
+            publisher = ComponentPublisher(
+                dry_run=bool(args.dry_run),
+                git_remote_sha=args.git_remote_sha,
+                git_remote_branch=args.git_remote_branch,
+                git_remote_url=args.git_remote_url,
+                git_root=args.git_root,
+                published_by=args.published_by,
+                client=client,
+                logger=logger,
+            )
+            result = publisher.publish_component(
+                args.component_path,
+                image=args.image,
+                name=args.name,
+                description=args.description,
+                annotations=args.annotations,
+            )
+            result_dict = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+            results.append({"component_path": str(args.component_path), **result_dict})
+        finally:
+            finalize_logs()
 
     error_count = sum(1 for result in results if result.get("status") in {"error", "failed"})
     summary = {
@@ -303,6 +303,7 @@ def published_components_deprecate(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Deprecate a published component by digest."""
 
@@ -310,6 +311,7 @@ def published_components_deprecate(
         config,
         digest=("digest", digest, None, False, True),
         superseded_by=(superseded_by, None),
+        log_type=(log_type, "console"),
         **api_arg_specs(
             base_url=base_url,
             token=token,
@@ -317,19 +319,25 @@ def published_components_deprecate(
             header=header,
         ),
     ):
-        client = _client_from_options(
-            base_url=args.base_url,
-            token=args.token,
-            auth_header=args.auth_header,
-            header=args.header,
-            include_env_credentials=include_env_credentials_for_args(args, base_url),
-        )
-        result = deprecate_component(
-            client,
-            args.digest,
-            superseded_by=args.superseded_by,
-        )
-        result_dict = result.to_dict() if hasattr(result, "to_dict") else result
-        print_json(result_dict)
-        if isinstance(result_dict, dict) and not result_dict.get("success", result_dict.get("status") != "failed"):
-            raise SystemExit(1)
+        logger, finalize_logs = logger_for_log_type(args.log_type)
+        try:
+            client = LazyTangleApiClient(
+                base_url=args.base_url,
+                token=args.token,
+                auth_header=args.auth_header,
+                header=args.header,
+                include_env_credentials=include_env_credentials_for_args(args, base_url),
+                command_name="published-component commands",
+            )
+            result = deprecate_component(
+                client,
+                args.digest,
+                superseded_by=args.superseded_by,
+                logger=logger,
+            )
+            result_dict = result.to_dict() if hasattr(result, "to_dict") else result
+            print_json(result_dict)
+            if isinstance(result_dict, dict) and not result_dict.get("success", result_dict.get("status") != "failed"):
+                raise SystemExit(1)
+        finally:
+            finalize_logs()

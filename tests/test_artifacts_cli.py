@@ -6,6 +6,7 @@ import json
 import sys
 from typing import Any
 
+from tangle_cli import artifacts as artifacts_module
 from tangle_cli import artifacts_cli, cli
 
 
@@ -53,10 +54,10 @@ def test_sdk_artifacts_get_cli_config_auth_and_env_isolation(monkeypatch, tmp_pa
         get_calls.append({"run_id": run_id, "query": query, "client": client})
         return {"artifact-config": object()}
 
-    monkeypatch.setattr(artifacts_cli, "_client_from_options", fake_client_from_options)
-    monkeypatch.setattr(artifacts_cli, "get_artifacts", fake_get_artifacts)
+    monkeypatch.setattr(artifacts_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(artifacts_module, "get_artifacts", fake_get_artifacts)
     monkeypatch.setattr(
-        artifacts_cli,
+        artifacts_module,
         "_serialize_artifacts",
         lambda artifacts: [{"id": "artifact-config", "uri": "gs://bucket/config", "key": "artifact-config"}],
     )
@@ -78,6 +79,7 @@ def test_sdk_artifacts_get_cli_config_auth_and_env_isolation(monkeypatch, tmp_pa
             "auth_header": "Bearer config-auth",
             "header": ["X-Config: yes"],
             "include_env_credentials": False,
+            "command_name": "artifact commands",
         }
     ]
     assert get_calls == [
@@ -104,9 +106,9 @@ def test_sdk_artifacts_get_cli_base_url_keeps_env_credentials(monkeypatch, tmp_p
         client_calls.append(kwargs)
         return object()
 
-    monkeypatch.setattr(artifacts_cli, "_client_from_options", fake_client_from_options)
-    monkeypatch.setattr(artifacts_cli, "get_artifacts", lambda *args, **kwargs: {})
-    monkeypatch.setattr(artifacts_cli, "_serialize_artifacts", lambda artifacts: [])
+    monkeypatch.setattr(artifacts_cli, "LazyTangleApiClient", fake_client_from_options)
+    monkeypatch.setattr(artifacts_module, "get_artifacts", lambda *args, **kwargs: {})
+    monkeypatch.setattr(artifacts_module, "_serialize_artifacts", lambda artifacts: [])
 
     app = cli.build_app()
     run_app(

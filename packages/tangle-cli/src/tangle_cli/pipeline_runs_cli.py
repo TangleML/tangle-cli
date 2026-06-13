@@ -7,10 +7,10 @@ from typing import Annotated, Any
 
 from cyclopts import App, Parameter
 
-from .api_transport import DEFAULT_TIMEOUT_SECONDS
 from .args_container import ArgsContainer
 from .cli_helpers import (
     api_arg_specs,
+    LazyTangleApiClient,
     include_env_credentials_for_args,
     load_args_or_exit,
     optional_path,
@@ -21,10 +21,13 @@ from .cli_options import (
     BaseUrlOption,
     ConfigOption,
     HeaderOption,
+    LogTypeOption,
     TokenOption,
 )
+from .logger import Logger, logger_for_log_type
 from .pipeline_runs import (
     PipelineRunError,
+    PipelineRunHooks,
     PipelineRunManager,
     parse_json_or_key_values,
     parse_key_value_entries,
@@ -35,54 +38,33 @@ annotations_app = App(name="annotations", help="Work with pipeline-run annotatio
 app.command(annotations_app)
 
 
-def _client_from_options(
-    *,
-    base_url: str | None = None,
-    token: str | None = None,
-    auth_header: str | None = None,
-    header: list[str] | None = None,
-    include_env_credentials: bool = True,
-) -> Any:
-    try:
-        from .client import TangleApiClient
-    except ModuleNotFoundError as exc:
-        if exc.name == "tangle_api":
-            raise SystemExit(
-                "Native generated Tangle API bindings are required for "
-                "pipeline-run commands. Install tangle-cli[native] or provide "
-                "a local tangle_api.generated package."
-            ) from exc
-        raise
-
-    return TangleApiClient(
-        base_url=base_url,
-        token=token,
-        auth_header=auth_header,
-        header=header,
-        timeout=DEFAULT_TIMEOUT_SECONDS,
-        include_env_credentials=include_env_credentials,
-    )
-
-
-def _manager(args: ArgsContainer, *, cli_base_url: str | None) -> PipelineRunManager:
-    client = _client_from_options(
+def _manager(args: ArgsContainer, *, cli_base_url: str | None, logger: Logger) -> PipelineRunManager:
+    client = LazyTangleApiClient(
         base_url=args.base_url,
         token=args.token,
         auth_header=args.auth_header,
         header=args.header,
         include_env_credentials=include_env_credentials_for_args(args, cli_base_url),
+        command_name="pipeline-run commands",
     )
-    return PipelineRunManager(client=client)
+    return PipelineRunManager(client=client, hooks=PipelineRunHooks(logger=logger), logger=logger)
 
 
 def _run_manager_action(config: str | None, cli_base_url: str | None, specs: dict[str, tuple[Any, ...]], fn):
     for args in load_args_or_exit(config, **specs):
         try:
-            result = fn(_manager(args, cli_base_url=cli_base_url), args)
-        except PipelineRunError as exc:
+            logger, finalize_logs = logger_for_log_type(getattr(args, "log_type", "console"))
+        except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-        if result is not None:
-            print_json(result)
+        try:
+            try:
+                result = fn(_manager(args, cli_base_url=cli_base_url, logger=logger), args)
+            except PipelineRunError as exc:
+                raise SystemExit(str(exc)) from exc
+            if result is not None:
+                print_json(result)
+        finally:
+            finalize_logs()
 
 
 @app.command(name="submit")
@@ -112,6 +94,7 @@ def pipeline_runs_submit(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Hydrate and submit a local pipeline YAML file as a run."""
 
@@ -123,6 +106,7 @@ def pipeline_runs_submit(
         "hydrate": (hydrate, True),
         "dry_run": (dry_run, None),
         "run_as": (run_as, None),
+        "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
 
@@ -151,12 +135,14 @@ def pipeline_runs_details(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Print run details, including root execution details."""
     specs = {
         "run_id": (run_id,),
         "include_annotations": (include_annotations, None),
         "include_execution_state": (include_execution_state, None),
+        "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
     _run_manager_action(
@@ -180,9 +166,14 @@ def pipeline_runs_status(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Print a pipeline run and derived status summary."""
-    specs = {"run_id": (run_id,), **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header)}
+    specs = {
+        "run_id": (run_id,),
+        "log_type": (log_type, "console"),
+        **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
+    }
 
     def action(manager: PipelineRunManager, args: ArgsContainer) -> dict[str, Any]:
         run = manager.get_run(args.run_id, include_execution_stats=True)
@@ -200,9 +191,14 @@ def pipeline_runs_graph_state(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Print graph execution state for an execution id."""
-    specs = {"execution_id": (execution_id,), **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header)}
+    specs = {
+        "execution_id": (execution_id,),
+        "log_type": (log_type, "console"),
+        **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
+    }
     _run_manager_action(config, base_url, specs, lambda manager, args: manager.graph_state(args.execution_id))
 
 
@@ -215,9 +211,14 @@ def pipeline_runs_cancel(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Cancel a pipeline run."""
-    specs = {"run_id": (run_id,), **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header)}
+    specs = {
+        "run_id": (run_id,),
+        "log_type": (log_type, "console"),
+        **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
+    }
     _run_manager_action(config, base_url, specs, lambda manager, args: manager.cancel_run(args.run_id))
 
 
@@ -232,12 +233,14 @@ def pipeline_runs_wait(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Poll a run until terminal state or bounded timeout."""
     specs = {
         "run_id": (run_id,),
         "max_wait": (max_wait, 600.0),
         "poll_interval": (poll_interval, 10.0),
+        "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
     _run_manager_action(
@@ -261,9 +264,14 @@ def pipeline_runs_logs(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Print Tangle API container logs for an execution id."""
-    specs = {"execution_id": (execution_id,), **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header)}
+    specs = {
+        "execution_id": (execution_id,),
+        "log_type": (log_type, "console"),
+        **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
+    }
 
     def action(manager: PipelineRunManager, args: ArgsContainer) -> object:
         result = manager.logs(args.execution_id)
@@ -288,6 +296,7 @@ def pipeline_runs_search(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Search/list pipeline runs using the Tangle API filters."""
     specs = {
@@ -296,6 +305,7 @@ def pipeline_runs_search(
         "page_token": (page_token, None),
         "include_pipeline_names": (include_pipeline_names, None),
         "include_execution_stats": (include_execution_stats, None),
+        "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
     _run_manager_action(
@@ -322,11 +332,13 @@ def pipeline_runs_export(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     """Export a run's root pipeline spec to YAML."""
     specs = {
         "run_id": (run_id,),
         "output": (output, None, optional_path),
+        "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
 
@@ -349,8 +361,13 @@ def pipeline_runs_annotations_list(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
-    specs = {"run_id": (run_id,), **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header)}
+    specs = {
+        "run_id": (run_id,),
+        "log_type": (log_type, "console"),
+        **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
+    }
     _run_manager_action(config, base_url, specs, lambda manager, args: manager.annotations_list(args.run_id))
 
 
@@ -365,11 +382,13 @@ def pipeline_runs_annotations_set(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     specs = {
         "run_id": (run_id,),
         "key": (key,),
         "value": (value,),
+        "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
     _run_manager_action(
@@ -390,10 +409,12 @@ def pipeline_runs_annotations_delete(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
 ) -> None:
     specs = {
         "run_id": (run_id,),
         "key": (key,),
+        "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
     _run_manager_action(
