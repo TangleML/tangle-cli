@@ -160,6 +160,7 @@ def test_pipeline_runs_submit_dry_run_prints_sanitized_payload(monkeypatch, tmp_
                     "graph": {
                         "tasks": {
                             "task": {
+                                "arguments": {"config": {"_meta": {"mode": "keep"}}},
                                 "componentRef": {
                                     "name": "text-component",
                                     "text": "name: Text Component\n_source_dir: /tmp/private\nimplementation:\n  container:\n    image: busybox\n",
@@ -193,7 +194,9 @@ def test_pipeline_runs_submit_dry_run_prints_sanitized_payload(monkeypatch, tmp_
     assert fake_client.created == []
     spec = payload["root_task"]["componentRef"]["spec"]
     assert "_source_dir" not in spec
-    task_ref = spec["implementation"]["graph"]["tasks"]["task"]["componentRef"]
+    task = spec["implementation"]["graph"]["tasks"]["task"]
+    assert task["arguments"]["config"] == {"_meta": {"mode": "keep"}}
+    task_ref = task["componentRef"]
     assert "text" not in task_ref
     assert task_ref["spec"]["name"] == "Text Component"
     assert "_source_dir" not in task_ref["spec"]

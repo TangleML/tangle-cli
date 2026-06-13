@@ -2029,6 +2029,34 @@ class TestGeneratorStripsAuthoring:
 # ============================================================================
 
 
+def test_generate_component_yaml_shim_supports_outputs_import(tmp_path):
+    source = tmp_path / "outputs_import_component.py"
+    source.write_text(
+        textwrap.dedent(
+            '''
+            from tangle_deploy.python_pipeline import Outputs, task
+
+            @task()
+            def outputs_import_component(name: str) -> str:
+                return name
+            '''
+        ).lstrip()
+    )
+    output_file = tmp_path / "component.yaml"
+
+    assert generate_component_yaml(
+        source,
+        output_file,
+        container_image="python:3.12",
+        function_name="outputs_import_component",
+    ) is True
+
+    component = yaml.safe_load(output_file.read_text())
+    program = component["implementation"]["container"]["command"][-1]
+    assert "from tangle_deploy.python_pipeline" not in program
+    assert "from tangle_deploy.python_pipeline import Outputs" not in program
+
+
 class TestGeneratorStripsTaskEnvAuthoring:
     """``generate_component_yaml`` must bake an env-free runtime program for
     ``@task(env=...)`` authoring, while keeping ``python_original_code``

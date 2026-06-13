@@ -17,7 +17,10 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _MISSING = object()
 _SENSITIVE_HEADER_NAMES = {"authorization", "cloud-auth", "cookie", "x-api-key"}
-_SENSITIVE_KEY_RE = re.compile(r"(authorization|cloud[-_]?auth|cookie|x[-_]?api[-_]?key|token|secret|password|credential)", re.IGNORECASE)
+_SENSITIVE_KEY_RE = re.compile(
+    r"(authorization|authentication|(^|[-_])auth($|[-_])|cloud[-_]?auth|cookie|x[-_]?api[-_]?key|token|secret|password|credential)",
+    re.IGNORECASE,
+)
 _REDACTED = "<redacted>"
 
 
@@ -31,7 +34,12 @@ def tangle_verbose_enabled() -> bool:
 def _redact_headers(headers: dict[str, Any] | None) -> dict[str, Any]:
     redacted: dict[str, Any] = {}
     for name, value in (headers or {}).items():
-        redacted[name] = _REDACTED if name.lower() in _SENSITIVE_HEADER_NAMES else value
+        normalized_name = name.lower()
+        redacted[name] = (
+            _REDACTED
+            if normalized_name in _SENSITIVE_HEADER_NAMES or _SENSITIVE_KEY_RE.search(name)
+            else value
+        )
     return redacted
 
 

@@ -172,11 +172,13 @@ class PipelineRunManager:
     def sanitize_submit_payload(value: Any) -> Any:
         """Return a submit-safe payload with TD-compatible componentRef fixes.
 
-        The hydrator uses underscore-prefixed annotations such as ``_source_dir``
-        while recursively resolving local files. Those are local provenance
-        only and must not be submitted to the backend.  TD also normalizes
-        ``componentRef.text`` into ``componentRef.spec`` for component-library
-        entries before submit; keep the same behavior here.
+        The hydrator uses explicit local-only annotations such as
+        ``_source_dir`` while recursively resolving local files. Those
+        provenance keys must not be submitted to the backend. User-supplied
+        underscore-prefixed payload keys are otherwise valid and preserved.
+        TD also normalizes ``componentRef.text`` into ``componentRef.spec``
+        for component-library entries before submit; keep the same behavior
+        here.
         """
 
         if isinstance(value, list):
@@ -184,9 +186,10 @@ class PipelineRunManager:
         if not isinstance(value, dict):
             return value
 
+        local_only_keys = {"_source_dir", "_recursive_params"}
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
-            if str(key).startswith("_"):
+            if str(key) in local_only_keys:
                 continue
             cleaned[key] = PipelineRunManager.sanitize_submit_payload(item)
 
