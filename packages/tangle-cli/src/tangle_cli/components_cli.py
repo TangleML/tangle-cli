@@ -4,7 +4,8 @@ from typing import Annotated, Any
 
 from cyclopts import App, Parameter
 
-from .args_container import ArgsContainer, ConfigFileError
+from .cli_helpers import load_args_or_exit, optional_path
+from .cli_options import ConfigOption
 
 app = App(name="components", help="Work with Tangle component definitions.")
 
@@ -18,24 +19,6 @@ app.command(component_references_app)
 
 annotations_app = App(name="annotations", help="Work with component annotations.")
 app.command(annotations_app)
-
-ConfigOption = Annotated[
-    str | None,
-    Parameter(help="YAML/JSON config file providing command defaults."),
-]
-
-
-def _load_args(config: str | None, **kwargs: Any) -> list[ArgsContainer]:
-    try:
-        return ArgsContainer.load(config, **kwargs)
-    except ConfigFileError as exc:
-        raise SystemExit(f"Config error: {exc}") from exc
-
-
-def _optional_path(value: str | pathlib.Path | None) -> pathlib.Path | None:
-    return pathlib.Path(value) if value is not None else None
-
-
 
 # region components
 
@@ -122,18 +105,18 @@ def _components_generate_from_python_impl(
     resolve_root: pathlib.Path | None = None,
     config: str | None = None,
 ) -> None:
-    all_args = _load_args(
+    all_args = load_args_or_exit(
         config,
-        python_file=("python_file", python_file, None, False, True, _optional_path),
-        output=(output, None, _optional_path),
+        python_file=("python_file", python_file, None, False, True, optional_path),
+        output=(output, None, optional_path),
         name=(name, None),
         function_name=("function", function_name, None, False),
         image=(image, None),
-        dependencies_from=(dependencies_from, None, _optional_path),
+        dependencies_from=(dependencies_from, None, optional_path),
         strip_code=(strip_code, None),
         use_legacy_naming=(use_legacy_naming, None),
         mode=(mode, None),
-        resolve_root=(resolve_root, None, _optional_path),
+        resolve_root=(resolve_root, None, optional_path),
     )
     for args in all_args:
         from .component_generator import determine_output_path, regenerate_yaml
@@ -247,9 +230,9 @@ def components_bump_version(
 ) -> None:
     """Bump version metadata in a component YAML file."""
 
-    all_args = _load_args(
+    all_args = load_args_or_exit(
         config,
-        yaml_file=("yaml_file", yaml_file, None, False, True, _optional_path),
+        yaml_file=("yaml_file", yaml_file, None, False, True, optional_path),
         set_version=(set_version, None),
         update_timestamp=(update_timestamp, None),
     )

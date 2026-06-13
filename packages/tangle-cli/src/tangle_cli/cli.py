@@ -2,6 +2,7 @@ from cyclopts import App
 
 from . import api_cli
 from . import components_cli
+from . import pipeline_runs_cli
 from . import pipelines_cli
 from . import published_components_cli
 
@@ -15,6 +16,7 @@ def build_sdk_app() -> App:
     )
     sdk_app.command(components_cli.app)
     sdk_app.command(pipelines_cli.app)
+    sdk_app.command(pipeline_runs_cli.app)
     sdk_app.command(published_components_cli.app)
     return sdk_app
 

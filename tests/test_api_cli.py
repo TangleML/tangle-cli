@@ -5,7 +5,7 @@ import sys
 import httpx
 import pytest
 
-from tangle_cli import api_cli, cli, components_cli, published_components_cli
+from tangle_cli import api_cli, cli, component_inspector, components_cli, published_components_cli
 
 
 SCHEMA = {
@@ -298,12 +298,12 @@ def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, 
         fake_client_from_options,
     )
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector,
         "search_components",
         lambda client, **kwargs: {"client_ok": client is fake_client, "search": kwargs},
     )
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector,
         "inspect_by_name",
         lambda client, name, **kwargs: {
             "client_ok": client is fake_client,
@@ -312,7 +312,7 @@ def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, 
         },
     )
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector,
         "inspect_by_digest",
         lambda client, digest, **kwargs: {
             "client_ok": client is fake_client,
@@ -321,7 +321,7 @@ def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, 
         },
     )
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector,
         "get_standard_library",
         lambda client: {"client_ok": client is fake_client, "folders": []},
     )
@@ -420,7 +420,7 @@ def test_sdk_published_components_search_uses_config_with_cli_precedence(monkeyp
 
     monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector,
         "search_components",
         lambda client, **kwargs: {"client_ok": client is fake_client, "search": kwargs},
     )
@@ -476,7 +476,7 @@ def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tm
 
     monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector,
         "inspect_by_digest",
         lambda client, digest, **kwargs: {
             "client_ok": client is fake_client,
@@ -485,7 +485,7 @@ def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tm
         },
     )
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector,
         "get_standard_library",
         lambda client: {"client_ok": client is fake_client},
     )
@@ -702,6 +702,31 @@ def test_real_auto_api_command_with_ambient_auth_uses_transport_guard(monkeypatc
     monkeypatch.delenv("TANGLE_API_URL", raising=False)
     monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", "cached-extension"])
     monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", lambda: SCHEMA)
+
+    def fail_load_cached_schema(base_url):  # pragma: no cover - assertion helper
+        raise AssertionError(f"cache should not load before auth guard, got {base_url}")
+
+    monkeypatch.setattr(api_cli, "load_cached_schema", fail_load_cached_schema)
+
+    with pytest.raises(SystemExit, match="TANGLE_API_URL is required"):
+        api_cli._schema_for_current_invocation()
+
+
+@pytest.mark.parametrize(
+    "api_tail",
+    [
+        ["--schema-source", "cache", "--help"],
+        ["--schema-source", "cache", "published-components", "--help"],
+        ["published-components", "--schema-source", "cache", "--help"],
+    ],
+)
+def test_cache_help_with_ambient_auth_and_no_base_url_uses_transport_guard(
+    monkeypatch,
+    api_tail,
+):
+    monkeypatch.setenv("TANGLE_API_TOKEN", "secret-token")
+    monkeypatch.delenv("TANGLE_API_URL", raising=False)
+    monkeypatch.setattr(api_cli.sys, "argv", ["tangle", "api", *api_tail])
 
     def fail_load_cached_schema(base_url):  # pragma: no cover - assertion helper
         raise AssertionError(f"cache should not load before auth guard, got {base_url}")

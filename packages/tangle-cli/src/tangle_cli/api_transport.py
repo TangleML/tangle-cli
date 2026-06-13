@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import urllib.parse
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,90 @@ DEFAULT_API_URL = "http://localhost:8000"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _MISSING = object()
+_SENSITIVE_HEADER_NAMES = {"authorization", "cloud-auth", "cookie", "x-api-key"}
+_SENSITIVE_KEY_RE = re.compile(r"(authorization|cloud[-_]?auth|cookie|x[-_]?api[-_]?key|token|secret|password|credential)", re.IGNORECASE)
+_REDACTED = "<redacted>"
+
+
+def tangle_verbose_enabled() -> bool:
+    value = os.environ.get("TANGLE_VERBOSE")
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _redact_headers(headers: dict[str, Any] | None) -> dict[str, Any]:
+    redacted: dict[str, Any] = {}
+    for name, value in (headers or {}).items():
+        redacted[name] = _REDACTED if name.lower() in _SENSITIVE_HEADER_NAMES else value
+    return redacted
+
+
+def _redact_sensitive_values(value: Any, key: str | None = None) -> Any:
+    if key and _SENSITIVE_KEY_RE.search(key):
+        return _REDACTED
+    if isinstance(value, dict):
+        return {str(k): _redact_sensitive_values(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_sensitive_values(item) for item in value]
+    return value
+
+
+def _safe_json_text(value: Any) -> str:
+    redacted = _redact_sensitive_values(value)
+    try:
+        return json.dumps(redacted, indent=2, sort_keys=True, default=str)
+    except TypeError:
+        return str(redacted)
+
+
+def _content_to_text(content: bytes | str | None) -> str:
+    if content is None:
+        return "<empty>"
+    if isinstance(content, bytes):
+        if not content:
+            return "<empty>"
+        text = content.decode("utf-8", errors="replace")
+    else:
+        text = content
+    if not text:
+        return "<empty>"
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return text
+    return _safe_json_text(parsed)
+
+
+def log_http_exchange(
+    logger: Any,
+    *,
+    method: str,
+    url: str,
+    request_headers: dict[str, Any] | None = None,
+    request_body: Any = None,
+    response_status: int | None = None,
+    response_headers: dict[str, Any] | None = None,
+    response_body: bytes | str | None = None,
+) -> None:
+    """Log a redacted HTTP exchange for TANGLE_VERBOSE diagnostics."""
+
+    emit = getattr(logger, "info", None)
+    if not callable(emit):
+        emit = lambda message: print(message, file=sys.stderr, flush=True)
+    emit(f"[tangle-api] request: {method} {url}")
+    emit(f"[tangle-api] request headers: {_safe_json_text(_redact_headers(request_headers))}")
+    if isinstance(request_body, (bytes, str)) or request_body is None:
+        request_body_text = _content_to_text(request_body)
+    else:
+        request_body_text = _safe_json_text(request_body)
+    emit(f"[tangle-api] request body: {request_body_text}")
+    if response_status is not None:
+        emit(f"[tangle-api] response status: {response_status}")
+    if response_headers is not None:
+        emit(f"[tangle-api] response headers: {_safe_json_text(_redact_headers(response_headers))}")
+    if response_body is not None:
+        emit(f"[tangle-api] response body: {_content_to_text(response_body)}")
 
 
 def default_base_url() -> str:
@@ -203,6 +288,17 @@ def request_operation(
         headers=request_headers,
         timeout=timeout,
     )
+    if tangle_verbose_enabled():
+        log_http_exchange(
+            None,
+            method=method,
+            url=url,
+            request_headers=request_headers,
+            request_body=content,
+            response_status=response.status_code,
+            response_headers=dict(response.headers),
+            response_body=response.text,
+        )
     response.raise_for_status()
     return response
 

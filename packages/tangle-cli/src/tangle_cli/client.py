@@ -23,10 +23,12 @@ from .api_transport import (
     _normalize_base_url,
     _request_headers,
     default_base_url,
+    log_http_exchange,
+    tangle_verbose_enabled,
 )
 from tangle_api.generated.models import ComponentSpec, GetExecutionInfoResponse
 from tangle_api.generated.operations import GeneratedTangleApiOperations
-from .logger import Logger, _null_logger
+from .logger import Logger, _null_logger, get_default_logger
 from .models import (
     ComponentInfo,
     GraphExecutionState,
@@ -65,8 +67,9 @@ class TangleApiClient(GeneratedTangleApiOperations):
         include_env_credentials: bool = True,
     ) -> None:
         self.base_url = _normalize_base_url(base_url or default_base_url())
-        self.logger = logger or _null_logger
-        self.verbose = verbose
+        env_verbose = tangle_verbose_enabled()
+        self.verbose = verbose or env_verbose
+        self.logger = logger or (get_default_logger() if self.verbose else _null_logger)
         self.headers = dict(headers or {})
         self.token = token
         self.auth_header = auth_header
@@ -214,8 +217,6 @@ class TangleApiClient(GeneratedTangleApiOperations):
 
         for _ in range(self._MAX_REDIRECTS + 1):
             request_headers = self._headers(extra_headers)
-            if self.verbose:
-                self.logger.info(f"{current_method} {current_url}")
             response = self.session.request(
                 current_method,
                 current_url,
@@ -226,6 +227,17 @@ class TangleApiClient(GeneratedTangleApiOperations):
                 allow_redirects=False,
                 **request_kwargs,
             )
+            if self.verbose:
+                log_http_exchange(
+                    self.logger,
+                    method=current_method,
+                    url=current_url,
+                    request_headers=request_headers,
+                    request_body=current_json,
+                    response_status=response.status_code,
+                    response_headers=dict(response.headers),
+                    response_body=response.text,
+                )
             if response.status_code not in self._REDIRECT_STATUSES:
                 return response
 

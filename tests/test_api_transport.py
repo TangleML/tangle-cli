@@ -1,18 +1,24 @@
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
-from tangle_cli.api_transport import build_operation_request, default_base_url
+from tangle_cli.api_transport import (
+    build_operation_request,
+    default_base_url,
+    request_operation,
+    tangle_verbose_enabled,
+)
 
 
-def _operation(path: str) -> SimpleNamespace:
+def _operation(path: str, *, method: str = "GET", has_request_body: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
-        method="GET",
+        method=method,
         path=path,
         parameters=[],
         group_name="test",
         command_name="op",
-        has_request_body=False,
+        has_request_body=has_request_body,
     )
 
 
@@ -74,6 +80,87 @@ def test_build_operation_request_allows_explicit_localhost_with_ambient_auth(
 
     assert url == "http://localhost:8000/health"
     assert headers["Authorization"] == "Bearer secret-token"
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "false", "False", "no", "off"])
+def test_tangle_verbose_false_values(monkeypatch: pytest.MonkeyPatch, value: str | None) -> None:
+    if value is None:
+        monkeypatch.delenv("TANGLE_VERBOSE", raising=False)
+    else:
+        monkeypatch.setenv("TANGLE_VERBOSE", value)
+
+    assert tangle_verbose_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on"])
+def test_tangle_verbose_truthy_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("TANGLE_VERBOSE", value)
+
+    assert tangle_verbose_enabled() is True
+
+
+def test_request_operation_does_not_log_bodies_when_verbose_false(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("TANGLE_VERBOSE", "0")
+
+    def fake_request(*args, **kwargs):
+        return httpx.Response(
+            200,
+            json={"id": "run-1", "secret": "response-secret"},
+            request=httpx.Request("POST", "https://api.test/api/pipeline_runs/"),
+        )
+
+    monkeypatch.setattr("tangle_cli.api_transport.httpx.request", fake_request)
+
+    request_operation(
+        _operation("/api/pipeline_runs/", method="POST", has_request_body=True),
+        {},
+        base_url="https://api.test",
+        auth_header="Bearer request-secret",
+        body={"name": "demo", "token": "request-token"},
+    )
+
+    assert capsys.readouterr().err == ""
+
+
+def test_request_operation_verbose_env_logs_redacted_body(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("TANGLE_VERBOSE", "1")
+
+    def fake_request(*args, **kwargs):
+        return httpx.Response(
+            200,
+            json={"id": "run-1", "secret": "response-secret"},
+            headers={"X-Api-Key": "response-key"},
+            request=httpx.Request("POST", "https://api.test/api/pipeline_runs/"),
+        )
+
+    monkeypatch.setattr("tangle_cli.api_transport.httpx.request", fake_request)
+
+    request_operation(
+        _operation("/api/pipeline_runs/", method="POST", has_request_body=True),
+        {},
+        base_url="https://api.test",
+        auth_header="Bearer request-secret",
+        header_entries=["Cloud-Auth: cloud-secret"],
+        body={"name": "demo", "token": "request-token"},
+    )
+
+    logs = capsys.readouterr().err
+    assert "[tangle-api] request: POST https://api.test/api/pipeline_runs/" in logs
+    assert "request body" in logs
+    assert "response body" in logs
+    assert "demo" in logs
+    assert "run-1" in logs
+    assert "request-secret" not in logs
+    assert "cloud-secret" not in logs
+    assert "request-token" not in logs
+    assert "response-secret" not in logs
+    assert "response-key" not in logs
 
 
 def test_build_operation_request_rejects_absolute_url_paths() -> None:
