@@ -47,6 +47,11 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
         search_components,
         transparency_check,
     )
+    from tangle_cli.pipeline_dehydrator import (
+        DehydrateChoice,
+        Jinja2ExportResult,
+        PipelineDehydrator,
+    )
     from tangle_cli.logger import (
         CaptureLogger,
         CliLogType,
@@ -152,6 +157,9 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     assert callable(inspect_by_name)
     assert callable(search_components)
     assert callable(transparency_check)
+    assert DehydrateChoice.AUTO == "a"
+    assert Jinja2ExportResult is not None
+    assert PipelineDehydrator is not None
     assert callable(get_default_logger)
     assert callable(run_with_logging)
     assert ConsoleLogger and CaptureLogger and NullLogger and Logger and CliLogType
