@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from inspect import Parameter, signature
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -50,11 +51,36 @@ class HydratedPipeline:
     resolved_count: int
 
 
-ComponentResolver = Callable[
-    ["PipelineHydrator", Any, str, Path | None],
-    tuple[str, dict[str, Any]] | None,
-]
+@dataclass(frozen=True)
+class ResolverContext:
+    """Structured context passed to component resolvers and URI hooks.
+
+    The legacy resolver signature ``(hydrator, value, path, base_dir)`` remains
+    supported. New downstream resolvers can accept a fifth ``context`` argument
+    to avoid reaching into hydrator internals for source/base/output/trust state.
+    """
+
+    kind: str
+    value: Any
+    path: str
+    base_dir: Path | None
+    base_dirs: tuple[Path, ...]
+    source_path: Path | None = None
+    output_folder: Path | None = None
+    verbose: bool = False
+    trusted_python_sources: tuple[str, ...] = ()
+    allow_all_hydration: bool = False
+    error_policy: str = "warn"
+    resolution_overrides: Mapping[str, Any] | None = None
+
+
+ComponentResolver = Callable[..., tuple[str, dict[str, Any]] | None]
+UriReader = Callable[["PipelineHydrator", str, ResolverContext], str | None]
+UriWriter = Callable[["PipelineHydrator", str, str, ResolverContext], None]
+
 COMPONENT_RESOLVERS: dict[str, ComponentResolver] = {}
+URI_READERS: dict[str, UriReader] = {}
+URI_WRITERS: dict[str, UriWriter] = {}
 
 
 def register_component_resolver(kind: str, resolver: ComponentResolver) -> None:
@@ -76,7 +102,35 @@ def available_component_resolvers() -> list[str]:
     return sorted(COMPONENT_RESOLVERS)
 
 
-def _available_resolvers_text(resolvers: Mapping[str, ComponentResolver]) -> str:
+def register_uri_reader(scheme: str, reader: UriReader) -> None:
+    """Register a native-free URI reader hook for schemes such as ``gs``.
+
+    OSS provides the dispatch seam only; downstream packages own credentials and
+    scheme-specific SDK dependencies.
+    """
+
+    URI_READERS[scheme] = reader
+
+
+def register_uri_writer(scheme: str, writer: UriWriter) -> None:
+    """Register a native-free URI writer hook for schemes such as ``gs``."""
+
+    URI_WRITERS[scheme] = writer
+
+
+def available_uri_readers() -> list[str]:
+    """Return registered URI reader schemes in stable display order."""
+
+    return sorted(URI_READERS)
+
+
+def available_uri_writers() -> list[str]:
+    """Return registered URI writer schemes in stable display order."""
+
+    return sorted(URI_WRITERS)
+
+
+def _available_resolvers_text(resolvers: Mapping[str, Any]) -> str:
     return ", ".join(sorted(resolvers)) or "(none)"
 
 
@@ -139,8 +193,12 @@ class PipelineHydrator:
         header: list[str] | None = None,
         include_env_credentials: bool = True,
         component_resolvers: Mapping[str, ComponentResolver] | None = None,
+        uri_readers: Mapping[str, UriReader] | None = None,
+        uri_writers: Mapping[str, UriWriter] | None = None,
         trusted_python_sources: list[str] | None = None,
         allow_all_hydration: bool = False,
+        recursive_context: str | None = None,
+        error_policy: str = "warn",
     ) -> None:
         self.client = client
         self._client_options = {
@@ -159,9 +217,18 @@ class PipelineHydrator:
         self.component_resolvers: dict[str, ComponentResolver] = dict(COMPONENT_RESOLVERS)
         if component_resolvers:
             self.component_resolvers.update(component_resolvers)
+        self.uri_readers: dict[str, UriReader] = dict(URI_READERS)
+        if uri_readers:
+            self.uri_readers.update(uri_readers)
+        self.uri_writers: dict[str, UriWriter] = dict(URI_WRITERS)
+        if uri_writers:
+            self.uri_writers.update(uri_writers)
         self.resolution_overrides: dict[str, Any] = resolution_overrides or {}
         self.trusted_python_sources = trusted_python_sources or []
         self.allow_all_hydration = allow_all_hydration
+        self.recursive_context = self._recursive_context_value(recursive_context)
+        self._global_params: dict[str, Any] = {}
+        self.error_policy = error_policy
         self._resolution_overrides_str: dict[str, str] = {
             k: str(v) for k, v in self.resolution_overrides.items()
         }
@@ -176,9 +243,163 @@ class PipelineHydrator:
             )
         return self.client
 
+    @staticmethod
+    def _recursive_context_value(value: Any) -> str | None:
+        if value is None:
+            return None
+        raw = getattr(value, "value", value)
+        normalized = str(raw).replace("_", "-").lower()
+        if normalized in {"parent-priority", "parent"}:
+            return "parent-priority"
+        if normalized in {"child-priority", "child"}:
+            return "child-priority"
+        raise ValueError(f"Unsupported recursive_context: {value!r}")
+
     def _cache_key(self, ref_type: str, ref_value: str) -> str:
         """Compute a cache key for a component reference."""
-        return f"{ref_type}:{ref_value}"
+        key = f"{ref_type}:{ref_value}"
+        if self.recursive_context and self._global_params:
+            params_hash = hash(json.dumps(self._global_params, sort_keys=True, default=str))
+            return f"{key}:ctx={params_hash}"
+        return key
+
+    def _merge_with_global_params(self, child_params: dict[str, Any]) -> dict[str, Any]:
+        """Merge child template params with inherited recursive-context params.
+
+        ``parent-priority`` means inherited params win on conflicts;
+        ``child-priority`` means the child template config wins.
+        """
+
+        if not self.recursive_context or not self._global_params:
+            return dict(child_params)
+        if self.recursive_context == "parent-priority":
+            merged = dict(child_params)
+            merged.update(self._global_params)
+            return merged
+        merged = dict(self._global_params)
+        merged.update(child_params)
+        return merged
+
+    def _resolver_base_dirs(self, base_dir: Path | None) -> tuple[Path, ...]:
+        dirs = [path.resolve() for path in (base_dir, Path.cwd()) if path is not None]
+        seen: set[Path] = set()
+        result: list[Path] = []
+        for path in dirs:
+            if path not in seen:
+                seen.add(path)
+                result.append(path)
+        return tuple(result)
+
+    def _resolve_context_path(self, value: Any, base_dir: Path | None) -> Path | None:
+        if not value:
+            return None
+        path = Path(str(value))
+        if path.is_absolute():
+            return path.resolve()
+        return (base_dir / path).resolve() if base_dir is not None else path.resolve()
+
+    def make_resolver_context(
+        self,
+        kind: str,
+        value: Any,
+        path: str,
+        base_dir: Path | None,
+    ) -> ResolverContext:
+        """Build the structured context passed to downstream resolver hooks."""
+
+        source_path = None
+        output_folder = None
+        if isinstance(value, (str, Path)) and "://" not in str(value):
+            source_path = self._resolve_context_path(value, base_dir)
+        elif isinstance(value, dict):
+            source_path = self._resolve_context_path(
+                value.get("file") or value.get("source"), base_dir
+            )
+            output_folder = self._resolve_context_path(value.get("output_folder"), base_dir)
+        return ResolverContext(
+            kind=kind,
+            value=value,
+            path=path,
+            base_dir=base_dir,
+            base_dirs=self._resolver_base_dirs(base_dir),
+            source_path=source_path,
+            output_folder=output_folder,
+            verbose=self.verbose,
+            trusted_python_sources=tuple(self.trusted_python_sources),
+            allow_all_hydration=self.allow_all_hydration,
+            error_policy=self.error_policy,
+            resolution_overrides=self.resolution_overrides,
+        )
+
+    @staticmethod
+    def _accepts_resolver_context(resolver: ComponentResolver) -> bool:
+        try:
+            params = signature(resolver).parameters.values()
+        except (TypeError, ValueError):
+            return True
+        positional = [
+            p for p in params
+            if p.kind in {Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD}
+        ]
+        return any(p.kind == Parameter.VAR_POSITIONAL for p in params) or len(positional) >= 5
+
+    def _call_component_resolver(
+        self,
+        resolver: ComponentResolver,
+        value: Any,
+        path: str,
+        base_dir: Path | None,
+        context: ResolverContext,
+    ) -> tuple[str, dict[str, Any]] | None:
+        if self._accepts_resolver_context(resolver):
+            return resolver(self, value, path, base_dir, context)
+        return resolver(self, value, path, base_dir)
+
+    @staticmethod
+    def _uri_scheme(uri: str) -> str | None:
+        if "://" not in uri:
+            return None
+        return uri.split("://", 1)[0]
+
+    def _read_uri_text(
+        self,
+        uri: str,
+        kind: str,
+        context: ResolverContext | None = None,
+    ) -> str | None:
+        scheme = self._uri_scheme(uri)
+        if not scheme or scheme == "file":
+            path = Path(uri[7:] if uri.startswith("file://") else uri)
+            return path.read_text(encoding="utf-8")
+        reader = self.uri_readers.get(scheme)
+        if reader is None:
+            raise UnsupportedHydrationFeatureError(
+                f"Unsupported {kind} URI scheme {scheme!r}. Registered URI readers: "
+                f"{_available_resolvers_text(self.uri_readers)}"
+            )
+        hook_context = context or self.make_resolver_context(scheme, uri, kind, None)
+        return reader(self, uri, hook_context)
+
+    def _write_uri_text(
+        self,
+        uri: str,
+        content: str,
+        context: ResolverContext | None = None,
+    ) -> None:
+        scheme = self._uri_scheme(uri)
+        if not scheme or scheme == "file":
+            path = Path(uri[7:] if uri.startswith("file://") else uri)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            return
+        writer = self.uri_writers.get(scheme)
+        if writer is None:
+            raise UnsupportedHydrationFeatureError(
+                f"Unsupported output URI scheme {scheme!r}. Registered URI writers: "
+                f"{_available_resolvers_text(self.uri_writers)}"
+            )
+        hook_context = context or self.make_resolver_context(scheme, uri, "output", None)
+        writer(self, uri, content, hook_context)
 
     def available_component_resolvers(self) -> list[str]:
         """Return resolver kinds available on this hydrator instance."""
@@ -206,7 +427,8 @@ class PipelineHydrator:
         resolver = self.component_resolvers.get(kind)
         if resolver is None:
             raise self._unsupported_resolver(kind)
-        return resolver(self, value, path, base_dir)
+        context = self.make_resolver_context(kind, value, path, base_dir)
+        return self._call_component_resolver(resolver, value, path, base_dir, context)
 
     def fetch_component(self, digest: str) -> tuple[str, dict[str, Any]]:
         """Fetch a component, optionally following deprecation successors."""
@@ -291,6 +513,8 @@ class PipelineHydrator:
     ) -> tuple[str, dict[str, Any]] | None:
         """Fetch a component by URL and return as dict."""
         scheme = url.split("://", 1)[0] if "://" in url else "url"
+        if scheme in self.uri_readers:
+            return self._fetch_component_from_uri(url, path, base_dir)
         return self._resolve_registered_component(scheme, url, path, base_dir)
 
     def fetch_remote_component(
@@ -323,15 +547,44 @@ class PipelineHydrator:
         )
         return digest, spec
 
+    def _fetch_component_from_uri(
+        self,
+        url: str,
+        path: str,
+        base_dir: Path | None = None,
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Fetch component YAML through a registered URI reader hook."""
+
+        context = self.make_resolver_context(self._uri_scheme(url) or "url", url, path, base_dir)
+        yaml_text = self._read_uri_text(url, "component", context)
+        if yaml_text is None:
+            return None
+        try:
+            spec = yaml.safe_load(yaml_text)
+        except yaml.YAMLError as exc:
+            raise HydrationError(f"Failed to parse component YAML from {url}: {exc}") from exc
+        if not isinstance(spec, dict):
+            raise HydrationError(f"Component YAML at {url} must be a mapping")
+        if "template_file" in spec:
+            raise UnsupportedHydrationFeatureError(
+                f"template_file configs are not supported for non-local URI {url!r}"
+            )
+        digest = utils.compute_text_digest(yaml_text)
+        self.log.info(
+            f"   ✅ Loaded component: {spec.get('name', 'unknown')} "
+            f"(digest: {digest[:16]}...)"
+        )
+        return digest, spec
+
     def load_gcs_uri(
         self,
         url: str,
         path: str,
         base_dir: Path | None = None,
     ) -> tuple[str, dict[str, Any]] | None:
-        """Overridable hook for downstream GCS support; unsupported in OSS."""
+        """Compatibility hook for downstream GCS support via URI readers."""
 
-        raise self._unsupported_resolver("gs")
+        return self._fetch_component_from_uri(url, path, base_dir)
 
     def _render_template_config(
         self,
@@ -350,8 +603,10 @@ class PipelineHydrator:
             return None
 
         context = {k: v for k, v in config.items() if k != "template_file"}
+        if overrides:
+            context.update(overrides)
         self.log.info(f"   🔧 Rendering template: {template_path}")
-        rendered = render_template(full_template_path, context, overrides=overrides)
+        rendered = render_template(full_template_path, context)
         spec = yaml.safe_load(rendered)
         if not isinstance(spec, dict):
             self.log.warn(f"   ⚠️ Rendered template produced invalid YAML: {full_template_path}")
@@ -389,10 +644,17 @@ class PipelineHydrator:
             raise HydrationError(f"Component file {path_obj} must contain a mapping")
 
         if "template_file" in spec:
+            merged_params: dict[str, Any] | None = None
+            if self.recursive_context and self._global_params:
+                child_params = {k: v for k, v in spec.items() if k != "template_file"}
+                merged_params = self._merge_with_global_params(child_params)
+                spec = {"template_file": spec["template_file"], **merged_params}
             result = self._render_template_config(path_obj, spec)
             if result is None:
                 return None
             yaml_text, spec = result
+            if merged_params is not None:
+                spec["_recursive_params"] = merged_params
 
         # Match TD provenance behavior: nested refs inside a loaded component
         # resolve relative to the component file that contains them, not the
@@ -419,34 +681,49 @@ class PipelineHydrator:
             file_path, fragment = file_path.rsplit("#", 1)
 
         self.log.info(f"   Resolving component via config: {url}... ({path})")
-        if file_path.startswith("gs://"):
-            raise UnsupportedHydrationFeatureError(
-                "gs:// resolve configs are not supported by OSS hydrate"
-            )
 
-        path_obj = Path(file_path)
-        if not path_obj.is_absolute() and base_dir:
-            path_obj = (base_dir / path_obj).resolve()
+        scheme = self._uri_scheme(file_path)
+        source: str
+        if scheme and scheme != "file":
+            source = file_path
+            nested_base_dir = None
+            text = self._read_uri_text(
+                file_path,
+                "resolve config",
+                self.make_resolver_context(scheme, file_path, path, base_dir),
+            )
+            if text is None:
+                return None
         else:
-            path_obj = path_obj.resolve()
-        if not path_obj.exists():
-            self.log.warn(f"   ⚠️ Resolve config not found: {path_obj}")
-            return None
+            raw_path = file_path[7:] if file_path.startswith("file://") else file_path
+            path_obj = Path(raw_path)
+            if not path_obj.is_absolute() and base_dir:
+                path_obj = (base_dir / path_obj).resolve()
+            else:
+                path_obj = path_obj.resolve()
+            if not path_obj.exists():
+                self.log.warn(f"   ⚠️ Resolve config not found: {path_obj}")
+                return None
+            source = str(path_obj)
+            nested_base_dir = path_obj.parent
+            try:
+                text = path_obj.read_text(encoding="utf-8")
+            except Exception as exc:
+                raise HydrationError(f"Error reading resolve config {path_obj}: {exc}") from exc
 
         try:
-            text = path_obj.read_text(encoding="utf-8")
             text = utils.expand_vars(text, self._resolution_overrides_str)
             config = yaml.safe_load(text)
         except utils.UnsetVarError as exc:
-            self.log.warn(f"   ⚠️ Resolve config {path_obj}: unset variable {exc}")
+            self.log.warn(f"   ⚠️ Resolve config {source}: unset variable {exc}")
             return None
         except Exception as exc:
-            raise HydrationError(f"Error parsing resolve config {path_obj}: {exc}") from exc
+            raise HydrationError(f"Error parsing resolve config {source}: {exc}") from exc
 
         if fragment is not None:
             if not isinstance(config, dict) or fragment not in config:
                 self.log.warn(
-                    f"   ⚠️ Fragment '{fragment}' not found in resolve config {path_obj}"
+                    f"   ⚠️ Fragment '{fragment}' not found in resolve config {source}"
                 )
                 return None
             entry = config[fragment]
@@ -456,7 +733,7 @@ class PipelineHydrator:
             else:
                 config = entry
 
-        return self._resolve_from_config(config, path, path_obj.parent)
+        return self._resolve_from_config(config, path, nested_base_dir)
 
     def _resolve_from_config(
         self,
@@ -538,9 +815,8 @@ class PipelineHydrator:
                 return self._resolve_registered_component(kind, value, path, base_dir)
         return None
 
-    @staticmethod
-    def _resolve_entry_kinds() -> tuple[str, ...]:
-        return (
+    def _resolve_entry_kinds(self) -> tuple[str, ...]:
+        builtin_kinds = (
             "digest",
             "url",
             "name",
@@ -553,6 +829,7 @@ class PipelineHydrator:
             "from-docker",
             "from-container",
         )
+        return tuple(dict.fromkeys((*builtin_kinds, *self.component_resolvers)))
 
     def _resolve_by_name_with_filters(
         self,
@@ -722,8 +999,11 @@ class PipelineHydrator:
         task_data: dict[str, Any],
         path: str,
         base_dir: Path | None = None,
+        recursive_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Resolve component references to full componentRef with spec."""
+        if recursive_params is not None:
+            self._global_params = recursive_params
         if not isinstance(task_data, dict):
             return task_data
 
@@ -914,10 +1194,15 @@ class PipelineHydrator:
             task_base_dir: Path | None = None,
             recursive_params: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            return self._resolve_task(task_name, task_data, path, task_base_dir)
+            return self._resolve_task(
+                task_name, task_data, path, task_base_dir, recursive_params
+            )
 
         pipeline_name = data.get("name", "pipeline")
-        return utils.traverse_pipeline_tasks(data, pipeline_name, process_task, base_dir)
+        initial_params = self._global_params.copy() if self._global_params else None
+        return utils.traverse_pipeline_tasks(
+            data, pipeline_name, process_task, base_dir, initial_params
+        )
 
     @property
     def resolved_count(self) -> int:
@@ -931,24 +1216,45 @@ class PipelineHydrator:
         overrides: dict[str, str] | None = None,
     ) -> HydratedPipeline:
         """Hydrate a pipeline YAML file."""
-        input_path = input_file if isinstance(input_file, Path) else Path(str(input_file))
-        base_dir = input_path.parent.resolve()
+        input_str = str(input_file)
+        input_scheme = self._uri_scheme(input_str)
+        input_path: Path | None = None
+        base_dir: Path | None = None
         try:
-            config = yaml.safe_load(input_path.read_text(encoding="utf-8"))
+            if input_scheme and input_scheme != "file":
+                yaml_text = self._read_uri_text(
+                    input_str,
+                    "pipeline",
+                    self.make_resolver_context(input_scheme, input_str, "pipeline", None),
+                )
+                config = yaml.safe_load(yaml_text) if yaml_text is not None else None
+            else:
+                raw_input = input_str[7:] if input_str.startswith("file://") else input_str
+                input_path = Path(raw_input)
+                base_dir = input_path.parent.resolve()
+                config = yaml.safe_load(input_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            raise HydrationError(f"Failed to read pipeline YAML {input_path}: {exc}") from exc
+            raise HydrationError(f"Failed to read pipeline YAML {input_file}: {exc}") from exc
         if config is None:
             config = {}
         if not isinstance(config, dict):
             raise HydrationError("Pipeline YAML must contain a top-level mapping")
 
         if "template_file" in config:
+            if input_path is None:
+                raise UnsupportedHydrationFeatureError(
+                    "template_file configs require a local pipeline input"
+                )
             result = self._render_template_config(input_path, config, overrides=overrides)
             if result is None:
                 raise HydrationError(
                     f"Template file not found: {(base_dir / config['template_file']).resolve()}"
                 )
             _, output_yaml = result
+            if self.recursive_context:
+                self._global_params = {k: v for k, v in config.items() if k != "template_file"}
+                if overrides:
+                    self._global_params.update(overrides)
             self.log.info(f"✅ Hydrated {input_file}")
         else:
             output_yaml = config
@@ -957,9 +1263,19 @@ class PipelineHydrator:
         output_yaml = self.resolve_components(output_yaml, base_dir=base_dir)
         output_content = utils.dump_yaml(output_yaml)
         if output_file is not None:
-            output_path = Path(output_file)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(output_content, encoding="utf-8")
+            output_str = str(output_file)
+            output_scheme = self._uri_scheme(output_str)
+            if output_scheme and output_scheme != "file":
+                self._write_uri_text(
+                    output_str,
+                    output_content,
+                    self.make_resolver_context(output_scheme, output_str, "output", base_dir),
+                )
+            else:
+                raw_output = output_str[7:] if output_str.startswith("file://") else output_str
+                output_path = Path(raw_output)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(output_content, encoding="utf-8")
         return HydratedPipeline(output_yaml, output_content, self.resolved_count)
 
 

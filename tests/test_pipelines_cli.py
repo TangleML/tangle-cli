@@ -833,6 +833,177 @@ def test_pipeline_hydrator_resolver_registry_can_add_downstream_kind(tmp_path: P
     ]
 
 
+def test_pipeline_hydrator_resolver_registry_passes_structured_context(tmp_path: Path):
+    from tangle_cli.pipeline_hydrator import PipelineHydrator, ResolverContext
+
+    calls: list[ResolverContext] = []
+
+    def fake_resolver(hydrator, value, path, base_dir, context):
+        calls.append(context)
+        return (
+            "sha256:custom",
+            {"name": "Custom Component", "implementation": {"container": {"image": "x"}}},
+        )
+
+    hydrator = PipelineHydrator(
+        component_resolvers={"custom": fake_resolver},
+        trusted_python_sources=[str(tmp_path)],
+        allow_all_hydration=True,
+        error_policy="raise",
+    )
+
+    result = hydrator._resolve_from_config(
+        {"custom": {"source": "component.yaml", "output_folder": "generated"}},
+        "Pipeline.task",
+        tmp_path,
+    )
+
+    assert result == (
+        "sha256:custom",
+        {"name": "Custom Component", "implementation": {"container": {"image": "x"}}},
+    )
+    assert calls
+    context = calls[0]
+    assert context.kind == "custom"
+    assert context.path == "Pipeline.task"
+    assert context.base_dir == tmp_path
+    assert context.source_path == tmp_path / "component.yaml"
+    assert context.output_folder == tmp_path / "generated"
+    assert context.base_dirs[0] == tmp_path
+    assert context.trusted_python_sources == (str(tmp_path),)
+    assert context.allow_all_hydration is True
+    assert context.error_policy == "raise"
+
+
+def test_pipeline_hydrator_resolver_registry_keeps_legacy_signature(tmp_path: Path):
+    from tangle_cli.pipeline_hydrator import PipelineHydrator
+
+    calls = []
+
+    def legacy_resolver(hydrator, value, path, base_dir):
+        calls.append({"value": value, "path": path, "base_dir": base_dir})
+        return (
+            "sha256:legacy",
+            {"name": "Legacy Component", "implementation": {"container": {"image": "x"}}},
+        )
+
+    hydrator = PipelineHydrator(component_resolvers={"legacy": legacy_resolver})
+
+    result = hydrator._resolve_from_config(
+        {"legacy": "component.yaml"},
+        "Pipeline.task",
+        tmp_path,
+    )
+
+    assert result == (
+        "sha256:legacy",
+        {"name": "Legacy Component", "implementation": {"container": {"image": "x"}}},
+    )
+    assert calls == [{"value": "component.yaml", "path": "Pipeline.task", "base_dir": tmp_path}]
+
+
+def test_pipeline_hydrator_uri_hooks_cover_top_level_and_resolve_config():
+    from tangle_cli.pipeline_hydrator import PipelineHydrator, ResolverContext
+
+    output: dict[str, str] = {}
+    contexts: list[ResolverContext] = []
+    sources = {
+        "mem://pipeline": yaml.safe_dump({
+            "name": "Pipeline",
+            "implementation": {
+                "graph": {
+                    "tasks": {
+                        "task": {"componentRef": {"url": "resolve://mem://resolve#thing"}}
+                    }
+                }
+            },
+        }),
+        "mem://resolve": yaml.safe_dump({"thing": {"url": "mem://component"}}),
+        "mem://component": yaml.safe_dump({
+            "name": "Memory Component",
+            "implementation": {"container": {"image": "python:3.12"}},
+        }),
+    }
+
+    def reader(hydrator, uri, context):
+        contexts.append(context)
+        return sources[uri]
+
+    def writer(hydrator, uri, content, context):
+        contexts.append(context)
+        output[uri] = content
+
+    hydrator = PipelineHydrator(uri_readers={"mem": reader}, uri_writers={"mem": writer})
+
+    result = hydrator.hydrate_file("mem://pipeline", "mem://hydrated")
+
+    assert "mem://hydrated" in output
+    hydrated = yaml.safe_load(output["mem://hydrated"])
+    ref = hydrated["implementation"]["graph"]["tasks"]["task"]["componentRef"]
+    assert ref["digest"] == result.data["implementation"]["graph"]["tasks"]["task"]["componentRef"]["digest"]
+    assert ref["spec"]["name"] == "Memory Component"
+    assert {context.kind for context in contexts} == {"mem"}
+    assert {context.path for context in contexts} >= {"pipeline", "Pipeline.task", "output"}
+
+
+def test_pipeline_hydrator_recursive_context_flows_to_child_templates(tmp_path: Path):
+    from tangle_cli.pipeline_hydrator import PipelineHydrator
+
+    (tmp_path / "pipeline.yaml.j2").write_text(
+        textwrap.dedent(
+            """
+            name: Pipeline
+            implementation:
+              graph:
+                tasks:
+                  child:
+                    componentRef:
+                      url: file://./child-config.yaml
+            """
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "child.yaml.j2").write_text(
+        textwrap.dedent(
+            """
+            name: "Child {{ shared }} {{ parent_only }} {{ child_only }}"
+            implementation:
+              container:
+                image: python:3.12
+            """
+        ),
+        encoding="utf-8",
+    )
+    _write_pipeline(
+        tmp_path / "pipeline-config.yaml",
+        {
+            "template_file": "pipeline.yaml.j2",
+            "shared": "parent",
+            "parent_only": "yes",
+        },
+    )
+    _write_pipeline(
+        tmp_path / "child-config.yaml",
+        {
+            "template_file": "child.yaml.j2",
+            "shared": "child",
+            "child_only": "also",
+        },
+    )
+
+    parent_first = PipelineHydrator(recursive_context="parent-priority").hydrate_file(
+        tmp_path / "pipeline-config.yaml"
+    )
+    child_first = PipelineHydrator(recursive_context="child-priority").hydrate_file(
+        tmp_path / "pipeline-config.yaml"
+    )
+
+    parent_spec = parent_first.data["implementation"]["graph"]["tasks"]["child"]["componentRef"]["spec"]
+    child_spec = child_first.data["implementation"]["graph"]["tasks"]["child"]["componentRef"]["spec"]
+    assert parent_spec["name"] == "Child parent yes also"
+    assert child_spec["name"] == "Child child yes also"
+
+
 def test_pipelines_layout_preserves_tasks_and_updates_coordinates(tmp_path: Path, capsys):
     pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml", _minimal_valid_pipeline())
     output_path = tmp_path / "layout.yaml"
