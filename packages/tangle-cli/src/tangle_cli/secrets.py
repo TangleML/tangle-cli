@@ -7,6 +7,7 @@ never included in returned metadata dictionaries.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any, Protocol
 
 
@@ -38,6 +39,121 @@ class SecretValueError(ValueError):
     """Raised when secret value CLI/config inputs are invalid."""
 
 
+class SecretsManager:
+    """Secret resource manager with injectable client construction.
+
+    Downstream packages can inject a Shopify-authenticated client directly or
+    provide a lazy ``client_factory``. Returned dictionaries intentionally omit
+    secret values and only include metadata.
+    """
+
+    def __init__(
+        self,
+        client: SecretClient | None = None,
+        *,
+        client_factory: Callable[[], SecretClient] | None = None,
+    ) -> None:
+        self._client = client
+        self._client_factory = client_factory
+
+    @property
+    def client(self) -> SecretClient:
+        if self._client is None:
+            if self._client_factory is None:
+                raise ValueError("SecretsManager requires a client or client_factory")
+            self._client = self._client_factory()
+        return self._client
+
+    @staticmethod
+    def resolve_secret_value(value: str | None, from_env: str | None) -> str:
+        """Resolve the secret value from either ``--value`` or ``--from-env``.
+
+        Error messages intentionally mention only the option/env-var name and
+        never include the secret value.
+        """
+
+        if value is not None and from_env is not None:
+            raise SecretValueError("specify either --value or --from-env, not both")
+        if from_env is not None:
+            resolved = os.environ.get(from_env)
+            if resolved is None:
+                raise SecretValueError(f"environment variable '{from_env}' is not set")
+            return resolved
+        if value is not None:
+            return value
+        raise SecretValueError("either --value or --from-env is required")
+
+    @staticmethod
+    def secret_metadata(secret: Any) -> dict[str, Any]:
+        """Return JSON-safe secret metadata, excluding any secret value fields."""
+
+        entry: dict[str, Any] = {}
+        for field in ("secret_name", "created_at", "updated_at", "expires_at", "description"):
+            value = _value_from_mapping_or_object(secret, field)
+            if value is not None:
+                entry[field] = str(value)
+        return entry
+
+    def list(self) -> dict[str, Any]:
+        """List secret metadata without exposing secret values."""
+
+        response = self.client.secrets_list()
+        raw_secrets = _value_from_mapping_or_object(response, "secrets", []) or []
+        secrets = [self.secret_metadata(secret) for secret in raw_secrets]
+        return {"status": "success", "count": len(secrets), "secrets": secrets}
+
+    def create(
+        self,
+        secret_name: str,
+        *,
+        value: str | None = None,
+        from_env: str | None = None,
+        description: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a secret using generated static API operations."""
+
+        secret_value = self.resolve_secret_value(value, from_env)
+        secret = self.client.secrets_create(
+            secret_name,
+            secret_value,
+            description=description,
+            expires_at=expires_at,
+        )
+        return {"status": "success", "action": "created", "secret": self.secret_metadata(secret)}
+
+    def update(
+        self,
+        secret_name: str,
+        *,
+        value: str | None = None,
+        from_env: str | None = None,
+        description: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Update a secret using generated static API operations."""
+
+        secret_value = self.resolve_secret_value(value, from_env)
+        secret = self.client.secrets_update(
+            secret_name,
+            secret_value,
+            description=description,
+            expires_at=expires_at,
+        )
+        return {"status": "success", "action": "updated", "secret": self.secret_metadata(secret)}
+
+    def delete(self, secret_name: str) -> dict[str, Any]:
+        """Delete a secret using generated static API operations."""
+
+        self.client.secrets_delete(secret_name)
+        return {"status": "success", "action": "deleted", "secret_name": secret_name}
+
+
+# ---------------------------------------------------------------------------
+# Compatibility helpers and thin module-level wrappers
+# ---------------------------------------------------------------------------
+
+
 def _value_from_mapping_or_object(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(key, default)
@@ -45,42 +161,21 @@ def _value_from_mapping_or_object(value: Any, key: str, default: Any = None) -> 
 
 
 def _resolve_secret_value(value: str | None, from_env: str | None) -> str:
-    """Resolve the secret value from either ``--value`` or ``--from-env``.
+    """Backward-compatible wrapper for :meth:`SecretsManager.resolve_secret_value`."""
 
-    Error messages intentionally mention only the option/env-var name and never
-    include the secret value.
-    """
-
-    if value is not None and from_env is not None:
-        raise SecretValueError("specify either --value or --from-env, not both")
-    if from_env is not None:
-        resolved = os.environ.get(from_env)
-        if resolved is None:
-            raise SecretValueError(f"environment variable '{from_env}' is not set")
-        return resolved
-    if value is not None:
-        return value
-    raise SecretValueError("either --value or --from-env is required")
+    return SecretsManager.resolve_secret_value(value, from_env)
 
 
 def _secret_metadata(secret: Any) -> dict[str, Any]:
-    """Return JSON-safe secret metadata, excluding any secret value fields."""
+    """Backward-compatible wrapper for :meth:`SecretsManager.secret_metadata`."""
 
-    entry: dict[str, Any] = {}
-    for field in ("secret_name", "created_at", "updated_at", "expires_at", "description"):
-        value = _value_from_mapping_or_object(secret, field)
-        if value is not None:
-            entry[field] = str(value)
-    return entry
+    return SecretsManager.secret_metadata(secret)
 
 
 def list_secrets(client: SecretClient) -> dict[str, Any]:
-    """List secret metadata without exposing secret values."""
+    """Backward-compatible wrapper for :meth:`SecretsManager.list`."""
 
-    response = client.secrets_list()
-    raw_secrets = _value_from_mapping_or_object(response, "secrets", []) or []
-    secrets = [_secret_metadata(secret) for secret in raw_secrets]
-    return {"status": "success", "count": len(secrets), "secrets": secrets}
+    return SecretsManager(client=client).list()
 
 
 def create_secret(
@@ -92,16 +187,15 @@ def create_secret(
     description: str | None = None,
     expires_at: str | None = None,
 ) -> dict[str, Any]:
-    """Create a secret using generated static API operations."""
+    """Backward-compatible wrapper for :meth:`SecretsManager.create`."""
 
-    secret_value = _resolve_secret_value(value, from_env)
-    secret = client.secrets_create(
+    return SecretsManager(client=client).create(
         secret_name,
-        secret_value,
+        value=value,
+        from_env=from_env,
         description=description,
         expires_at=expires_at,
     )
-    return {"status": "success", "action": "created", "secret": _secret_metadata(secret)}
 
 
 def update_secret(
@@ -113,20 +207,30 @@ def update_secret(
     description: str | None = None,
     expires_at: str | None = None,
 ) -> dict[str, Any]:
-    """Update a secret using generated static API operations."""
+    """Backward-compatible wrapper for :meth:`SecretsManager.update`."""
 
-    secret_value = _resolve_secret_value(value, from_env)
-    secret = client.secrets_update(
+    return SecretsManager(client=client).update(
         secret_name,
-        secret_value,
+        value=value,
+        from_env=from_env,
         description=description,
         expires_at=expires_at,
     )
-    return {"status": "success", "action": "updated", "secret": _secret_metadata(secret)}
 
 
 def delete_secret(client: SecretClient, secret_name: str) -> dict[str, Any]:
-    """Delete a secret using generated static API operations."""
+    """Backward-compatible wrapper for :meth:`SecretsManager.delete`."""
 
-    client.secrets_delete(secret_name)
-    return {"status": "success", "action": "deleted", "secret_name": secret_name}
+    return SecretsManager(client=client).delete(secret_name)
+
+
+__all__ = [
+    "SecretClient",
+    "SecretValueError",
+    "SecretsManager",
+    "_resolve_secret_value",
+    "create_secret",
+    "delete_secret",
+    "list_secrets",
+    "update_secret",
+]

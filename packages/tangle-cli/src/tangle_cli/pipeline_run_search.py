@@ -13,6 +13,7 @@ import re
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import Any
 
 from .logger import Logger, get_default_logger
@@ -37,6 +38,231 @@ class PageChunk:
     next_page_token: str | None
     ui_filter_url: str
     next_ui_filter_url: str | None
+
+
+class PipelineRunSearch:
+    """Resource manager for pipeline-run search/filter behavior.
+
+    The class is intentionally native-free. Downstream packages can inject an
+    authenticated client or lazy ``client_factory`` and subclass the formatting
+    or predicate builders while the legacy module-level functions remain
+    available.
+    """
+
+    def __init__(
+        self,
+        client: Any = None,
+        *,
+        client_factory: Callable[[], Any] | None = None,
+        logger: Logger | None = None,
+    ) -> None:
+        self._client = client
+        self._client_factory = client_factory
+        self.logger = logger or get_default_logger()
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            if self._client_factory is None:
+                raise ValueError("PipelineRunSearch requires a client or client_factory")
+            self._client = self._client_factory()
+        return self._client
+
+    @staticmethod
+    def build_predicate(*, predicate_type: str, **fields: Any) -> dict[str, Any]:
+        return build_predicate(predicate_type=predicate_type, **fields)
+
+    @staticmethod
+    def build_value_contains(*, key: str, value_substring: str) -> dict[str, Any]:
+        return build_value_contains(key=key, value_substring=value_substring)
+
+    @staticmethod
+    def build_value_equals(*, key: str, value: str) -> dict[str, Any]:
+        return build_value_equals(key=key, value=value)
+
+    @staticmethod
+    def build_key_exists(*, key: str) -> dict[str, Any]:
+        return build_key_exists(key=key)
+
+    @staticmethod
+    def build_time_range(
+        *,
+        key: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> dict[str, Any]:
+        return build_time_range(key=key, start_time=start_time, end_time=end_time)
+
+    def validate_created_by(self, *, value: str) -> str:
+        return validate_created_by(value=value, logger=self.logger)
+
+    @staticmethod
+    def parse_annotation(text: str) -> tuple[str, str | None]:
+        return parse_annotation(text)
+
+    @staticmethod
+    def normalize_query_input(text: str) -> dict[str, Any]:
+        return normalize_query_input(text)
+
+    @staticmethod
+    def build_ui_filter_url(
+        *,
+        base_url: str,
+        name: str | None = None,
+        created_by: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        page_token: str | None = None,
+    ) -> str:
+        return build_ui_filter_url(
+            base_url=base_url,
+            name=name,
+            created_by=created_by,
+            start_date=start_date,
+            end_date=end_date,
+            page_token=page_token,
+        )
+
+    @staticmethod
+    def build_filter_query(
+        *,
+        name: str | None = None,
+        created_by: str | None = None,
+        annotations: dict[str, str | None] | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict[str, Any] | None:
+        return build_filter_query(
+            name=name,
+            created_by=created_by,
+            annotations=annotations,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def resolve_created_by(self, *, created_by: str | None) -> tuple[str | None, dict[str, Any] | None]:
+        return resolve_created_by(created_by=created_by, client=self.client, logger=self.logger)
+
+    def resolve_dates(
+        self,
+        *,
+        start_date: str | None,
+        end_date: str | None,
+        local_time: bool,
+    ) -> tuple[str | None, str | None]:
+        return resolve_dates(start_date=start_date, end_date=end_date, local_time=local_time, logger=self.logger)
+
+    @staticmethod
+    def format_mcp_table(*, rows: list[dict[str, Any]], next_page_token: str | None, ui_filter_url: str) -> str:
+        return _format_mcp_table(rows=rows, next_page_token=next_page_token, ui_filter_url=ui_filter_url)
+
+    @staticmethod
+    def format_cli_table(*, page_chunks: list[PageChunk], total_count: int) -> str:
+        return _format_cli_table(page_chunks=page_chunks, total_count=total_count)
+
+    def fetch_pages(
+        self,
+        *,
+        filter_query_str: str | None,
+        limit: int,
+        page_token: str | None,
+        base_url: str,
+        name: str | None,
+        created_by: str | None,
+        start_date: str | None,
+        end_date: str | None,
+    ) -> tuple[list[dict[str, Any]], list[PageChunk], str | None]:
+        return fetch_pipeline_run_search_pages(
+            client=self.client,
+            filter_query_str=filter_query_str,
+            limit=limit,
+            page_token=page_token,
+            base_url=base_url,
+            name=name,
+            created_by=created_by,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    @staticmethod
+    def build_result(
+        *,
+        all_rows: list[dict[str, Any]],
+        page_chunks: list[PageChunk],
+        final_next_token: str | None,
+        first_ui_url: str,
+    ) -> dict[str, Any]:
+        return build_pipeline_run_search_result(
+            all_rows=all_rows,
+            page_chunks=page_chunks,
+            final_next_token=final_next_token,
+            first_ui_url=first_ui_url,
+        )
+
+    def search(
+        self,
+        *,
+        name: str | None = None,
+        created_by: str | None = None,
+        annotations: dict[str, str | None] | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        local_time: bool = False,
+        query: dict[str, Any] | None = None,
+        limit: int = 10,
+        page_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Search pipeline runs and return rows, page metadata, and tables."""
+
+        limit = max(1, min(limit, 100))
+        resolved_created_by, err = self.resolve_created_by(created_by=created_by)
+        if err is not None:
+            return err
+        resolved_start, resolved_end = self.resolve_dates(
+            start_date=start_date,
+            end_date=end_date,
+            local_time=local_time,
+        )
+        filter_query_dict = query or self.build_filter_query(
+            name=name,
+            created_by=resolved_created_by,
+            annotations=annotations,
+            start_date=resolved_start,
+            end_date=resolved_end,
+        )
+        filter_query_str = json.dumps(filter_query_dict, separators=(",", ":")) if filter_query_dict else None
+        self.logger.info(f"Searching pipeline runs (limit={limit})...")
+        base_url = getattr(self.client, "base_url", "").rstrip("/")
+        all_rows, page_chunks, final_next_token = self.fetch_pages(
+            filter_query_str=filter_query_str,
+            limit=limit,
+            page_token=page_token,
+            base_url=base_url,
+            name=name,
+            created_by=resolved_created_by,
+            start_date=resolved_start,
+            end_date=resolved_end,
+        )
+        if len(page_chunks) > 1:
+            self.logger.info(f"Fetched {len(page_chunks)} pages to collect {len(all_rows)} results.")
+        first_ui_url = (
+            page_chunks[0].ui_filter_url
+            if page_chunks
+            else self.build_ui_filter_url(
+                base_url=base_url,
+                name=name,
+                created_by=resolved_created_by,
+                start_date=resolved_start,
+                end_date=resolved_end,
+                page_token=page_token,
+            )
+        )
+        return self.build_result(
+            all_rows=all_rows,
+            page_chunks=page_chunks,
+            final_next_token=final_next_token,
+            first_ui_url=first_ui_url,
+        )
 
 
 def build_predicate(*, predicate_type: str, **fields: Any) -> dict[str, Any]:
@@ -509,57 +735,16 @@ def search_pipeline_runs(
     page_token: str | None = None,
     logger: Logger | None = None,
 ) -> dict[str, Any]:
-    """Search pipeline runs and return rows, page metadata, and tables."""
+    """Backward-compatible wrapper for :meth:`PipelineRunSearch.search`."""
 
-    log = logger or get_default_logger()
-    limit = max(1, min(limit, 100))
-    resolved_created_by, err = resolve_created_by(created_by=created_by, client=client, logger=log)
-    if err is not None:
-        return err
-    resolved_start, resolved_end = resolve_dates(
+    return PipelineRunSearch(client=client, logger=logger).search(
+        name=name,
+        created_by=created_by,
+        annotations=annotations,
         start_date=start_date,
         end_date=end_date,
         local_time=local_time,
-        logger=log,
-    )
-    filter_query_dict = query or build_filter_query(
-        name=name,
-        created_by=resolved_created_by,
-        annotations=annotations,
-        start_date=resolved_start,
-        end_date=resolved_end,
-    )
-    filter_query_str = json.dumps(filter_query_dict, separators=(",", ":")) if filter_query_dict else None
-    log.info(f"Searching pipeline runs (limit={limit})...")
-    base_url = getattr(client, "base_url", "").rstrip("/")
-    all_rows, page_chunks, final_next_token = fetch_pipeline_run_search_pages(
-        client=client,
-        filter_query_str=filter_query_str,
+        query=query,
         limit=limit,
         page_token=page_token,
-        base_url=base_url,
-        name=name,
-        created_by=resolved_created_by,
-        start_date=resolved_start,
-        end_date=resolved_end,
-    )
-    if len(page_chunks) > 1:
-        log.info(f"Fetched {len(page_chunks)} pages to collect {len(all_rows)} results.")
-    first_ui_url = (
-        page_chunks[0].ui_filter_url
-        if page_chunks
-        else build_ui_filter_url(
-            base_url=base_url,
-            name=name,
-            created_by=resolved_created_by,
-            start_date=resolved_start,
-            end_date=resolved_end,
-            page_token=page_token,
-        )
-    )
-    return build_pipeline_run_search_result(
-        all_rows=all_rows,
-        page_chunks=page_chunks,
-        final_next_token=final_next_token,
-        first_ui_url=first_ui_url,
     )

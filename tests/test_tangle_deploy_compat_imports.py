@@ -26,13 +26,16 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
         publish_component_to_tangle,
     )
     from tangle_cli.artifacts import (
+        ArtifactManager,
         _collect_artifacts,
         _collect_execution_artifacts,
         _serialize_artifacts,
         get_artifacts,
+        serialize_artifacts,
     )
     from tangle_cli.module_bundler import ModuleBundler
     from tangle_cli.secrets import (
+        SecretsManager,
         _resolve_secret_value,
         create_secret,
         delete_secret,
@@ -40,6 +43,8 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
         update_secret,
     )
     from tangle_cli.version_manager import bump_version
+    from tangle_cli.pipeline_run_details import PipelineRunDetails
+    from tangle_cli.pipeline_run_search import PipelineRunSearch
     from tangle_cli.component_inspector import (
         get_standard_library,
         inspect_by_digest,
@@ -143,10 +148,15 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     assert callable(deprecate_component)
     assert callable(bump_version)
     assert ModuleBundler is not None
+    assert ArtifactManager is not None
     assert callable(_collect_artifacts)
     assert callable(_collect_execution_artifacts)
     assert callable(_serialize_artifacts)
+    assert callable(serialize_artifacts)
     assert callable(get_artifacts)
+    assert SecretsManager is not None
+    assert PipelineRunDetails is not None
+    assert PipelineRunSearch is not None
     assert callable(_resolve_secret_value)
     assert callable(list_secrets)
     assert callable(create_secret)
