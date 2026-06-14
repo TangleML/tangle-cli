@@ -1817,6 +1817,7 @@ def generate_component_yaml(
                 file_path,
                 resolve_root=resolve_root,
                 pip_deps=deps,
+                source=spec.module_source_stripped,
             )
             if module_sources:
                 bundled_modules_b64 = ModuleBundler.encode(module_sources)

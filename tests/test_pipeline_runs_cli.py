@@ -868,6 +868,38 @@ def test_pipeline_runs_wait_graph_state_treats_canceled_spelling_as_terminal() -
     }
 
 
+def test_pipeline_runs_wait_graph_state_treats_invalid_as_terminal() -> None:
+    class InvalidGraphClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-invalid",
+                "execution_status_stats": {"RUNNING": 1},
+            }
+
+        def executions_graph_execution_state(self, id: str) -> dict[str, Any]:
+            return {"status_totals": {"INVALID": 1}}
+
+    manager = PipelineRunManager(client=InvalidGraphClient())
+
+    result = manager.wait_for_completion(
+        "run-invalid",
+        max_wait=0,
+        poll_interval=1,
+        use_graph_state=True,
+    )
+
+    assert result == {
+        "run": {
+            "id": "run-invalid",
+            "root_execution_id": "exec-invalid",
+            "execution_status_stats": {"RUNNING": 1},
+        },
+        "status": "INVALID",
+        "timed_out": False,
+    }
+
+
 def test_pipeline_runs_graph_state_counts_supports_mapping_like_objects() -> None:
     assert PipelineRunManager.status_counts_from_graph_state(
         SimpleNamespace(status_totals={"SUCCEEDED": 1})

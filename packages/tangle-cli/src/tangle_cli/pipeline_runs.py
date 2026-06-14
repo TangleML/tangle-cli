@@ -27,7 +27,7 @@ from .pipeline_run_details import get_graph_state_output, get_run_details_output
 from .pipeline_run_search import search_pipeline_runs
 from .utils import dump_yaml
 
-_TERMINAL_STATUSES = ("FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "SKIPPED", "SUCCEEDED")
+_TERMINAL_STATUSES = ("FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "SKIPPED", "SUCCEEDED", "INVALID")
 _ACTIVE_STATUSES = ("RUNNING", "CANCELLING", "CANCELING", "PENDING", "QUEUED")
 
 
