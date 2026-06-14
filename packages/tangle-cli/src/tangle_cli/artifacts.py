@@ -7,10 +7,8 @@ signed URLs, download remote objects, write local files, or mutate artifacts.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Protocol
-
-from .models import ArtifactComponentQuery, ArtifactInfo
 
 
 class ArtifactClient(Protocol):
@@ -21,6 +19,65 @@ class ArtifactClient(Protocol):
     def get_execution_details(self, execution_id: str) -> Any: ...
 
     def artifacts_get(self, artifact_id: str) -> Any: ...
+
+
+@dataclass
+class ArtifactComponentQuery:
+    """Filter for selecting artifacts by component name or digest."""
+
+    name: str | None = None
+    digest: str | None = None
+    outputs: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ArtifactInfo:
+    """Resolved artifact metadata from GET /api/artifacts/{id}.
+
+    This dataclass intentionally lives in this native-free module. Generated
+    response objects are accepted structurally via ``from_response`` so no
+    ``tangle_api`` import is required.
+    """
+
+    id: str
+    uri: str
+    key: str = ""
+    total_size: int = 0
+    is_dir: bool = False
+    hash: str | None = None
+    created_at: str | None = None
+    error: str | None = None
+    local_path: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], key: str = "") -> ArtifactInfo:
+        ad = data.get("artifact_data", {})
+        return cls(
+            id=data.get("id", ""),
+            uri=_mapping_or_attr(ad, "uri", ""),
+            key=key,
+            total_size=_mapping_or_attr(ad, "total_size", 0),
+            is_dir=_mapping_or_attr(ad, "is_dir", False),
+            hash=_optional_str(_mapping_or_attr(ad, "hash")),
+            created_at=_optional_str(_mapping_or_attr(ad, "created_at")),
+        )
+
+    @classmethod
+    def from_response(cls, response: Any, *, key: str = "") -> ArtifactInfo:
+        """Create a flattened artifact DTO from a generated or duck-typed response."""
+
+        artifact_data = getattr(response, "artifact_data", None)
+        total_size = _mapping_or_attr(artifact_data, "total_size", 0)
+        is_dir = _mapping_or_attr(artifact_data, "is_dir", False)
+        return cls(
+            id=str(getattr(response, "id", "") or ""),
+            uri=str(_mapping_or_attr(artifact_data, "uri", "") or ""),
+            key=key,
+            total_size=total_size if isinstance(total_size, int) else 0,
+            is_dir=is_dir if isinstance(is_dir, bool) else False,
+            hash=_optional_str(_mapping_or_attr(artifact_data, "hash")),
+            created_at=_optional_str(_mapping_or_attr(artifact_data, "created_at")),
+        )
 
 
 class ArtifactManager:
@@ -195,6 +252,12 @@ def _mapping_or_attr(value: Any, key: str, default: Any = None) -> Any:
     return getattr(value, key, default)
 
 
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
 def _artifact_id_map(raw_artifacts: Any) -> dict[str, str]:
     """Normalize API artifact maps to ``{output_name: artifact_id}``."""
 
@@ -273,6 +336,8 @@ def _serialize_artifacts(artifacts: dict[str, ArtifactInfo]) -> list[dict[str, A
 
 __all__ = [
     "ArtifactClient",
+    "ArtifactComponentQuery",
+    "ArtifactInfo",
     "ArtifactManager",
     "_collect_artifacts",
     "_collect_execution_artifacts",
