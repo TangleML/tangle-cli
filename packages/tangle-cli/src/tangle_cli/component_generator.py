@@ -162,6 +162,10 @@ def _run_generation(
         log(f"  ✅ Generated: {final_output}")
         return True
     except Exception as exc:
+        if exc.__class__.__name__ == "AuthoringStripError":
+            if final_output.exists():
+                final_output.unlink()
+            raise
         log(f"  ❌ Error: {exc}")
         if final_output.exists():
             final_output.unlink()

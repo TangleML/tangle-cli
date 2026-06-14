@@ -148,11 +148,18 @@ def _validate_graph_spec(
         errors.append(f"{path}.{TASKS_PATH} must be an object")
         return
 
-    task_names = set(str(name) for name in tasks.keys())
+    task_names: set[str] = set()
+    for name in tasks.keys():
+        if not isinstance(name, str):
+            errors.append(f"{path}.{TASKS_PATH} task ids must be strings")
+            continue
+        task_names.add(name)
     edges: set[tuple[str, str]] = set()
 
     for task_name, raw_task in tasks.items():
         task_path = f"{path}.{TASKS_PATH}.{task_name}"
+        if not isinstance(task_name, str):
+            continue
         if not isinstance(raw_task, Mapping):
             errors.append(f"{task_path} must be an object")
             continue
@@ -489,7 +496,7 @@ def _layout_graph_spec(spec: Mapping[str, Any], *, x_spacing: int, y_spacing: in
 
 
 def _task_layers(tasks: Mapping[str, Any]) -> list[list[str]]:
-    task_names = [str(name) for name in tasks.keys()]
+    task_names = [name for name in tasks.keys() if isinstance(name, str)]
     task_name_set = set(task_names)
     outgoing: dict[str, set[str]] = {name: set() for name in task_names}
     incoming_count: dict[str, int] = {name: 0 for name in task_names}
@@ -526,12 +533,12 @@ def _task_layers(tasks: Mapping[str, Any]) -> list[list[str]]:
 
 def _dependency_edges(tasks: Mapping[str, Any]) -> set[tuple[str, str]]:
     edges: set[tuple[str, str]] = set()
-    task_names = set(str(name) for name in tasks.keys())
+    task_names = {name for name in tasks.keys() if isinstance(name, str)}
 
     for task_id, task_spec in tasks.items():
-        if not isinstance(task_spec, Mapping):
+        if not isinstance(task_id, str) or not isinstance(task_spec, Mapping):
             continue
-        target = str(task_id)
+        target = task_id
         dependencies = task_spec.get("dependencies", [])
         if isinstance(dependencies, list):
             for dependency in dependencies:
