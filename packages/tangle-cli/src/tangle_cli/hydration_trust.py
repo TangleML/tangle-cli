@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import fnmatch
 import os
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Iterable
 
@@ -187,8 +187,26 @@ def _matches_glob_source(candidate: Path, source: str) -> bool:
         prefix = Path(*prefix_parts).resolve()
     else:
         prefix = Path.cwd().resolve()
-    pattern = (prefix / Path(*suffix_parts)).as_posix()
-    return fnmatch.fnmatch(candidate.as_posix(), pattern)
+    try:
+        relative_candidate = candidate.relative_to(prefix)
+    except ValueError:
+        return False
+    return _match_path_parts(relative_candidate.parts, suffix_parts)
+
+
+def _match_path_parts(candidate_parts: tuple[str, ...], pattern_parts: tuple[str, ...]) -> bool:
+    if not pattern_parts:
+        return not candidate_parts
+    pattern = pattern_parts[0]
+    remaining_patterns = pattern_parts[1:]
+    if pattern == "**":
+        return any(
+            _match_path_parts(candidate_parts[index:], remaining_patterns)
+            for index in range(len(candidate_parts) + 1)
+        )
+    if not candidate_parts:
+        return False
+    return fnmatchcase(candidate_parts[0], pattern) and _match_path_parts(candidate_parts[1:], remaining_patterns)
 
 
 def trusted_python_source_guidance(path: str | os.PathLike[str]) -> str:
