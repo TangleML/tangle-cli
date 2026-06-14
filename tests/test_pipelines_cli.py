@@ -678,6 +678,27 @@ def test_pipelines_hydrate_local_from_python_blocks_symlink_escape(
         hydrate_pipeline_file(pipeline_path)
 
 
+def test_trusted_python_source_globs_are_path_segment_aware(tmp_path: Path):
+    from tangle_cli.hydration_trust import is_trusted_python_source
+
+    project_dir = tmp_path / "project"
+    components_dir = project_dir / "components"
+    nested_dir = components_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    direct_source = components_dir / "component.py"
+    nested_source = nested_dir / "component.py"
+    direct_source.write_text("# trusted\n", encoding="utf-8")
+    nested_source.write_text("# not matched by single-segment glob\n", encoding="utf-8")
+
+    single_segment_pattern = str(components_dir / "*.py")
+    recursive_pattern = str(components_dir / "**" / "*.py")
+
+    assert is_trusted_python_source(direct_source, trusted_sources=[single_segment_pattern]) is True
+    assert is_trusted_python_source(nested_source, trusted_sources=[single_segment_pattern]) is False
+    assert is_trusted_python_source(direct_source, trusted_sources=[recursive_pattern]) is True
+    assert is_trusted_python_source(nested_source, trusted_sources=[recursive_pattern]) is True
+
+
 def test_pipelines_hydrate_trusted_hydration_allows_untrusted_python_source(
     monkeypatch,
     tmp_path: Path,
