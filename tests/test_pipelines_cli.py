@@ -183,6 +183,29 @@ def test_pipelines_validate_fails_for_invalid_yaml(tmp_path: Path):
     assert "unknown task 'missing'" in str(exc_info.value)
 
 
+def test_pipelines_validate_rejects_non_string_task_ids(tmp_path: Path):
+    pipeline_path = _write_pipeline(
+        tmp_path / "pipeline.yaml",
+        {
+            "name": "Broken Pipeline",
+            "implementation": {
+                "graph": {
+                    "tasks": {
+                        1: {"componentRef": {"name": "Leaf"}},
+                    },
+                },
+            },
+        },
+    )
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipelines", "validate", str(pipeline_path)])
+
+    assert exc_info.value.code != 0
+    assert "task ids must be strings" in str(exc_info.value)
+
+
 def test_pipelines_diagram_outputs_small_dependency_graph(tmp_path: Path, capsys):
     pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml", _minimal_valid_pipeline())
     app = cli.build_app()

@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from tangle_cli import cli
-from tangle_cli.component_from_func import generate_component_yaml
+from tangle_cli.component_from_func import AuthoringStripError, generate_component_yaml
 from tangle_cli.component_generator import (
     DEFAULT_CONTAINER_IMAGE,
     determine_output_path,
@@ -236,6 +236,27 @@ def my_component(name: str) -> str:
     generated = yaml.safe_load((tmp_path / "my-component.yaml").read_text(encoding="utf-8"))
     assert generated["name"] == "Configured Component"
     assert generated["metadata"]["annotations"]["version"] == "1.0"
+
+
+def test_regenerate_yaml_reraises_authoring_strip_errors(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("tangle_cli.utils._fill_from_ci_env", lambda info: None)
+    py_file = tmp_path / "bad_authoring.py"
+    py_file.write_text(
+        '''from tangle_deploy.python_pipeline import TaskEnv, task
+
+UPI = TaskEnv(image="python:3.12")
+
+@task(env=UPI)
+def bad_authoring() -> str:
+    return UPI
+''',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AuthoringStripError):
+        regenerate_yaml(py_file, image="python:3.12", function_name="bad_authoring")
+
+    assert not (tmp_path / "bad-authoring.yaml").exists()
 
 
 def test_bundle_mode_with_local_imports(monkeypatch, tmp_path: Path):
