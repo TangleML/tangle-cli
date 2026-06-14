@@ -835,6 +835,38 @@ def test_pipeline_runs_wait_uses_graph_state_and_poll_hooks() -> None:
     ]
 
 
+def test_pipeline_runs_wait_graph_state_treats_canceled_spelling_as_terminal() -> None:
+    class CanceledGraphClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-canceled",
+                "execution_status_stats": {"RUNNING": 1},
+            }
+
+        def executions_graph_execution_state(self, id: str) -> dict[str, Any]:
+            return {"status_totals": {"CANCELED": 1}}
+
+    manager = PipelineRunManager(client=CanceledGraphClient())
+
+    result = manager.wait_for_completion(
+        "run-canceled",
+        max_wait=0,
+        poll_interval=1,
+        use_graph_state=True,
+    )
+
+    assert result == {
+        "run": {
+            "id": "run-canceled",
+            "root_execution_id": "exec-canceled",
+            "execution_status_stats": {"RUNNING": 1},
+        },
+        "status": "CANCELED",
+        "timed_out": False,
+    }
+
+
 def test_pipeline_runs_graph_state_counts_supports_mapping_like_objects() -> None:
     assert PipelineRunManager.status_counts_from_graph_state(
         SimpleNamespace(status_totals={"SUCCEEDED": 1})
@@ -904,6 +936,31 @@ def test_pipeline_runs_wait_poll_error_hook_can_retry() -> None:
     )
 
     assert result["status"] == "SUCCEEDED"
+
+
+def test_pipeline_runs_wait_poll_error_hook_respects_max_wait() -> None:
+    class FailingGraphClient(FakeClient):
+        def executions_graph_execution_state(self, id: str) -> dict[str, Any]:
+            raise RuntimeError("persistent poll failure")
+
+    errors = []
+
+    class Hooks(PipelineRunHooks):
+        def on_poll_error(self, error, context):
+            errors.append(str(error))
+            return 0
+
+    manager = PipelineRunManager(client=FailingGraphClient(), hooks=Hooks())
+
+    with pytest.raises(PipelineRunError, match="Timed out waiting for run run-graph"):
+        manager.wait_for_completion(
+            "run-graph",
+            max_wait=0,
+            poll_interval=1,
+            use_graph_state=True,
+        )
+
+    assert errors == []
 
 
 def test_pipeline_runs_fail_fast_hook_runs_before_lifecycle_release(tmp_path: Path) -> None:
