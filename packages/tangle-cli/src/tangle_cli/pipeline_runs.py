@@ -996,6 +996,9 @@ class PipelineRunManager:
         allow_zero_poll_interval: bool = False,
         timeout_clock: str = "monotonic",
         metadata: dict[str, Any] | None = None,
+        metadata_factory: Callable[
+            [int, PipelineRunContext | None, Exception | None], dict[str, Any]
+        ] | None = None,
     ) -> dict[str, Any]:
         """Drive submit/wait/retry for already prepared specs or submit bodies."""
 
@@ -1016,6 +1019,8 @@ class PipelineRunManager:
             error: Exception | None = None
             retry_requested = False
             body = body_factory(attempt, previous_context, last_error)
+            if metadata_factory is not None:
+                context.metadata.update(metadata_factory(attempt, previous_context, last_error))
             pipeline_spec = body.get("root_task", {}).get("componentRef", {}).get("spec")
             context.submit_body = body
             context.pipeline_spec = pipeline_spec if isinstance(pipeline_spec, dict) else None

@@ -1497,3 +1497,93 @@ def test_pipeline_runner_layout_is_hookable(tmp_path: Path) -> None:
     )
 
     assert client.created[0]["root_task"]["componentRef"]["spec"]["layout_hook_ran"] is True
+
+
+def test_pipeline_runner_path_retry_prepares_each_attempt(tmp_path: Path) -> None:
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+
+    class FlakyClient(FakeClient):
+        def pipeline_runs_create(self, body: Any = None) -> dict[str, Any]:
+            self.created.append(body)
+            if len(self.created) == 1:
+                raise PipelineRunError("transient submit failure")
+            return {"id": "run-2", "root_execution_id": "exec-2"}
+
+    class Hooks(PipelineRunnerHooks):
+        def before_submit_pipeline_spec(self, pipeline_spec, **kwargs):  # type: ignore[no-untyped-def]
+            updated = copy.deepcopy(pipeline_spec)
+            updated["name"] = f"attempt-{len(client.created) + 1}"
+            return updated
+
+    client = FlakyClient()
+    runner = PipelineRunner(client=client, hooks=Hooks())
+
+    result = runner.run_pipeline(
+        pipeline_path,
+        run_args={"required": "value"},
+        hydrate=False,
+        wait=True,
+        max_attempts=2,
+        max_wait=1,
+        poll_interval=0.01,
+    )
+
+    assert result["run_id"] == "run-2"
+    assert [body["root_task"]["componentRef"]["spec"]["name"] for body in client.created] == [
+        "attempt-1",
+        "attempt-2",
+    ]
+
+
+def test_pipeline_runner_wait_failed_status_is_not_success(tmp_path: Path) -> None:
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+
+    class FailedClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-1",
+                "execution_status_stats": {"FAILED": 1},
+            }
+
+    runner = PipelineRunner(client=FailedClient())
+
+    result = runner.run_pipeline(
+        pipeline_path,
+        run_args={"required": "value"},
+        hydrate=False,
+        wait=True,
+        max_wait=1,
+        poll_interval=0.01,
+    )
+
+    assert result["status"] == "FAILED"
+    assert result["success"] is False
+
+
+def test_pipeline_runner_cleanup_runs_after_prepare_failure(tmp_path: Path) -> None:
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    temp_effective_path = tmp_path / "hydrated.yaml"
+    temp_effective_path.write_text("name: hydrated\n", encoding="utf-8")
+    cleaned: list[tuple[Path | None, str | None]] = []
+
+    class Hooks(PipelineRunnerHooks):
+        def hydrate_pipeline_for_run(self, pipeline_path, **kwargs):  # type: ignore[no-untyped-def]
+            return yaml.safe_load(Path(pipeline_path).read_text(encoding="utf-8")), temp_effective_path
+
+        def validate_pipeline_for_run(self, pipeline_spec, **kwargs):  # type: ignore[no-untyped-def]
+            return ["boom"]
+
+        def cleanup_prepared_pipeline(self, preparation, *, error=None):  # type: ignore[no-untyped-def]
+            path = Path(preparation.effective_path) if preparation.effective_path is not None else None
+            cleaned.append((path, str(error) if error else None))
+            if path is not None:
+                path.unlink(missing_ok=True)
+
+    runner = PipelineRunner(client=FakeClient(), hooks=Hooks())
+
+    with pytest.raises(PipelineRunError, match="boom"):
+        runner.run_pipeline(pipeline_path, hydrate=True)
+
+    assert cleaned == [(temp_effective_path, "Pipeline validation failed:\n  - boom")]
+    assert not temp_effective_path.exists()
