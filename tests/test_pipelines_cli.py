@@ -4,11 +4,13 @@ import sys
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
 from tangle_cli import cli
+from tangle_cli.pipeline_hydrator import PipelineHydrator
 
 
 def run_app(app, args: list[str]) -> None:
@@ -82,6 +84,61 @@ def test_sdk_pipelines_help_lists_local_commands(capsys):
     assert "layout" in output
     assert "pipeline-runs" not in output
     assert "compile" not in output
+
+
+def test_pipeline_hydrator_generic_local_resolver_priority(tmp_path: Path):
+    local_yaml = tmp_path / "local.yaml"
+    local_yaml.write_text(yaml.safe_dump({"name": "Local"}), encoding="utf-8")
+    ignored_yaml = tmp_path / "ignored.yaml"
+    ignored_yaml.write_text(yaml.safe_dump({"name": "Ignored"}), encoding="utf-8")
+    hydrator = PipelineHydrator(client=MagicMock())
+
+    result = hydrator._try_resolve_entry(
+        {"local": "./local.yaml", "local_from_docker": {"source": "./ignored.yaml"}},
+        "demo.task",
+        tmp_path,
+    )
+
+    assert result is not None
+    assert result[1]["name"] == "Local"
+
+
+def test_pipeline_hydrator_generic_preview_skips_local_materialization(tmp_path: Path):
+    source = tmp_path / "component.py"
+    source.write_text(
+        'def component():\n    """Demo.\n\n    Metadata:\n        version: 1.0.0\n    """\n',
+        encoding="utf-8",
+    )
+    hydrator = PipelineHydrator(client=MagicMock())
+    hydrator._resolve_registered_component = MagicMock(return_value=("local", {"name": "Local"}))  # type: ignore[method-assign]
+
+    result = hydrator._try_resolve_entry(
+        {"local_from_python": {"file": "./component.py", "output_folder": "./generated"}},
+        "demo.task",
+        tmp_path,
+    )
+
+    assert result == ("local", {"name": "Local"})
+    hydrator._resolve_registered_component.assert_called_once()
+
+    hydrator._resolve_registered_component.reset_mock()
+    hydrator._resolve_primary = MagicMock(  # type: ignore[method-assign]
+        return_value=(
+            "primary",
+            {"name": "Published", "metadata": {"annotations": {"version": "2.0.0"}}},
+        )
+    )
+    result = hydrator._try_resolve_entry(
+        {"local_from_python": {"file": "./component.py", "output_folder": "./generated"}},
+        "demo.task",
+        tmp_path,
+    )
+
+    assert result == (
+        "primary",
+        {"name": "Published", "metadata": {"annotations": {"version": "2.0.0"}}},
+    )
+    hydrator._resolve_registered_component.assert_not_called()
 
 
 def test_pipelines_validate_succeeds_for_minimal_valid_yaml(tmp_path: Path, capsys):

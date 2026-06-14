@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from tangle_cli import cli, pipeline_runs_cli
-from tangle_cli.pipeline_runs import PipelineRunHooks, PipelineRunManager, PipelineRunError
+from tangle_cli.pipeline_runs import PipelineRunContext, PipelineRunHooks, PipelineRunManager, PipelineRunError
 
 
 def run_app(app, args: list[str]) -> None:
@@ -833,6 +833,77 @@ def test_pipeline_runs_wait_uses_graph_state_and_poll_hooks() -> None:
         ("terminal", "SUCCEEDED"),
         ("after_wait", "SUCCEEDED"),
     ]
+
+
+def test_pipeline_runs_graph_state_counts_supports_mapping_like_objects() -> None:
+    assert PipelineRunManager.status_counts_from_graph_state(
+        SimpleNamespace(status_totals={"SUCCEEDED": 1})
+    ) == {"SUCCEEDED": 1}
+
+
+def test_pipeline_runs_wait_can_poll_execution_root_via_hooks() -> None:
+    events = []
+
+    class ExecutionClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            raise AssertionError("execution-rooted polling should not fetch a run")
+
+        def executions_graph_execution_state(self, id: str) -> dict[str, Any]:
+            assert id == "exec-root"
+            return {"status_totals": {"SUCCEEDED": 2}}
+
+    class Hooks(PipelineRunHooks):
+        def poll_run_snapshot(self, manager, run_id, context):
+            return {"id": run_id, "root_execution_id": context.root_execution_id}
+
+        def after_poll(self, poll, context):
+            events.append((poll.status_counts, poll.total, poll.terminal))
+
+    manager = PipelineRunManager(client=ExecutionClient(), hooks=Hooks())
+    context = PipelineRunContext(
+        run_id="exec-root",
+        root_execution_id="exec-root",
+    )
+
+    result = manager.wait_for_completion(
+        "exec-root",
+        max_wait=None,
+        poll_interval=1,
+        use_graph_state=True,
+        context=context,
+    )
+
+    assert result["status"] == "SUCCEEDED"
+    assert events == [({"SUCCEEDED": 2}, 2, True)]
+
+
+def test_pipeline_runs_wait_poll_error_hook_can_retry() -> None:
+    class FlakyGraphClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def executions_graph_execution_state(self, id: str) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("transient")
+            return {"status_totals": {"SUCCEEDED": 1}}
+
+    class Hooks(PipelineRunHooks):
+        def on_poll_error(self, error, context):
+            assert str(error) == "transient"
+            return 0
+
+    manager = PipelineRunManager(client=FlakyGraphClient(), hooks=Hooks())
+
+    result = manager.wait_for_completion(
+        "run-graph",
+        max_wait=None,
+        poll_interval=1,
+        use_graph_state=True,
+    )
+
+    assert result["status"] == "SUCCEEDED"
 
 
 def test_pipeline_runs_fail_fast_hook_runs_before_lifecycle_release(tmp_path: Path) -> None:

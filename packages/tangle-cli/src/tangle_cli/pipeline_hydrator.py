@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from .models import ComponentInfo
 
 
-class HydrationError(RuntimeError):
+class HydrationError(ValueError):
     """Raised when a pipeline cannot be hydrated safely in OSS mode."""
 
 
@@ -761,18 +761,41 @@ class PipelineHydrator:
     ) -> tuple[str, dict[str, Any]] | None:
         """Try to resolve a single resolve-config entry.
 
-        Ported from TD, with resolver dispatch made registry-backed.
+        Generic resolution lives here: resolve the primary source, choose one
+        local-side resolver by registry order, optionally use a cheap version
+        preview to skip materialization, then compare versions when both sides
+        resolve. Downstreams add new local-side behavior by registering a
+        resolver and (optionally) overriding ``preview_resolver_version``.
         """
         primary = self._resolve_primary(entry, path, base_dir)
-        local_result = self._resolve_local_side(entry, path, base_dir)
+        local_kind, local_value = self._select_local_entry(entry)
+
+        if primary and local_kind and local_value:
+            preview_winner = self._preview_decide_winner(
+                local_kind, local_value, primary, base_dir
+            )
+            if preview_winner == "primary":
+                return primary
+        else:
+            preview_winner = None
+
+        local_result = None
+        if local_kind and local_value:
+            local_result = self._resolve_registered_component(
+                local_kind, local_value, path, base_dir
+            )
 
         if not primary and not local_result:
             return None
         if not primary:
-            self.log.info("   Resolve: primary source failed, using local source")
+            self.log.info(
+                f"   Resolve: primary source failed, using {local_kind or 'local source'}"
+            )
             return local_result
         if not local_result:
             return primary
+        if preview_winner == "local":
+            return local_result
         return self._pick_higher_version(primary, local_result, path)
 
     def _resolve_primary(
@@ -801,18 +824,39 @@ class PipelineHydrator:
         )
         return None
 
+    def _select_local_entry(self, entry: dict[str, Any]) -> tuple[str | None, Any]:
+        """Return the local-side resolver selected for a resolve-config entry.
+
+        Registry order defines priority. If multiple local resolver fields are
+        present, use the first and warn about the ignored ones. This keeps
+        precedence generic so downstream-only fields (for example TD's
+        ``local_from_docker``) don't require overriding the whole resolve flow.
+        """
+
+        used = [
+            (kind, entry[kind])
+            for kind in self._resolve_entry_kinds()
+            if kind in entry and kind not in {"digest", "url", "name"} and entry[kind]
+        ]
+        if not used:
+            return None, None
+        if len(used) > 1:
+            kept, ignored = used[0], [kind for kind, _ in used[1:]]
+            self.log.warn(
+                f"   ⚠️ Resolve entry has multiple local sources "
+                f"{[kind for kind, _ in used]}; using '{kept[0]}' and ignoring {ignored}"
+            )
+        return used[0]
+
     def _resolve_local_side(
         self,
         entry: dict[str, Any],
         path: str,
         base_dir: Path | None = None,
     ) -> tuple[str, dict[str, Any]] | None:
-        for kind in self._resolve_entry_kinds():
-            if kind not in entry or kind in {"digest", "url", "name"}:
-                continue
-            value = entry[kind]
-            if value:
-                return self._resolve_registered_component(kind, value, path, base_dir)
+        kind, value = self._select_local_entry(entry)
+        if kind and value:
+            return self._resolve_registered_component(kind, value, path, base_dir)
         return None
 
     def _resolve_entry_kinds(self) -> tuple[str, ...]:
@@ -830,6 +874,72 @@ class PipelineHydrator:
             "from-container",
         )
         return tuple(dict.fromkeys((*builtin_kinds, *self.component_resolvers)))
+
+    def preview_resolver_version(
+        self,
+        kind: str,
+        value: Any,
+        base_dir: Path | None = None,
+    ) -> str | None:
+        """Cheaply read a local resolver's version without materializing it.
+
+        The base OSS implementation supports ``local_from_python`` by reading
+        docstring metadata via AST. Downstreams can override this for their own
+        local resolvers while retaining the generic resolve/compare flow.
+        """
+
+        if kind != "local_from_python" or not isinstance(value, dict):
+            return None
+        file_field = value.get("file")
+        if not file_field:
+            return None
+        py_path = Path(file_field)
+        if not py_path.is_absolute() and base_dir is not None:
+            py_path = (base_dir / py_path).resolve()
+        else:
+            py_path = py_path.resolve()
+        if not py_path.exists():
+            return None
+        try:
+            from .component_from_func import extract_file_metadata
+
+            metadata, resolved_func = extract_file_metadata(py_path, value.get("function"))
+        except Exception:
+            return None
+        if not resolved_func:
+            return None
+        version = metadata.get("version")
+        return str(version) if version else None
+
+    def _preview_decide_winner(
+        self,
+        kind: str,
+        value: Any,
+        primary: tuple[str, dict[str, Any]],
+        base_dir: Path | None,
+    ) -> str | None:
+        """Use preview metadata to decide primary-vs-local before materializing."""
+
+        preview_version = self.preview_resolver_version(kind, value, base_dir)
+        if not preview_version:
+            return None
+        primary_digest, primary_spec = primary
+        primary_version = utils.get_version_from_data(primary_spec)
+        if not primary_version:
+            return None
+        primary_name = primary_spec.get("name", primary_digest[:16])
+        if utils.compare_versions(preview_version, primary_version) > 0:
+            self.log.info(
+                f"   Resolve: {kind} v{preview_version} > published "
+                f"{primary_name} v{primary_version} → using local "
+                f"(skipped final comparison)"
+            )
+            return "local"
+        self.log.info(
+            f"   Resolve: published {primary_name} v{primary_version} >= "
+            f"{kind} v{preview_version} → using published (skipped generation)"
+        )
+        return "primary"
 
     def _resolve_by_name_with_filters(
         self,
@@ -886,10 +996,19 @@ class PipelineHydrator:
             if not candidate.digest:
                 continue
             try:
-                spec = self._api_client().get_component_spec(candidate.digest).data
-            except Exception:
-                continue
-            annotations = spec.get("metadata", {}).get("annotations", {})
+                spec_obj = self._api_client().get_component_spec(candidate.digest)
+            except Exception as exc:
+                response = getattr(exc, "response", None)
+                if getattr(response, "status_code", None) == 404:
+                    continue
+                raise
+            spec_data = getattr(spec_obj, "data", spec_obj)
+            annotations = {}
+            if isinstance(spec_data, dict):
+                annotations = spec_data.get("metadata", {}).get("annotations", {}) or {}
+            attr_annotations = getattr(spec_obj, "annotations", None)
+            if attr_annotations:
+                annotations = attr_annotations
             if _annotations_match(annotations, required_annotations):
                 result.append(candidate)
         return result
@@ -908,6 +1027,8 @@ class PipelineHydrator:
         else:
             path_obj = path_obj.resolve()
         if not path_obj.exists():
+            if self.verbose or utils.tangle_verbose_enabled():
+                self.log.warn(f"   ⚠️ Resolve: local file not found: {path_obj}")
             return None
         file_url = local_path if local_path.startswith("file://") else f"file://{local_path}"
         self.log.info(f"   Resolve: loading local file {local_path}")

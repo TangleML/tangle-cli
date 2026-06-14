@@ -290,6 +290,39 @@ class PipelineRunHooks:
 
         return True
 
+    def poll_run_snapshot(
+        self,
+        manager: "PipelineRunManager",
+        run_id: str,
+        context: PipelineRunContext,
+    ) -> Mapping[str, Any] | None:
+        """Optional hook to provide a run-like snapshot for wait polling.
+
+        Downstreams whose wait API is rooted at an execution id can return a
+        synthetic run snapshot here instead of forcing the generic manager to
+        call ``pipeline_runs_get(run_id)``.
+        """
+
+        return None
+
+    def graph_state_execution_id(
+        self,
+        run: Mapping[str, Any],
+        context: PipelineRunContext,
+    ) -> str | None:
+        """Return the execution id to use for graph-state polling."""
+
+        root_execution_id = run.get("root_execution_id") or context.root_execution_id
+        return str(root_execution_id) if root_execution_id is not None else None
+
+    def on_poll_error(self, error: Exception, context: PipelineRunContext) -> float | None:
+        """Handle polling errors.
+
+        Return a sleep interval to retry, or ``None`` to propagate the error.
+        """
+
+        return None
+
     def fetch_logs(self, client: Any, execution_id: str) -> Any:
         """Hook for alternate TD log providers; OSS uses the Tangle API only."""
         return client.executions_container_log(execution_id)
@@ -303,12 +336,12 @@ class PipelineRunManager:
 
     @staticmethod
     def to_plain(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: PipelineRunManager.to_plain(val) for key, val in value.items()}
         if hasattr(value, "to_dict"):
             return value.to_dict()
         if hasattr(value, "model_dump"):
             return value.model_dump(by_alias=True)
-        if isinstance(value, dict):
-            return {key: PipelineRunManager.to_plain(val) for key, val in value.items()}
         if isinstance(value, list):
             return [PipelineRunManager.to_plain(item) for item in value]
         return value
@@ -414,21 +447,36 @@ class PipelineRunManager:
         return result
 
     @staticmethod
-    def status_counts_from_graph_state(graph_state: Mapping[str, Any]) -> dict[str, int]:
+    def _counts_mapping(value: Any) -> Mapping[str, Any] | None:
+        if isinstance(value, Mapping):
+            return value
+        if value is not None and hasattr(value, "items"):
+            return value
+        return None
+
+    @staticmethod
+    def status_counts_from_graph_state(graph_state: Mapping[str, Any] | Any) -> dict[str, int]:
         for key in ("status_totals", "execution_status_stats"):
-            stats = graph_state.get(key)
-            if isinstance(stats, Mapping):
+            stats = graph_state.get(key) if isinstance(graph_state, Mapping) else getattr(graph_state, key, None)
+            counts = PipelineRunManager._counts_mapping(stats)
+            if counts is not None:
                 return {
                     str(status).upper(): int(count or 0)
-                    for status, count in stats.items()
+                    for status, count in counts.items()
                 }
-        child_stats = graph_state.get("child_execution_status_stats")
+        child_stats = (
+            graph_state.get("child_execution_status_stats")
+            if isinstance(graph_state, Mapping)
+            else getattr(graph_state, "child_execution_status_stats", None)
+        )
         totals: dict[str, int] = {}
-        if isinstance(child_stats, Mapping):
-            for stats in child_stats.values():
-                if not isinstance(stats, Mapping):
+        child_counts = PipelineRunManager._counts_mapping(child_stats)
+        if child_counts is not None:
+            for stats in child_counts.values():
+                counts = PipelineRunManager._counts_mapping(stats)
+                if counts is None:
                     continue
-                for status, count in stats.items():
+                for status, count in counts.items():
                     totals[str(status).upper()] = totals.get(str(status).upper(), 0) + int(count or 0)
         return totals
 
@@ -726,8 +774,15 @@ class PipelineRunManager:
     def cancel_run(self, run_id: str) -> dict[str, Any]:
         return self.to_plain(self.client.pipeline_runs_cancel(run_id)) or {"id": run_id, "cancelled": True}
 
-    def graph_state(self, execution_id: str) -> dict[str, Any]:
-        return self.to_plain(self.client.executions_graph_execution_state(execution_id))
+    def graph_state(self, execution_id: str) -> Mapping[str, Any] | Any:
+        graph_state = self.client.executions_graph_execution_state(execution_id)
+        if not isinstance(graph_state, Mapping) and (
+            hasattr(graph_state, "status_totals")
+            or hasattr(graph_state, "execution_status_stats")
+            or hasattr(graph_state, "child_execution_status_stats")
+        ):
+            return graph_state
+        return self.to_plain(graph_state)
 
     def graph_state_output(self, run_ids: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
         return get_graph_state_output(self.client, run_ids, timeout=timeout)
@@ -820,12 +875,19 @@ class PipelineRunManager:
         *,
         use_graph_state: bool,
         started_at: float,
+        context: PipelineRunContext | None = None,
     ) -> PipelineWaitPoll:
-        run = self.get_run(run_id, include_execution_stats=True)
+        wait_context = context or PipelineRunContext(run_id=run_id, start_time=time.time())
+        run_snapshot = self.hooks.poll_run_snapshot(self, run_id, wait_context)
+        run = self.to_plain(run_snapshot) if run_snapshot is not None else self.get_run(
+            run_id, include_execution_stats=True
+        )
+        if not isinstance(run, dict):
+            run = {}
         graph_state: dict[str, Any] | None = None
         status_counts = self.status_counts_from_run(run)
         if use_graph_state:
-            root_execution_id = run.get("root_execution_id")
+            root_execution_id = self.hooks.graph_state_execution_id(run, wait_context)
             if root_execution_id:
                 graph_state = self.graph_state(str(root_execution_id))
                 graph_counts = self.status_counts_from_graph_state(graph_state)
@@ -833,14 +895,22 @@ class PipelineRunManager:
                     status_counts = graph_counts
         status = self.status_from_counts(status_counts) or self.status_from_run(run) or "UNKNOWN"
         terminal = self.is_terminal_status(status) or status == "ENDED"
+        total = sum(status_counts.values())
+        if total and use_graph_state:
+            terminal_count = sum(
+                status_counts.get(state, 0)
+                for state in _TERMINAL_STATUSES
+                if state != "CANCELED"
+            )
+            terminal = terminal_count == total
         return PipelineWaitPoll(
             run_id=run_id,
             run=run,
             status=status,
             status_counts=status_counts,
-            total=sum(status_counts.values()),
+            total=total,
             terminal=terminal,
-            graph_state=graph_state,
+            graph_state=graph_state if isinstance(graph_state, dict) else None,
             elapsed_seconds=time.monotonic() - started_at,
         )
 
@@ -870,11 +940,21 @@ class PipelineRunManager:
         self.hooks.before_wait(wait_context)
         last_poll: PipelineWaitPoll | None = None
         while True:
-            poll = self._poll_run_status(
-                run_id,
-                use_graph_state=use_graph_state,
-                started_at=poll_started_at,
-            )
+            try:
+                poll = self._poll_run_status(
+                    run_id,
+                    use_graph_state=use_graph_state,
+                    started_at=poll_started_at,
+                    context=wait_context,
+                )
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                retry_interval = self.hooks.on_poll_error(exc, wait_context)
+                if retry_interval is None:
+                    raise
+                time.sleep(retry_interval)
+                continue
             last_poll = poll
             self.hooks.after_poll(poll, wait_context)
             if poll.terminal:
