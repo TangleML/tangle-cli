@@ -897,11 +897,7 @@ class PipelineRunManager:
         terminal = self.is_terminal_status(status) or status == "ENDED"
         total = sum(status_counts.values())
         if total and use_graph_state:
-            terminal_count = sum(
-                status_counts.get(state, 0)
-                for state in _TERMINAL_STATUSES
-                if state != "CANCELED"
-            )
+            terminal_count = sum(status_counts.get(state, 0) for state in _TERMINAL_STATUSES)
             terminal = terminal_count == total
         return PipelineWaitPoll(
             run_id=run_id,
@@ -950,10 +946,17 @@ class PipelineRunManager:
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
+                if deadline is not None and deadline_now() >= deadline:
+                    raise PipelineRunError(f"Timed out waiting for run {run_id}") from exc
                 retry_interval = self.hooks.on_poll_error(exc, wait_context)
                 if retry_interval is None:
                     raise
-                time.sleep(retry_interval)
+                if deadline is not None:
+                    remaining = deadline - deadline_now()
+                    if remaining <= 0:
+                        raise PipelineRunError(f"Timed out waiting for run {run_id}") from exc
+                    retry_interval = min(retry_interval, remaining)
+                time.sleep(max(0.0, retry_interval))
                 continue
             last_poll = poll
             self.hooks.after_poll(poll, wait_context)
