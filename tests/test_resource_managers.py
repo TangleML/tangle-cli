@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 from typing import Any
 
@@ -242,6 +245,40 @@ def test_pipeline_run_details_lazy_factory() -> None:
     assert calls == []
     assert manager.get_graph_state_output(["run-1"])["results"][0]["error"] is None
     assert calls == ["created"]
+
+
+def test_resource_manager_modules_import_without_native_tangle_api() -> None:
+    code = r'''
+import builtins
+
+original_import = builtins.__import__
+
+def guarded_import(name, *args, **kwargs):
+    if name == "tangle_api" or name.startswith("tangle_api."):
+        raise ModuleNotFoundError("blocked native tangle_api import")
+    return original_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+
+from tangle_cli.artifacts import ArtifactComponentQuery, ArtifactInfo, ArtifactManager
+from tangle_cli.secrets import SecretsManager
+from tangle_cli.pipeline_run_search import PipelineRunSearch
+from tangle_cli.pipeline_run_details import PipelineRunDetails
+
+assert ArtifactComponentQuery is not None
+assert ArtifactInfo(id="a", uri="u").uri == "u"
+assert ArtifactManager is not None
+assert SecretsManager is not None
+assert PipelineRunSearch is not None
+assert PipelineRunDetails is not None
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(code)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_resource_manager_import_surface() -> None:
