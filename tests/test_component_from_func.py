@@ -6,7 +6,6 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -548,6 +547,60 @@ class TestBuildComponentDict:
         python_source = component["implementation"]["container"]["command"][-1]
         assert "_EMBEDDED_MODULES" in python_source
         assert "sys.modules" in python_source
+
+    def test_bundle_collects_imports_from_stripped_runtime_source_only(self, tmp_path):
+        import base64
+        import re as _re
+        import zlib
+
+        (tmp_path / "runtime_helper.py").write_text('VALUE = "runtime"\n', encoding="utf-8")
+        (tmp_path / "tangle_deploy" / "python_pipeline").mkdir(parents=True)
+        (tmp_path / "tangle_deploy" / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / "tangle_deploy" / "python_pipeline" / "__init__.py").write_text(textwrap.dedent("""\
+            class TaskEnv:
+                def __init__(self, **kwargs):
+                    pass
+
+            def task(**kwargs):
+                def decorator(fn):
+                    return fn
+                return decorator
+        """), encoding="utf-8")
+        (tmp_path / "authoring_envs.py").write_text(textwrap.dedent("""\
+            from tangle_deploy.python_pipeline import TaskEnv
+
+            UPI = TaskEnv(image="python:3.12")
+        """), encoding="utf-8")
+        py_file = tmp_path / "component.py"
+        py_file.write_text(textwrap.dedent("""\
+            from tangle_deploy.python_pipeline import task
+            from authoring_envs import UPI
+            import runtime_helper
+
+            @task(env=UPI)
+            def my_component() -> str:
+                return runtime_helper.VALUE
+        """), encoding="utf-8")
+        output_file = tmp_path / "output.yaml"
+
+        success = generate_component_yaml(
+            file_path=py_file,
+            output_path=output_file,
+            container_image="python:3.12",
+            function_name="my_component",
+            mode="bundle",
+        )
+
+        assert success is True
+        with open(output_file) as f:
+            component = yaml.safe_load(f)
+        python_source = component["implementation"]["container"]["command"][-1]
+        match = _re.search(r"base64\.b64decode\('([A-Za-z0-9+/=]+)'\)", python_source)
+        assert match is not None
+        embedded = json.loads(zlib.decompress(base64.b64decode(match.group(1))))
+        assert "runtime_helper" in embedded
+        assert "authoring_envs" not in embedded
+
 
     def test_bundle_yaml_orders_dependencies_before_dependents(self, tmp_path):
         """End-to-end YAML check for issue #30197.
