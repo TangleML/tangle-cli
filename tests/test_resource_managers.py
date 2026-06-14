@@ -264,6 +264,7 @@ from tangle_cli.artifacts import ArtifactComponentQuery, ArtifactInfo, ArtifactM
 from tangle_cli.secrets import SecretsManager
 from tangle_cli.pipeline_run_search import PipelineRunSearch
 from tangle_cli.pipeline_run_details import PipelineRunDetails
+from tangle_cli.pipeline_runner import PipelineRunner, PipelineRunnerHooks
 
 assert ArtifactComponentQuery is not None
 assert ArtifactInfo(id="a", uri="u").uri == "u"
@@ -271,6 +272,8 @@ assert ArtifactManager is not None
 assert SecretsManager is not None
 assert PipelineRunSearch is not None
 assert PipelineRunDetails is not None
+assert PipelineRunner is not None
+assert PipelineRunnerHooks is not None
 '''
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code)],
@@ -286,6 +289,7 @@ def test_resource_manager_import_surface() -> None:
     from tangle_cli.artifacts import serialize_artifacts as imported_serialize_artifacts
     from tangle_cli.pipeline_run_details import PipelineRunDetails as ImportedPipelineRunDetails
     from tangle_cli.pipeline_run_search import PipelineRunSearch as ImportedPipelineRunSearch
+    from tangle_cli.pipeline_runner import PipelineRunner as ImportedPipelineRunner
     from tangle_cli.secrets import SecretsManager as ImportedSecretsManager
 
     assert ImportedArtifactManager is ArtifactManager
@@ -293,3 +297,4 @@ def test_resource_manager_import_surface() -> None:
     assert ImportedSecretsManager is SecretsManager
     assert ImportedPipelineRunSearch is PipelineRunSearch
     assert ImportedPipelineRunDetails is PipelineRunDetails
+    assert ImportedPipelineRunner is not None
