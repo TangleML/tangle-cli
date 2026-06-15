@@ -288,6 +288,7 @@ def pipeline_runs_wait(
     *,
     max_wait: float = 600.0,
     poll_interval: float = 10.0,
+    exit_on_first_failure: bool = False,
     base_url: BaseUrlOption = None,
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
@@ -300,6 +301,7 @@ def pipeline_runs_wait(
         "run_id": (run_id,),
         "max_wait": (max_wait, 600.0),
         "poll_interval": (poll_interval, 10.0),
+        "exit_on_first_failure": (exit_on_first_failure, False),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
@@ -311,6 +313,7 @@ def pipeline_runs_wait(
             args.run_id,
             max_wait=float(args.max_wait),
             poll_interval=float(args.poll_interval),
+            exit_on_first_failure=bool(args.exit_on_first_failure),
         ),
     )
 
