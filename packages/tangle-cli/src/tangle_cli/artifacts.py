@@ -124,13 +124,11 @@ class ArtifactManager:
         for task_name, child_task in graph_tasks.items():
             task_name = str(task_name)
             key_prefix = f"{prefix}{task_name}" if prefix else task_name
-            output_filter: list[str] = []
-            matched = False
+            output_filters: list[list[str]] = []
 
             for query_name in (task_name, key_prefix):
                 if query_name in tasks_query:
-                    output_filter = tasks_query[query_name]
-                    matched = True
+                    output_filters.append(tasks_query[query_name])
                     break
 
             child_digest = _mapping_or_attr(child_task, "digest")
@@ -139,13 +137,18 @@ class ArtifactManager:
                 if (component.digest and child_digest == component.digest) or (
                     component.name and child_name == component.name
                 ):
-                    output_filter = component.outputs if component.outputs else output_filter
-                    matched = True
+                    output_filters.append(component.outputs)
 
             out_artifacts = _artifact_id_map(_mapping_or_attr(child_task, "execution_output_artifacts", {}))
-            if matched and out_artifacts:
+            if output_filters and out_artifacts:
+                include_all = any(not output_filter for output_filter in output_filters)
+                requested_outputs = {
+                    output_name
+                    for output_filter in output_filters
+                    for output_name in output_filter
+                }
                 for output_name, artifact_id in out_artifacts.items():
-                    if not output_filter or output_name in output_filter:
+                    if include_all or output_name in requested_outputs:
                         artifact_ids[f"{key_prefix}/{output_name}"] = artifact_id
 
             if _mapping_or_attr(child_task, "is_graph", False):

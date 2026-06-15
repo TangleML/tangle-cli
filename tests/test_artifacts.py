@@ -153,6 +153,36 @@ def test_get_artifacts_resolves_component_name_and_digest_queries() -> None:
     assert artifacts["Score/scores"].id == "artifact-scores"
 
 
+def test_get_artifacts_unions_outputs_from_multiple_matching_selectors() -> None:
+    client = FakeArtifactClient()
+    client.run_details["run-1"] = SimpleNamespace(
+        execution=_execution(
+            {
+                "Train": _task(
+                    name="Trainer",
+                    digest="sha256:trainer",
+                    output_artifacts={"model": "artifact-model", "metrics": "artifact-metrics"},
+                )
+            }
+        )
+    )
+    client.artifact_responses["artifact-model"] = _artifact_response("artifact-model", "gs://bucket/model")
+    client.artifact_responses["artifact-metrics"] = _artifact_response("artifact-metrics", "gs://bucket/metrics")
+
+    artifacts = get_artifacts(
+        "run-1",
+        {
+            "tasks": {"Train": ["model"]},
+            "components": [{"digest": "sha256:trainer", "outputs": ["metrics"]}],
+        },
+        client=client,
+    )
+
+    assert list(artifacts) == ["Train/model", "Train/metrics"]
+    assert artifacts["Train/model"].id == "artifact-model"
+    assert artifacts["Train/metrics"].id == "artifact-metrics"
+
+
 def test_get_artifacts_resolves_nested_subgraph_task_paths() -> None:
     client = FakeArtifactClient()
     nested_execution = _execution(

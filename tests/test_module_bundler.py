@@ -334,6 +334,17 @@ class TestRuntimeBundleExecution:
 
         assert ns["result"] == 41
 
+    def test_nested_package_relative_import_runs_correctly(self):
+        sources = {
+            "pkg": "",
+            "pkg.sub": "from . import helpers\n\nVALUE = helpers.VALUE\n",
+            "pkg.sub.helpers": "VALUE = 'nested'\n",
+        }
+
+        ns = self._exec_bundle(sources, "import pkg.sub\nresult = pkg.sub.VALUE\n")
+
+        assert ns["result"] == "nested"
+
     def test_parent_init_relative_import_runs_correctly(self):
         """Common pattern: parent ``__init__`` re-exports a sibling.
 

@@ -471,6 +471,9 @@ def test_pipeline_runs_commands_call_generated_operations(monkeypatch, tmp_path:
     run_app(app, ["sdk", "pipeline-runs", "annotations", "set", "run-1", "owner", "bob"])
     assert fake_client.annotation_sets == [("run-1", "owner", "bob")]
 
+    run_app(app, ["sdk", "pipeline-runs", "annotations", "set", "run-1", "flag"])
+    assert fake_client.annotation_sets[-1] == ("run-1", "flag", None)
+
     run_app(app, ["sdk", "pipeline-runs", "annotations", "delete", "run-1", "owner"])
     assert fake_client.annotation_deletes == [("run-1", "owner")]
 
