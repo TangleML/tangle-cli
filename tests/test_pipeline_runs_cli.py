@@ -1399,6 +1399,129 @@ def test_pipeline_runs_run_prepared_body_retry_body_factory() -> None:
     ]
 
 
+def test_pipeline_runs_wait_exit_on_first_failure_exits_on_failed() -> None:
+    class FailedGraphClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-1",
+                "execution_status_stats": {"RUNNING": 1},
+            }
+
+        def executions_graph_execution_state(self, id: str) -> dict[str, Any]:
+            return {"status_totals": {"RUNNING": 2, "FAILED": 1}}
+
+    manager = PipelineRunManager(client=FailedGraphClient())
+
+    result = manager.wait_for_completion(
+        "run-1",
+        max_wait=10,
+        poll_interval=1,
+        use_graph_state=True,
+        exit_on_first_failure=True,
+    )
+
+    assert result["early_exit"] is True
+    assert result["failed_count"] == 1
+    assert result["error_count"] == 0
+    assert result["status_counts"] == {"RUNNING": 2, "FAILED": 1}
+    assert isinstance(result["elapsed_seconds"], float)
+
+
+def test_pipeline_runs_wait_exit_on_first_failure_exits_on_system_error() -> None:
+    class ErrorGraphClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-1",
+                "execution_status_stats": {"RUNNING": 1},
+            }
+
+        def executions_graph_execution_state(self, id: str) -> dict[str, Any]:
+            return {"status_totals": {"RUNNING": 2, "SYSTEM_ERROR": 1}}
+
+    manager = PipelineRunManager(client=ErrorGraphClient())
+
+    result = manager.wait_for_completion(
+        "run-1",
+        max_wait=10,
+        poll_interval=1,
+        use_graph_state=True,
+        exit_on_first_failure=True,
+    )
+
+    assert result["early_exit"] is True
+    assert result["failed_count"] == 0
+    assert result["error_count"] == 1
+    assert result["status_counts"] == {"RUNNING": 2, "SYSTEM_ERROR": 1}
+
+
+def test_pipeline_runs_wait_exit_on_first_failure_disabled_does_not_exit(monkeypatch) -> None:
+    class FailedGraphClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-1",
+                "execution_status_stats": {"RUNNING": 1},
+            }
+
+        def executions_graph_execution_state(self, id: str) -> dict[str, Any]:
+            return {"status_totals": {"RUNNING": 2, "FAILED": 1}}
+
+    manager = PipelineRunManager(client=FailedGraphClient())
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.pipeline_runs.time.sleep", lambda value: sleeps.append(value))
+
+    result = manager.wait_for_completion(
+        "run-1",
+        max_wait=0,
+        poll_interval=1,
+        use_graph_state=True,
+        timeout_clock="wall",
+    )
+
+    assert result["timed_out"] is True
+    assert "early_exit" not in result
+    assert result["failed_count"] == 1
+    assert sleeps == []
+
+
+def test_pipeline_runs_wait_timeout_still_routes_via_timeout_hook() -> None:
+    events = []
+
+    class RunningClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {
+                "id": id,
+                "root_execution_id": "exec-1",
+                "execution_status_stats": {"RUNNING": 1},
+            }
+
+    class Hooks(PipelineRunHooks):
+        def should_exit_early(self, poll, context):
+            events.append("should_exit_early")
+            return super().should_exit_early(poll, context)
+
+        def on_timeout(self, poll, context):
+            events.append("timeout")
+
+        def on_early_exit_before_release(self, poll, context):
+            events.append("early_exit")
+
+    manager = PipelineRunManager(client=RunningClient(), hooks=Hooks())
+
+    result = manager.wait_for_completion(
+        "run-1",
+        max_wait=0,
+        poll_interval=1,
+        exit_on_first_failure=True,
+    )
+
+    assert result["timed_out"] is True
+    assert "early_exit" not in result
+    assert events == ["should_exit_early", "timeout"]
+
+
 def test_pipeline_runs_wait_allows_zero_poll_interval_when_opted_in() -> None:
     class RunningClient(FakeClient):
         def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:

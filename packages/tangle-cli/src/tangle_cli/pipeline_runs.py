@@ -29,6 +29,7 @@ from .utils import dump_yaml
 
 _TERMINAL_STATUSES = ("FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "SKIPPED", "SUCCEEDED", "INVALID")
 _ACTIVE_STATUSES = ("RUNNING", "CANCELLING", "CANCELING", "PENDING", "QUEUED")
+_FAILURE_EARLY_EXIT_STATUSES = ("FAILED", "SYSTEM_ERROR")
 
 
 class PipelineRunError(RuntimeError):
@@ -250,9 +251,16 @@ class PipelineRunHooks:
         """Hook called after each run/graph-state poll."""
 
     def should_exit_early(self, poll: PipelineWaitPoll, context: PipelineRunContext) -> bool:
-        """Return True to stop waiting before terminal/timeout."""
+        """Return True to stop waiting before terminal/timeout.
 
-        return False
+        The generic fail-fast policy is opt-in via ``exit_on_first_failure``.
+        Downstreams can set that flag when they want the wait loop to return as
+        soon as a task fails, before the full graph reaches a terminal state.
+        """
+
+        if not context.metadata.get("exit_on_first_failure"):
+            return False
+        return any(int(poll.status_counts.get(status, 0) or 0) > 0 for status in _FAILURE_EARLY_EXIT_STATUSES)
 
     def on_timeout(self, poll: PipelineWaitPoll, context: PipelineRunContext) -> None:
         """Hook called when wait reaches max_wait."""
@@ -920,8 +928,11 @@ class PipelineRunManager:
         context: PipelineRunContext | None = None,
         allow_zero_poll_interval: bool = False,
         timeout_clock: str = "monotonic",
+        exit_on_first_failure: bool = False,
     ) -> dict[str, Any]:
         wait_context = context or PipelineRunContext(run_id=run_id, start_time=time.time())
+        if exit_on_first_failure:
+            wait_context.metadata["exit_on_first_failure"] = True
         if max_wait is not None and max_wait < 0:
             raise PipelineRunError("--max-wait must be non-negative")
         if poll_interval < 0 or (poll_interval == 0 and not allow_zero_poll_interval):
@@ -961,18 +972,21 @@ class PipelineRunManager:
             last_poll = poll
             self.hooks.after_poll(poll, wait_context)
             if poll.terminal:
+                wait_context.metadata["wait_result"] = self._wait_metadata(poll)
                 self.hooks.on_terminal(poll, wait_context)
-                result = {"run": poll.run, "status": poll.status, "timed_out": False}
+                result = self._wait_result(poll, timed_out=False)
                 self.hooks.after_wait_context(result, wait_context)
                 return result
             if self.hooks.should_exit_early(poll, wait_context):
+                wait_context.metadata["wait_result"] = self._wait_metadata(poll, early_exit=True)
                 self.hooks.on_early_exit_before_release(poll, wait_context)
-                result = {"run": poll.run, "status": poll.status, "timed_out": False, "early_exit": True}
+                result = self._wait_result(poll, timed_out=False, early_exit=True)
                 self.hooks.after_wait_context(result, wait_context)
                 return result
             if deadline is not None and deadline_now() >= deadline:
+                wait_context.metadata["wait_result"] = self._wait_metadata(poll, timed_out=True)
                 self.hooks.on_timeout(poll, wait_context)
-                result = {"run": poll.run, "status": poll.status, "timed_out": True}
+                result = self._wait_result(poll, timed_out=True)
                 self.hooks.after_wait_context(result, wait_context)
                 return result
             if deadline is None:
@@ -982,6 +996,45 @@ class PipelineRunManager:
             time.sleep(sleep_for)
         if last_poll is None:  # pragma: no cover - defensive, loop always polls first
             raise PipelineRunError(f"No status returned for run {run_id}")
+
+    @staticmethod
+    def _wait_metadata(
+        poll: PipelineWaitPoll,
+        *,
+        timed_out: bool = False,
+        early_exit: bool = False,
+    ) -> dict[str, Any]:
+        failed_count = int(poll.status_counts.get("FAILED", 0) or 0)
+        error_count = int(poll.status_counts.get("SYSTEM_ERROR", 0) or 0)
+        metadata: dict[str, Any] = {
+            "status_counts": dict(poll.status_counts),
+            "failed_count": failed_count,
+            "error_count": error_count,
+            "elapsed_seconds": poll.elapsed_seconds,
+        }
+        if timed_out:
+            metadata["timed_out"] = True
+        if early_exit:
+            metadata["early_exit"] = True
+        return metadata
+
+    @staticmethod
+    def _wait_result(
+        poll: PipelineWaitPoll,
+        *,
+        timed_out: bool,
+        early_exit: bool = False,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "run": poll.run,
+            "status": poll.status,
+            "timed_out": timed_out,
+        }
+        if early_exit or timed_out:
+            result.update(PipelineRunManager._wait_metadata(poll, timed_out=timed_out, early_exit=early_exit))
+        if early_exit:
+            result["early_exit"] = True
+        return result
 
     def _run_body_factory(
         self,
@@ -995,6 +1048,7 @@ class PipelineRunManager:
         max_attempts: int = 1,
         allow_zero_poll_interval: bool = False,
         timeout_clock: str = "monotonic",
+        exit_on_first_failure: bool = False,
         metadata: dict[str, Any] | None = None,
         metadata_factory: Callable[
             [int, PipelineRunContext | None, Exception | None], dict[str, Any]
@@ -1051,6 +1105,7 @@ class PipelineRunManager:
                                 context=context,
                                 allow_zero_poll_interval=allow_zero_poll_interval,
                                 timeout_clock=timeout_clock,
+                                exit_on_first_failure=exit_on_first_failure,
                             )
                             result = {"response": response, "wait": wait_result}
                         else:
@@ -1102,6 +1157,7 @@ class PipelineRunManager:
         ] | None = None,
         allow_zero_poll_interval: bool = False,
         timeout_clock: str = "monotonic",
+        exit_on_first_failure: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Submit/wait/retry an already prepared submit body.
@@ -1129,6 +1185,7 @@ class PipelineRunManager:
             max_attempts=max_attempts,
             allow_zero_poll_interval=allow_zero_poll_interval,
             timeout_clock=timeout_clock,
+            exit_on_first_failure=exit_on_first_failure,
             metadata=metadata,
         )
 
@@ -1148,6 +1205,7 @@ class PipelineRunManager:
         max_attempts: int = 1,
         allow_zero_poll_interval: bool = False,
         timeout_clock: str = "monotonic",
+        exit_on_first_failure: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Submit/wait/retry an already hydrated/validated in-memory spec."""
@@ -1176,6 +1234,7 @@ class PipelineRunManager:
             max_attempts=max_attempts,
             allow_zero_poll_interval=allow_zero_poll_interval,
             timeout_clock=timeout_clock,
+            exit_on_first_failure=exit_on_first_failure,
             metadata=metadata,
         )
 
@@ -1195,6 +1254,7 @@ class PipelineRunManager:
         max_attempts: int = 1,
         allow_zero_poll_interval: bool = False,
         timeout_clock: str = "monotonic",
+        exit_on_first_failure: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Submit (and optionally wait for) a pipeline with lifecycle hooks.
@@ -1228,6 +1288,7 @@ class PipelineRunManager:
             max_attempts=max_attempts,
             allow_zero_poll_interval=allow_zero_poll_interval,
             timeout_clock=timeout_clock,
+            exit_on_first_failure=exit_on_first_failure,
             metadata=metadata,
         )
 

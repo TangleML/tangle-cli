@@ -451,6 +451,7 @@ class PipelineRunner(PipelineRunManager):
         max_attempts: int | None = None,
         allow_zero_poll_interval: bool = False,
         timeout_clock: str = "monotonic",
+        exit_on_first_failure: bool = False,
         skip_validation: bool = False,
         skip_layout: bool = True,
         force_layout: bool = False,
@@ -528,6 +529,7 @@ class PipelineRunner(PipelineRunManager):
                 max_attempts=attempts,
                 allow_zero_poll_interval=allow_zero_poll_interval,
                 timeout_clock=timeout_clock,
+                exit_on_first_failure=exit_on_first_failure,
                 metadata_factory=metadata_factory,
             )
             context = result.get("context")
