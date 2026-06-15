@@ -255,13 +255,45 @@ class PipelineHydrator:
             return "child-priority"
         raise ValueError(f"Unsupported recursive_context: {value!r}")
 
-    def _cache_key(self, ref_type: str, ref_value: str) -> str:
+    def _cache_key(
+        self,
+        ref_type: str,
+        ref_value: str,
+        base_dir: Path | None = None,
+    ) -> str:
         """Compute a cache key for a component reference."""
         key = f"{ref_type}:{ref_value}"
+        if self._ref_depends_on_base_dir(ref_type, ref_value):
+            resolved_base_dir = base_dir.resolve() if base_dir is not None else None
+            key = f"{key}:base={resolved_base_dir}"
         if self.recursive_context and self._global_params:
             params_hash = hash(json.dumps(self._global_params, sort_keys=True, default=str))
             return f"{key}:ctx={params_hash}"
         return key
+
+    def _ref_depends_on_base_dir(self, ref_type: str, ref_value: str) -> bool:
+        """Return whether a ref resolves relative to the active base directory."""
+        if ref_type in {"local", "local_from_python"}:
+            return True
+        if ref_type != "url":
+            return False
+
+        url = str(ref_value)
+        scheme = self._uri_scheme(url)
+        if scheme is None:
+            return not Path(url).is_absolute()
+        if scheme == "file":
+            return not Path(url[7:]).is_absolute()
+        if scheme == "resolve":
+            file_path = url[len("resolve://"):]
+            if "#" in file_path:
+                file_path, _fragment = file_path.rsplit("#", 1)
+            nested_scheme = self._uri_scheme(file_path)
+            if nested_scheme is None:
+                return not Path(file_path).is_absolute()
+            if nested_scheme == "file":
+                return not Path(file_path[7:]).is_absolute()
+        return False
 
     def _merge_with_global_params(self, child_params: dict[str, Any]) -> dict[str, Any]:
         """Merge child template params with inherited recursive-context params.
@@ -1189,7 +1221,7 @@ class PipelineHydrator:
         base_dir: Path | None = None,
     ) -> dict[str, Any]:
         """Resolve a component reference to full componentRef with spec."""
-        cache_key = self._cache_key(ref_type, ref_value)
+        cache_key = self._cache_key(ref_type, ref_value, base_dir)
         if cache_key not in self.cache:
             result = self._resolve_registered_component(ref_type, ref_value, path, base_dir)
             if result is None:
@@ -1225,7 +1257,7 @@ class PipelineHydrator:
         base_dir: Path | None,
     ) -> tuple[str, str, str | None, dict[str, Any]] | None:
         """Resolve one ref and return metadata for best-ref selection."""
-        cache_key = self._cache_key(ref_type, ref_value)
+        cache_key = self._cache_key(ref_type, ref_value, base_dir)
         try:
             if cache_key not in self.cache:
                 result = self._resolve_registered_component(ref_type, ref_value, path, base_dir)

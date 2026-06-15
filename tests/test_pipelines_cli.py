@@ -459,6 +459,144 @@ def test_pipelines_hydrate_nested_file_refs_use_loaded_component_source_dir(
     assert "_source_dir" not in grandchild_ref["spec"]
 
 
+def test_pipelines_hydrate_cache_separates_same_relative_ref_by_source_dir(
+    tmp_path: Path,
+    capsys,
+):
+    left_dir = tmp_path / "left"
+    right_dir = tmp_path / "right"
+    left_dir.mkdir()
+    right_dir.mkdir()
+    _write_pipeline(
+        left_dir / "leaf.yaml",
+        {
+            "name": "Left Leaf",
+            "implementation": {"container": {"image": "left:latest"}},
+        },
+    )
+    _write_pipeline(
+        right_dir / "leaf.yaml",
+        {
+            "name": "Right Leaf",
+            "implementation": {"container": {"image": "right:latest"}},
+        },
+    )
+    _write_pipeline(
+        left_dir / "subgraph.yaml",
+        {
+            "name": "Left Subgraph",
+            "implementation": {
+                "graph": {
+                    "tasks": {"leaf": {"componentRef": {"url": "file://leaf.yaml"}}}
+                }
+            },
+        },
+    )
+    _write_pipeline(
+        right_dir / "subgraph.yaml",
+        {
+            "name": "Right Subgraph",
+            "implementation": {
+                "graph": {
+                    "tasks": {"leaf": {"componentRef": {"url": "file://leaf.yaml"}}}
+                }
+            },
+        },
+    )
+    pipeline_path = _write_pipeline(
+        tmp_path / "pipeline.yaml",
+        {
+            "name": "Pipeline",
+            "implementation": {
+                "graph": {
+                    "tasks": {
+                        "left": {"componentRef": {"url": "file://left/subgraph.yaml"}},
+                        "right": {"componentRef": {"url": "file://right/subgraph.yaml"}},
+                    }
+                }
+            },
+        },
+    )
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipelines", "hydrate", str(pipeline_path)])
+
+    hydrated = yaml.safe_load(capsys.readouterr().out)
+    tasks = hydrated["implementation"]["graph"]["tasks"]
+    left_leaf = tasks["left"]["componentRef"]["spec"]["implementation"]["graph"]["tasks"]["leaf"]["componentRef"]
+    right_leaf = tasks["right"]["componentRef"]["spec"]["implementation"]["graph"]["tasks"]["leaf"]["componentRef"]
+    assert left_leaf["name"] == "Left Leaf"
+    assert left_leaf["spec"]["implementation"]["container"]["image"] == "left:latest"
+    assert right_leaf["name"] == "Right Leaf"
+    assert right_leaf["spec"]["implementation"]["container"]["image"] == "right:latest"
+
+
+def test_pipelines_hydrate_cache_separates_relative_resolve_refs_by_source_dir(
+    tmp_path: Path,
+    capsys,
+):
+    left_dir = tmp_path / "left"
+    right_dir = tmp_path / "right"
+    left_dir.mkdir()
+    right_dir.mkdir()
+    for side, image in (("left", "left:latest"), ("right", "right:latest")):
+        side_dir = tmp_path / side
+        _write_pipeline(
+            side_dir / "leaf.yaml",
+            {
+                "name": f"{side.title()} Leaf",
+                "implementation": {"container": {"image": image}},
+            },
+        )
+        _write_pipeline(
+            side_dir / "components.resolve.yaml",
+            {"leaf": {"url": "file://leaf.yaml"}},
+        )
+        _write_pipeline(
+            side_dir / "subgraph.yaml",
+            {
+                "name": f"{side.title()} Subgraph",
+                "implementation": {
+                    "graph": {
+                        "tasks": {
+                            "leaf": {
+                                "componentRef": {
+                                    "url": "resolve://./components.resolve.yaml#leaf"
+                                }
+                            }
+                        }
+                    }
+                },
+            },
+        )
+    pipeline_path = _write_pipeline(
+        tmp_path / "pipeline.yaml",
+        {
+            "name": "Pipeline",
+            "implementation": {
+                "graph": {
+                    "tasks": {
+                        "left": {"componentRef": {"url": "file://left/subgraph.yaml"}},
+                        "right": {"componentRef": {"url": "file://right/subgraph.yaml"}},
+                    }
+                }
+            },
+        },
+    )
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipelines", "hydrate", str(pipeline_path)])
+
+    hydrated = yaml.safe_load(capsys.readouterr().out)
+    tasks = hydrated["implementation"]["graph"]["tasks"]
+    left_leaf = tasks["left"]["componentRef"]["spec"]["implementation"]["graph"]["tasks"]["leaf"]["componentRef"]
+    right_leaf = tasks["right"]["componentRef"]["spec"]["implementation"]["graph"]["tasks"]["leaf"]["componentRef"]
+    assert left_leaf["name"] == "Left Leaf"
+    assert left_leaf["spec"]["implementation"]["container"]["image"] == "left:latest"
+    assert right_leaf["name"] == "Right Leaf"
+    assert right_leaf["spec"]["implementation"]["container"]["image"] == "right:latest"
+
+
 def test_pipelines_hydrate_resolve_url_fragment_uses_config_relative_local_refs(
     tmp_path: Path,
     capsys,

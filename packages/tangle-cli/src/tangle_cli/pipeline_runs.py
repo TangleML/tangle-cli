@@ -344,6 +344,12 @@ class PipelineRunManager:
             return value.model_dump(by_alias=True)
         if isinstance(value, list):
             return [PipelineRunManager.to_plain(item) for item in value]
+        if hasattr(value, "__dict__"):
+            return {
+                key: PipelineRunManager.to_plain(val)
+                for key, val in vars(value).items()
+                if not key.startswith("_")
+            }
         return value
 
     @staticmethod
@@ -776,12 +782,6 @@ class PipelineRunManager:
 
     def graph_state(self, execution_id: str) -> Mapping[str, Any] | Any:
         graph_state = self.client.executions_graph_execution_state(execution_id)
-        if not isinstance(graph_state, Mapping) and (
-            hasattr(graph_state, "status_totals")
-            or hasattr(graph_state, "execution_status_stats")
-            or hasattr(graph_state, "child_execution_status_stats")
-        ):
-            return graph_state
         return self.to_plain(graph_state)
 
     def graph_state_output(self, run_ids: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
