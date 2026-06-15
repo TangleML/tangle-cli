@@ -517,7 +517,7 @@ def pipeline_runs_annotations_set(
     specs = {
         "run_id": (run_id,),
         "key": (key,),
-        "value": (value,),
+        "value": (value, None),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }

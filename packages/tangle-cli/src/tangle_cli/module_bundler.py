@@ -293,6 +293,11 @@ class ModuleBundler:
             # Pass 1: register all modules in sys.modules (without executing source)
             # so transitive imports between bundled modules can resolve in any order.
             _module_objs = {{}}
+            _package_names = set()
+            for _mod_name in _EMBEDDED_MODULES:
+                _parts = _mod_name.split('.')
+                for _i in range(1, len(_parts)):
+                    _package_names.add('.'.join(_parts[:_i]))
             for _mod_name in _EMBEDDED_MODULES:
                 _parts = _mod_name.split('.')
                 for _i in range(1, len(_parts)):
@@ -302,9 +307,14 @@ class ModuleBundler:
                         _pkg.__path__ = []
                         _pkg.__package__ = _parent
                         sys.modules[_parent] = _pkg
-                _mod = types.ModuleType(_mod_name)
-                _mod.__package__ = '.'.join(_parts[:-1]) if len(_parts) > 1 else _mod_name
-                sys.modules[_mod_name] = _mod
+                _mod = sys.modules.get(_mod_name)
+                if _mod is None or _mod_name not in _package_names:
+                    _mod = types.ModuleType(_mod_name)
+                    sys.modules[_mod_name] = _mod
+                _is_package = _mod_name in _package_names
+                _mod.__package__ = _mod_name if _is_package else ('.'.join(_parts[:-1]) if len(_parts) > 1 else '')
+                if _is_package:
+                    _mod.__path__ = []
                 if len(_parts) > 1:
                     setattr(sys.modules['.'.join(_parts[:-1])], _parts[-1], _mod)
                 _module_objs[_mod_name] = _mod
