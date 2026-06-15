@@ -255,9 +255,19 @@ class PipelineHydrator:
             return "child-priority"
         raise ValueError(f"Unsupported recursive_context: {value!r}")
 
-    def _cache_key(self, ref_type: str, ref_value: str) -> str:
+    def _cache_key(
+        self,
+        ref_type: str,
+        ref_value: str,
+        base_dir: Path | None = None,
+    ) -> str:
         """Compute a cache key for a component reference."""
         key = f"{ref_type}:{ref_value}"
+        if ref_type in {"local", "local_from_python"} or (
+            ref_type == "url" and self._uri_scheme(ref_value) in {None, "file"}
+        ):
+            resolved_base_dir = base_dir.resolve() if base_dir is not None else None
+            key = f"{key}:base={resolved_base_dir}"
         if self.recursive_context and self._global_params:
             params_hash = hash(json.dumps(self._global_params, sort_keys=True, default=str))
             return f"{key}:ctx={params_hash}"
@@ -1189,7 +1199,7 @@ class PipelineHydrator:
         base_dir: Path | None = None,
     ) -> dict[str, Any]:
         """Resolve a component reference to full componentRef with spec."""
-        cache_key = self._cache_key(ref_type, ref_value)
+        cache_key = self._cache_key(ref_type, ref_value, base_dir)
         if cache_key not in self.cache:
             result = self._resolve_registered_component(ref_type, ref_value, path, base_dir)
             if result is None:
@@ -1225,7 +1235,7 @@ class PipelineHydrator:
         base_dir: Path | None,
     ) -> tuple[str, str, str | None, dict[str, Any]] | None:
         """Resolve one ref and return metadata for best-ref selection."""
-        cache_key = self._cache_key(ref_type, ref_value)
+        cache_key = self._cache_key(ref_type, ref_value, base_dir)
         try:
             if cache_key not in self.cache:
                 result = self._resolve_registered_component(ref_type, ref_value, path, base_dir)

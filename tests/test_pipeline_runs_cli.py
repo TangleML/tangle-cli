@@ -586,6 +586,23 @@ def test_pipeline_runs_search_cli_table_output(monkeypatch, capsys) -> None:
     }
 
 
+def test_pipeline_runs_graph_state_returns_plain_generated_response() -> None:
+    class GraphStateClient:
+        def executions_graph_execution_state(self, id: str) -> Any:
+            assert id == "exec-1"
+            return SimpleNamespace(
+                status_totals={"SUCCEEDED": 1},
+                child_execution_status_stats={"child-1": {"RUNNING": 2}},
+            )
+
+    manager = PipelineRunManager(client=GraphStateClient())
+
+    assert manager.graph_state("exec-1") == {
+        "status_totals": {"SUCCEEDED": 1},
+        "child_execution_status_stats": {"child-1": {"RUNNING": 2}},
+    }
+
+
 def test_pipeline_runs_details_and_graph_state_helpers() -> None:
     manager = PipelineRunManager(client=FakeClient())
 
