@@ -1185,6 +1185,188 @@ def test_pipeline_hydrator_uri_hooks_cover_top_level_and_resolve_config():
     assert {context.path for context in contexts} >= {"pipeline", "Pipeline.task", "output"}
 
 
+def test_pipeline_hydrator_normalizes_model_specs_from_clients_and_resolvers():
+    from tangle_cli.pipeline_hydrator import PipelineHydrator
+
+    class ModelSpec:
+        def __init__(self, data):
+            self.data = data
+
+        def to_mutable_spec_dict(self):
+            return self.data
+
+    source_spec = {
+        "name": "Model Component",
+        "metadata": {"annotations": {"version": "1.0"}},
+    }
+
+    class FakeClient:
+        def get_component_spec(self, digest):
+            assert digest == "sha256:model"
+            return ModelSpec(source_spec)
+
+    hydrator = PipelineHydrator(client=FakeClient(), upgrade_deprecated=False)
+
+    digest, fetched = hydrator.fetch_component("sha256:model")
+    fetched["metadata"]["annotations"]["version"] = "mutated"
+
+    assert digest == "sha256:model"
+    assert source_spec["metadata"]["annotations"]["version"] == "1.0"
+
+    hydrator.register_component_resolver(
+        "custom",
+        lambda *_args: ("sha256:custom", SimpleNamespace(data=source_spec)),
+    )
+    resolved_digest, resolved_spec = hydrator._resolve_registered_component(
+        "custom",
+        "unused",
+        "Pipeline.task",
+        None,
+    )
+    resolved_spec["metadata"]["annotations"]["version"] = "resolver-mutated"
+
+    assert resolved_digest == "sha256:custom"
+    assert source_spec["metadata"]["annotations"]["version"] == "1.0"
+
+
+def test_pipeline_hydrator_uri_reader_soft_failures_respect_error_policy():
+    from tangle_cli.logger import CaptureLogger
+    from tangle_cli.pipeline_hydrator import HydrationError, PipelineHydrator
+
+    sources = {
+        "mem://missing": FileNotFoundError("missing"),
+        "mem://invalid": "name: [",
+        "mem://empty": "",
+        "mem://list": "- not\n- a mapping\n",
+        "mem://template": yaml.safe_dump({"template_file": "component.yaml.j2"}),
+    }
+
+    def reader(_hydrator, uri, _context):
+        value = sources[uri]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    logger = CaptureLogger()
+    hydrator = PipelineHydrator(uri_readers={"mem": reader}, logger=logger)
+
+    for uri in sources:
+        assert hydrator._fetch_component_from_uri(uri, "Pipeline.task") is None
+
+    logs = logger.get_logs() or ""
+    assert "Component not found at URI mem://missing" in logs
+    assert "Failed to parse component YAML from mem://invalid" in logs
+    assert "Failed to parse YAML from mem://empty" in logs
+    assert "expected a mapping" in logs
+    assert "non-local URI is a template_file config" in logs
+
+    strict = PipelineHydrator(uri_readers={"mem": reader}, error_policy="raise")
+    with pytest.raises(HydrationError, match="expected a mapping"):
+        strict._fetch_component_from_uri("mem://list", "Pipeline.task")
+
+    with pytest.raises(HydrationError, match="Pipeline not found at URI mem://missing"):
+        strict.hydrate_file("mem://missing")
+
+
+def test_pipeline_hydrator_url_dispatch_soft_fails_unexpected_errors(tmp_path: Path):
+    from tangle_cli.logger import CaptureLogger
+    from tangle_cli.pipeline_hydrator import HydrationError, PipelineHydrator
+
+    component_path = tmp_path / "component.yaml"
+    component_path.write_text(
+        yaml.safe_dump({"name": "Local", "implementation": {"container": {"image": "x"}}}),
+        encoding="utf-8",
+    )
+
+    def failing_resolver(*_args):
+        raise RuntimeError("boom")
+
+    logger = CaptureLogger()
+    hydrator = PipelineHydrator(
+        component_resolvers={"boom": failing_resolver},
+        logger=logger,
+    )
+
+    digest, spec = hydrator._fetch_component_by_url("component.yaml", "Pipeline.task", tmp_path)
+    assert digest
+    assert spec["name"] == "Local"
+
+    assert hydrator._fetch_component_by_url("boom://component", "Pipeline.task", tmp_path) is None
+    assert "Failed to fetch component from URL boom://component: boom" in (logger.get_logs() or "")
+
+    strict = PipelineHydrator(
+        component_resolvers={"boom": failing_resolver},
+        error_policy="raise",
+    )
+    with pytest.raises(HydrationError, match="Failed to fetch component from URL"):
+        strict._fetch_component_by_url("boom://component", "Pipeline.task", tmp_path)
+
+
+def test_pipeline_hydrator_postprocess_loaded_local_spec_hook(tmp_path: Path):
+    from tangle_cli import utils
+    from tangle_cli.logger import CaptureLogger
+    from tangle_cli.pipeline_hydrator import PipelineHydrator
+
+    (tmp_path / "component.yaml.j2").write_text(
+        textwrap.dedent(
+            """
+            name: "{{ name }}"
+            implementation:
+              container:
+                image: python:3.12
+            """
+        ),
+        encoding="utf-8",
+    )
+    _write_pipeline(
+        tmp_path / "component-config.yaml",
+        {"template_file": "component.yaml.j2", "name": "Rendered"},
+    )
+
+    calls = []
+
+    class HookedHydrator(PipelineHydrator):
+        def postprocess_loaded_local_spec(
+            self,
+            spec,
+            *,
+            file_path,
+            yaml_text,
+            rendered_from_template,
+        ):
+            calls.append(
+                {
+                    "file_path": file_path,
+                    "yaml_text": yaml_text,
+                    "rendered_from_template": rendered_from_template,
+                    "source_dir": spec.get("_source_dir"),
+                }
+            )
+            updated = dict(spec)
+            updated["name"] = "Postprocessed"
+            updated["metadata"] = {"annotations": {"postprocessed": "true"}}
+            return updated
+
+    logger = CaptureLogger()
+    hydrator = HookedHydrator(logger=logger)
+
+    digest, spec = hydrator._fetch_component_from_file_url(
+        "file://./component-config.yaml",
+        "Pipeline.task",
+        tmp_path,
+    )
+
+    assert spec["name"] == "Postprocessed"
+    assert spec["metadata"]["annotations"]["postprocessed"] == "true"
+    assert len(calls) == 1
+    assert calls[0]["file_path"] == tmp_path / "component-config.yaml"
+    assert calls[0]["rendered_from_template"] is True
+    assert calls[0]["source_dir"] == str(tmp_path)
+    assert "name: \"Rendered\"" in calls[0]["yaml_text"]
+    assert digest == utils.compute_text_digest(calls[0]["yaml_text"])
+    assert "Loaded component: Postprocessed" in (logger.get_logs() or "")
+
+
 def test_pipeline_hydrator_recursive_context_flows_to_child_templates(tmp_path: Path):
     from tangle_cli.pipeline_hydrator import PipelineHydrator
 

@@ -42,6 +42,10 @@ class UnsupportedHydrationFeatureError(HydrationError):
     """Raised for TD features intentionally excluded from the OSS CLI."""
 
 
+class UntrustedHydrationSourceError(HydrationError):
+    """Raised when hydration would execute an untrusted local source."""
+
+
 @dataclass(frozen=True)
 class HydratedPipeline:
     """Result returned by :meth:`PipelineHydrator.hydrate_file`."""
@@ -393,6 +397,17 @@ class PipelineHydrator:
             return None
         return uri.split("://", 1)[0]
 
+    def _warn_or_raise_hydration_error(
+        self,
+        message: str,
+        exc: Exception | None = None,
+    ) -> None:
+        if self.error_policy == "raise":
+            if isinstance(exc, HydrationError):
+                raise exc
+            raise HydrationError(message) from exc
+        self.log.warn(f"   ⚠️ {message}")
+
     def _read_uri_text(
         self,
         uri: str,
@@ -410,7 +425,20 @@ class PipelineHydrator:
                 f"{_available_resolvers_text(self.uri_readers)}"
             )
         hook_context = context or self.make_resolver_context(scheme, uri, kind, None)
-        return reader(self, uri, hook_context)
+        try:
+            return reader(self, uri, hook_context)
+        except FileNotFoundError as exc:
+            message = f"{kind.capitalize()} not found at URI {uri}"
+            if kind == "pipeline":
+                raise HydrationError(message) from exc
+            self._warn_or_raise_hydration_error(message, exc)
+            return None
+        except Exception as exc:
+            message = f"Error reading {kind} URI {uri}: {exc}"
+            if kind == "pipeline":
+                raise HydrationError(message) from exc
+            self._warn_or_raise_hydration_error(message, exc)
+            return None
 
     def _write_uri_text(
         self,
@@ -460,17 +488,49 @@ class PipelineHydrator:
         if resolver is None:
             raise self._unsupported_resolver(kind)
         context = self.make_resolver_context(kind, value, path, base_dir)
-        return self._call_component_resolver(resolver, value, path, base_dir, context)
+        result = self._call_component_resolver(resolver, value, path, base_dir, context)
+        if result is None:
+            return None
+        digest, spec = result
+        return digest, self.normalize_component_spec(spec)
+
+    def normalize_component_spec(self, component: Any) -> dict[str, Any]:
+        """Return a mutable YAML-shaped copy of a component spec.
+
+        Core resolver code operates on component specs as dictionaries. API
+        clients and downstream packages may return generated model instances
+        instead; this hook is the normalization seam that lets them keep their
+        client-specific return types without overriding fetch/name/latest/digest
+        resolver logic.
+        """
+        if isinstance(component, Mapping):
+            return copy.deepcopy(dict(component))
+
+        to_mutable_spec_dict = getattr(component, "to_mutable_spec_dict", None)
+        if callable(to_mutable_spec_dict):
+            spec = to_mutable_spec_dict()
+            if isinstance(spec, Mapping):
+                return copy.deepcopy(dict(spec))
+
+        data = getattr(component, "data", None)
+        if isinstance(data, Mapping):
+            return copy.deepcopy(dict(data))
+
+        raise HydrationError(
+            "Component spec must be a mapping or expose mapping-like data; "
+            f"got {type(component).__name__}"
+        )
 
     def fetch_component(self, digest: str) -> tuple[str, dict[str, Any]]:
         """Fetch a component, optionally following deprecation successors."""
         client = self._api_client()
         current_digest = client.resolve_digest(digest) if self.upgrade_deprecated else digest
-        spec = client.get_component_spec(current_digest).data
+        component = client.get_component_spec(current_digest)
+        spec = self.normalize_component_spec(component)
         if self.verbose:
             self.log.info(f"   [verbose] get_component_spec({current_digest}):")
             self.log.info(json.dumps(spec, indent=2, default=str))
-        return current_digest, copy.deepcopy(spec)
+        return current_digest, spec
 
     def _fetch_component_by_digest(
         self,
@@ -480,7 +540,8 @@ class PipelineHydrator:
     ) -> tuple[str, dict[str, Any]]:
         """Fetch a component by digest and return as dict."""
         self.log.info(f"   Fetching component: {digest[:16]}... ({path})")
-        return self.fetch_component(digest)
+        resolved_digest, component = self.fetch_component(digest)
+        return resolved_digest, self.normalize_component_spec(component)
 
     def _find_latest_version_component(
         self,
@@ -490,10 +551,10 @@ class PipelineHydrator:
         client = self._api_client()
 
         def _fetch(digest: str) -> tuple[str, dict[str, Any]]:
-            spec = client.get_component_spec(digest)
-            if not spec:
+            component = client.get_component_spec(digest)
+            if not component:
                 raise HydrationError(f"Component not found: {digest}")
-            return digest, copy.deepcopy(spec.data)
+            return digest, self.normalize_component_spec(component)
 
         digests = [c.digest for c in components if c.digest]
         if not digests:
@@ -544,10 +605,34 @@ class PipelineHydrator:
         base_dir: Path | None = None,
     ) -> tuple[str, dict[str, Any]] | None:
         """Fetch a component by URL and return as dict."""
-        scheme = url.split("://", 1)[0] if "://" in url else "url"
-        if scheme in self.uri_readers:
-            return self._fetch_component_from_uri(url, path, base_dir)
-        return self._resolve_registered_component(scheme, url, path, base_dir)
+        scheme = self._uri_scheme(url)
+        try:
+            if scheme is None:
+                if base_dir is None:
+                    raise HydrationError(
+                        f"Scheme-less component URL {url!r} requires a local base directory"
+                    )
+                result = self._fetch_component_from_file_url(f"file://{url}", path, base_dir)
+            elif scheme in self.uri_readers:
+                result = self._fetch_component_from_uri(url, path, base_dir)
+            else:
+                result = self._resolve_registered_component(scheme, url, path, base_dir)
+        except HydrationError as exc:
+            if isinstance(exc, UntrustedHydrationSourceError):
+                raise
+            self._warn_or_raise_hydration_error(str(exc), exc)
+            return None
+        except Exception as exc:
+            self._warn_or_raise_hydration_error(
+                f"Failed to fetch component from URL {url}: {exc}", exc
+            )
+            return None
+
+        if self.verbose and result is not None:
+            _, spec = result
+            self.log.info("   [verbose] Component spec from URL:")
+            self.log.info(json.dumps(spec, indent=2, default=str))
+        return result
 
     def fetch_remote_component(
         self,
@@ -594,13 +679,24 @@ class PipelineHydrator:
         try:
             spec = yaml.safe_load(yaml_text)
         except yaml.YAMLError as exc:
-            raise HydrationError(f"Failed to parse component YAML from {url}: {exc}") from exc
-        if not isinstance(spec, dict):
-            raise HydrationError(f"Component YAML at {url} must be a mapping")
-        if "template_file" in spec:
-            raise UnsupportedHydrationFeatureError(
-                f"template_file configs are not supported for non-local URI {url!r}"
+            self._warn_or_raise_hydration_error(
+                f"Failed to parse component YAML from {url}: {exc}", exc
             )
+            return None
+        if spec is None:
+            self._warn_or_raise_hydration_error(f"Failed to parse YAML from {url}")
+            return None
+        if not isinstance(spec, dict):
+            self._warn_or_raise_hydration_error(
+                f"Component YAML at {url} is a {type(spec).__name__}, expected a mapping"
+            )
+            return None
+        if "template_file" in spec:
+            self._warn_or_raise_hydration_error(
+                "Component at non-local URI is a template_file config; "
+                "render it locally and publish the rendered result instead"
+            )
+            return None
         digest = utils.compute_text_digest(yaml_text)
         self.log.info(
             f"   ✅ Loaded component: {spec.get('name', 'unknown')} "
@@ -645,6 +741,23 @@ class PipelineHydrator:
             return None
         return rendered, spec
 
+    def postprocess_loaded_local_spec(
+        self,
+        spec: dict[str, Any],
+        *,
+        file_path: Path,
+        yaml_text: str,
+        rendered_from_template: bool,
+    ) -> dict[str, Any]:
+        """Hook for downstream metadata on locally loaded component specs.
+
+        Called after local file/template loading and ``_source_dir`` provenance
+        are applied, before digest calculation and nested ref resolution. The
+        default implementation is native-free and leaves the spec unchanged.
+        """
+        del file_path, yaml_text, rendered_from_template
+        return spec
+
     def _fetch_component_from_file_url(
         self,
         url: str,
@@ -675,6 +788,7 @@ class PipelineHydrator:
         if not isinstance(spec, dict):
             raise HydrationError(f"Component file {path_obj} must contain a mapping")
 
+        rendered_from_template = False
         if "template_file" in spec:
             merged_params: dict[str, Any] | None = None
             if self.recursive_context and self._global_params:
@@ -685,6 +799,7 @@ class PipelineHydrator:
             if result is None:
                 return None
             yaml_text, spec = result
+            rendered_from_template = True
             if merged_params is not None:
                 spec["_recursive_params"] = merged_params
 
@@ -692,6 +807,17 @@ class PipelineHydrator:
         # resolve relative to the component file that contains them, not the
         # original top-level pipeline file.
         spec["_source_dir"] = str(path_obj.parent)
+        try:
+            spec = self.postprocess_loaded_local_spec(
+                spec,
+                file_path=path_obj,
+                yaml_text=yaml_text,
+                rendered_from_template=rendered_from_template,
+            )
+        except Exception as exc:
+            raise HydrationError(
+                f"Error postprocessing component file {path_obj}: {exc}"
+            ) from exc
 
         digest = utils.compute_text_digest(yaml_text)
         self.log.info(
@@ -741,7 +867,10 @@ class PipelineHydrator:
             try:
                 text = path_obj.read_text(encoding="utf-8")
             except Exception as exc:
-                raise HydrationError(f"Error reading resolve config {path_obj}: {exc}") from exc
+                self._warn_or_raise_hydration_error(
+                    f"Error reading resolve config {path_obj}: {exc}", exc
+                )
+                return None
 
         try:
             text = utils.expand_vars(text, self._resolution_overrides_str)
@@ -750,7 +879,10 @@ class PipelineHydrator:
             self.log.warn(f"   ⚠️ Resolve config {source}: unset variable {exc}")
             return None
         except Exception as exc:
-            raise HydrationError(f"Error parsing resolve config {source}: {exc}") from exc
+            self._warn_or_raise_hydration_error(
+                f"Error parsing resolve config {source}: {exc}", exc
+            )
+            return None
 
         if fragment is not None:
             if not isinstance(config, dict) or fragment not in config:
@@ -1034,10 +1166,8 @@ class PipelineHydrator:
                 if getattr(response, "status_code", None) == 404:
                     continue
                 raise
-            spec_data = getattr(spec_obj, "data", spec_obj)
-            annotations = {}
-            if isinstance(spec_data, dict):
-                annotations = spec_data.get("metadata", {}).get("annotations", {}) or {}
+            spec_data = self.normalize_component_spec(spec_obj)
+            annotations = spec_data.get("metadata", {}).get("annotations", {}) or {}
             attr_annotations = getattr(spec_obj, "annotations", None)
             if attr_annotations:
                 annotations = attr_annotations
@@ -1102,7 +1232,7 @@ class PipelineHydrator:
             trusted_sources=self.trusted_python_sources,
             allow_all=self.allow_all_hydration,
         ):
-            raise HydrationError(trusted_python_source_guidance(python_file))
+            raise UntrustedHydrationSourceError(trusted_python_source_guidance(python_file))
 
         output_folder = _resolve_path(gen_config.get("output_folder"))
         if output_folder is None:
