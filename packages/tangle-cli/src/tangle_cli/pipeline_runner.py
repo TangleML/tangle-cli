@@ -283,7 +283,7 @@ class PipelineRunnerHooks(PipelineRunHooks):
 
 
 @dataclass
-class PipelineRunner(PipelineRunManager):
+class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
     """Generic high-level pipeline runner orchestration."""
 
     hooks: PipelineRunnerHooks = field(default_factory=PipelineRunnerHooks)
@@ -293,6 +293,17 @@ class PipelineRunner(PipelineRunManager):
         if not isinstance(value, dict):
             raise PipelineRunError("pipeline spec must be a mapping")
         return value
+
+    def _high_level_hooks(self) -> PipelineRunnerHooks:
+        """Return the object that owns high-level path/spec hooks.
+
+        Subclasses override methods on ``self``. For direct OSS composition,
+        preserve the existing ``PipelineRunner(client, hooks=...)`` API.
+        """
+
+        if type(self) is PipelineRunner and self.hooks is not self:
+            return self.hooks
+        return self
 
     def prepare_pipeline_for_run(
         self,
@@ -308,13 +319,14 @@ class PipelineRunner(PipelineRunManager):
     ) -> PipelinePreparationResult:
         """Load/hydrate/validate/layout a pipeline before submission."""
 
-        pipeline_name = self.hooks.initial_pipeline_name(pipeline_path)
+        hooks = self._high_level_hooks()
+        pipeline_name = hooks.initial_pipeline_name(pipeline_path)
         effective_path: str | Path | None = pipeline_path
         pipeline_spec: Any = {}
         preparation: PipelinePreparationResult | None = None
         try:
             if hydrate:
-                pipeline_spec, hydrated_effective_path = self.hooks.hydrate_pipeline_for_run(
+                pipeline_spec, hydrated_effective_path = hooks.hydrate_pipeline_for_run(
                     pipeline_path,
                     client=self.client,
                     resolution_overrides=resolution_overrides,
@@ -322,14 +334,14 @@ class PipelineRunner(PipelineRunManager):
                 if hydrated_effective_path is not None:
                     effective_path = hydrated_effective_path
             else:
-                pipeline_spec = self.hooks.load_pipeline(pipeline_path)
+                pipeline_spec = hooks.load_pipeline(pipeline_path)
 
             pipeline_spec = self._ensure_mapping(pipeline_spec)
             spec_name = pipeline_spec.get("name")
             if isinstance(spec_name, str) and spec_name:
                 pipeline_name = spec_name
 
-            pipeline_spec = self.hooks.prepare_loaded_pipeline_spec(
+            pipeline_spec = hooks.prepare_loaded_pipeline_spec(
                 pipeline_spec,
                 pipeline_path=pipeline_path,
                 effective_path=effective_path,
@@ -341,7 +353,7 @@ class PipelineRunner(PipelineRunManager):
             if isinstance(spec_name, str) and spec_name:
                 pipeline_name = spec_name
 
-            if self.hooks.should_apply_layout(
+            if hooks.should_apply_layout(
                 pipeline_spec,
                 pipeline_path=pipeline_path,
                 effective_path=effective_path,
@@ -349,7 +361,7 @@ class PipelineRunner(PipelineRunManager):
                 force_layout=force_layout,
                 layout_algorithm=layout_algorithm,
             ):
-                pipeline_spec = self.hooks.apply_layout(
+                pipeline_spec = hooks.apply_layout(
                     pipeline_spec,
                     pipeline_path=pipeline_path,
                     effective_path=effective_path,
@@ -361,7 +373,7 @@ class PipelineRunner(PipelineRunManager):
                 if isinstance(spec_name, str) and spec_name:
                     pipeline_name = spec_name
 
-            validation_errors = self.hooks.validate_pipeline_for_run(
+            validation_errors = hooks.validate_pipeline_for_run(
                 pipeline_spec,
                 pipeline_path=pipeline_path,
                 effective_path=effective_path,
@@ -370,7 +382,7 @@ class PipelineRunner(PipelineRunManager):
             if validation_errors and not skip_validation:
                 raise PipelineRunError("Pipeline validation failed:\n  - " + "\n  - ".join(validation_errors))
 
-            pipeline_spec = self.hooks.before_submit_pipeline_spec(
+            pipeline_spec = hooks.before_submit_pipeline_spec(
                 pipeline_spec,
                 pipeline_path=pipeline_path,
                 effective_path=effective_path,
@@ -389,7 +401,7 @@ class PipelineRunner(PipelineRunManager):
             return preparation
         except Exception as exc:
             cleanup_spec = pipeline_spec if isinstance(pipeline_spec, dict) else {}
-            self.hooks.cleanup_prepared_pipeline(
+            hooks.cleanup_prepared_pipeline(
                 preparation
                 or PipelinePreparationResult(
                     pipeline_spec=cleanup_spec,
@@ -467,6 +479,7 @@ class PipelineRunner(PipelineRunManager):
         """
 
         attempts = max_attempts if max_attempts is not None else (retry + 1 if wait else 1)
+        hooks = self._high_level_hooks()
         preparations: dict[int, PipelinePreparationResult] = {}
 
         def prepare_attempt(attempt: int) -> PipelinePreparationResult:
@@ -504,7 +517,7 @@ class PipelineRunner(PipelineRunManager):
             _error: Exception | None,
         ) -> dict[str, Any]:
             preparation = preparations[attempt]
-            return self.hooks.metadata_for_run(
+            return hooks.metadata_for_run(
                 pipeline_name=preparation.pipeline_name,
                 pipeline_path=pipeline_path,
                 effective_path=preparation.effective_path,
@@ -534,10 +547,10 @@ class PipelineRunner(PipelineRunManager):
             )
             context = result.get("context")
             attempt = context.attempt if isinstance(context, PipelineRunContext) else max(preparations)
-            return self.hooks.format_run_result(result, preparation=preparations[attempt])
+            return hooks.format_run_result(result, preparation=preparations[attempt])
         except Exception as exc:
             error = exc
             raise
         finally:
             for preparation in preparations.values():
-                self.hooks.cleanup_prepared_pipeline(preparation, error=error)
+                hooks.cleanup_prepared_pipeline(preparation, error=error)
