@@ -12,7 +12,14 @@ import yaml
 
 from tangle_cli import cli, pipeline_runs_cli
 from tangle_cli.pipeline_runner import PipelineRunner, PipelineRunnerHooks
-from tangle_cli.pipeline_runs import PipelineRunContext, PipelineRunHooks, PipelineRunManager, PipelineRunError
+from tangle_cli.pipeline_run_manager import (
+    PipelineRunContext,
+    PipelineRunHooks,
+    PipelineRunManager,
+    PipelineRunError,
+    PipelineWaitOutcome,
+    PipelineWaitPoll,
+)
 
 
 def run_app(app, args: list[str]) -> None:
@@ -920,6 +927,112 @@ def test_pipeline_runs_wait_graph_state_treats_invalid_as_terminal() -> None:
     }
 
 
+def test_pipeline_runs_wait_outcome_records_success_failure_timeout_and_early_exit() -> None:
+    manager = PipelineRunManager(client=FakeClient())
+    scenarios = [
+        (
+            PipelineWaitPoll("run-1", {}, "SUCCEEDED", {"SUCCEEDED": 1}, 1, True),
+            {},
+            True,
+            False,
+            False,
+        ),
+        (
+            PipelineWaitPoll("run-1", {}, "SKIPPED", {"SUCCEEDED": 9, "SKIPPED": 1}, 10, True),
+            {},
+            True,
+            False,
+            False,
+        ),
+        (
+            PipelineWaitPoll("run-1", {}, "CANCELLED", {"SUCCEEDED": 8, "CANCELLED": 2}, 10, True),
+            {},
+            False,
+            False,
+            False,
+        ),
+        (
+            PipelineWaitPoll("run-1", {}, "FAILED", {"SUCCEEDED": 7, "FAILED": 3}, 10, True),
+            {},
+            False,
+            False,
+            False,
+        ),
+        (
+            PipelineWaitPoll("run-1", {}, "RUNNING", {"RUNNING": 1}, 1, False),
+            {"max_wait": 0},
+            None,
+            True,
+            False,
+        ),
+        (
+            PipelineWaitPoll("run-1", {}, "FAILED", {"FAILED": 1}, 1, False),
+            {"exit_on_first_failure": True},
+            False,
+            False,
+            True,
+        ),
+    ]
+    for poll, options, expected_success, expected_timeout, expected_early_exit in scenarios:
+        context = PipelineRunContext(run_id="run-1")
+        manager._poll_run_status = lambda *args, **kwargs: poll  # type: ignore[method-assign]
+
+        manager.wait_for_completion(
+            "run-1",
+            max_wait=options.get("max_wait", 10),
+            poll_interval=0,
+            allow_zero_poll_interval=True,
+            context=context,
+            exit_on_first_failure=bool(options.get("exit_on_first_failure", False)),
+        )
+
+        assert context.wait_outcome is not None
+        assert context.wait_outcome.success is expected_success
+        assert context.wait_outcome.timed_out is expected_timeout
+        assert context.wait_outcome.early_exit is expected_early_exit
+
+
+def test_pipeline_runs_wait_outcome_zero_total_early_exit_is_failure_not_exited_early() -> None:
+    class ZeroTaskExitHooks(PipelineRunHooks):
+        def should_exit_early(
+            self,
+            poll: PipelineWaitPoll,
+            context: PipelineRunContext,
+        ) -> bool:
+            del context
+            return poll.total == 0
+
+    manager = PipelineRunManager(client=FakeClient(), hooks=ZeroTaskExitHooks())
+    context = PipelineRunContext(run_id="run-1")
+    manager._poll_run_status = (  # type: ignore[method-assign]
+        lambda *args, **kwargs: PipelineWaitPoll("run-1", {}, "UNKNOWN", {}, 0, False)
+    )
+
+    manager.wait_for_completion(
+        "run-1",
+        max_wait=10,
+        poll_interval=0,
+        allow_zero_poll_interval=True,
+        context=context,
+    )
+
+    assert context.wait_outcome is not None
+    assert context.wait_outcome.success is False
+    assert context.wait_outcome.timed_out is False
+    assert context.wait_outcome.early_exit is False
+
+
+def test_pipeline_runs_wait_outcome_from_wait_result_derives_counts_from_status_counts() -> None:
+    outcome = PipelineWaitOutcome.from_wait_result(
+        {"status": "FAILED", "timed_out": False},
+        {"status_counts": {"FAILED": 1, "SYSTEM_ERROR": 1}},
+    )
+
+    assert outcome.success is False
+    assert outcome.failed_count == 1
+    assert outcome.error_count == 1
+
+
 def test_pipeline_runs_graph_state_counts_supports_mapping_like_objects() -> None:
     assert PipelineRunManager.status_counts_from_graph_state(
         SimpleNamespace(status_totals={"SUCCEEDED": 1})
@@ -1470,7 +1583,7 @@ def test_pipeline_runs_wait_exit_on_first_failure_disabled_does_not_exit(monkeyp
 
     manager = PipelineRunManager(client=FailedGraphClient())
     sleeps: list[float] = []
-    monkeypatch.setattr("tangle_cli.pipeline_runs.time.sleep", lambda value: sleeps.append(value))
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
 
     result = manager.wait_for_completion(
         "run-1",
@@ -1568,7 +1681,7 @@ def test_pipeline_runs_wait_is_bounded_and_testable(monkeypatch):
     fake_client = FakeClient()
     manager = PipelineRunManager(client=fake_client)
     sleeps: list[float] = []
-    monkeypatch.setattr("tangle_cli.pipeline_runs.time.sleep", lambda value: sleeps.append(value))
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
 
     result = manager.wait_for_completion("run-1", max_wait=1, poll_interval=0.01)
 
@@ -1630,7 +1743,7 @@ def test_pipeline_runner_orchestrates_load_validate_submit_wait(tmp_path: Path) 
 
     assert result["success"] is True
     assert result["status"] == "SUCCEEDED"
-    assert result["pipeline_name"] == "Demo Pipeline"
+    assert result["pipeline_name"] == "Run value"
     assert result["run_id"] == "run-1"
     assert calls == ["validate:Demo Pipeline:False", "before_submit"]
     assert client.created[0]["annotations"] == {"team": "oss"}

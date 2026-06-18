@@ -87,8 +87,9 @@ def get_default_logger() -> ConsoleLogger:
     return _default_logger
 
 
-# Valid log_type values for CLI commands
-CliLogType = str  # Valid values: "console", "none", "file" (Literal not supported by typer)
+# Valid log_type values for CLI commands. Keep this as ``str`` because Typer
+# does not support Literal annotations for option parameters.
+CliLogType = str
 
 
 class LogFinalizer(Protocol):

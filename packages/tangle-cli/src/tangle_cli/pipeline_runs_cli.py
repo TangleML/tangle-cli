@@ -10,8 +10,8 @@ from cyclopts import App, Parameter
 
 from .args_container import ArgsContainer
 from .cli_helpers import (
-    api_arg_specs,
     LazyTangleApiClient,
+    api_arg_specs,
     include_env_credentials_for_args,
     load_args_or_exit,
     optional_path,
@@ -26,14 +26,14 @@ from .cli_options import (
     TokenOption,
 )
 from .logger import Logger, logger_for_log_type
-from .pipeline_run_search import normalize_query_input, parse_annotation
-from .pipeline_runs import (
+from .pipeline_run_manager import (
     PipelineRunError,
     PipelineRunHooks,
     PipelineRunManager,
     parse_json_or_key_values,
     parse_key_value_entries,
 )
+from .pipeline_run_search import normalize_query_input, parse_annotation
 
 app = App(name="pipeline-runs", help="Submit and inspect Tangle pipeline runs.")
 annotations_app = App(name="annotations", help="Work with pipeline-run annotations.")

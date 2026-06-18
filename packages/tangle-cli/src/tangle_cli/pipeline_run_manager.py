@@ -41,12 +41,222 @@ class UnsupportedPipelineRunFeatureError(PipelineRunError):
 
 
 @dataclass
+class PipelineSubmitPayload:
+    """Prepared submit payload state before calling ``pipeline_runs_create``.
+
+    This keeps the generic submit-body pipeline explicit: downstream hooks can
+    adjust the spec, runtime arguments, run name, and annotations while callers
+    still have one canonical body shape to submit.
+    """
+
+    prepared_spec: dict[str, Any]
+    pipeline_spec: dict[str, Any]
+    run_args: dict[str, Any] | None
+    root_task: dict[str, Any]
+    annotations: dict[str, str]
+    run_name: str | None = None
+
+    def to_body(self) -> dict[str, Any]:
+        return {"root_task": self.root_task, "annotations": self.annotations}
+
+    def sync_from_body(self, body: Mapping[str, Any]) -> None:
+        """Refresh derived payload fields after in-place body normalization."""
+
+        root_task = body.get("root_task")
+        if isinstance(root_task, dict):
+            self.root_task = root_task
+        annotations = body.get("annotations")
+        if isinstance(annotations, dict):
+            self.annotations = {str(key): str(value) for key, value in annotations.items()}
+        component_ref = self.root_task.get("componentRef") if isinstance(self.root_task, Mapping) else None
+        submit_spec = component_ref.get("spec") if isinstance(component_ref, Mapping) else None
+        if isinstance(submit_spec, dict):
+            self.pipeline_spec = submit_spec
+            run_name = submit_spec.get("name")
+            self.run_name = run_name if isinstance(run_name, str) and run_name else None
+
+
+@dataclass(frozen=True)
+class PipelineWaitOutcome:
+    """Normalized wait result attached to a run context.
+
+    This is the generic OSS result boundary for wait lifecycle decisions.
+    Downstreams can format legacy result dictionaries or notifications from
+    this typed outcome without inventing their own metadata flags for success,
+    timeout, failure counts, or fail-fast early exit.
+    """
+
+    status: str | None = None
+    timed_out: bool = False
+    early_exit: bool = False
+    failed_count: int = 0
+    error_count: int = 0
+    elapsed_seconds: float = 0.0
+    success_override: bool | None = None
+
+    @property
+    def success(self) -> bool | None:
+        """Return generic success for completed waits, or None for timeout/unknown."""
+
+        if self.success_override is not None:
+            return self.success_override
+        if self.timed_out:
+            return None
+        if self.early_exit or self.failed_count > 0 or self.error_count > 0:
+            return False
+        status = str(self.status or "").upper()
+        if status in {"SUCCEEDED", "ENDED"}:
+            return True
+        if status in _TERMINAL_STATUSES:
+            return False
+        return None
+
+    @staticmethod
+    def _count_statuses(status_counts: Mapping[str, Any], *statuses: str) -> int:
+        total = 0
+        for status in statuses:
+            try:
+                total += int(status_counts.get(status, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+        return total
+
+    @classmethod
+    def _success_override_from_counts(
+        cls,
+        status_counts: Mapping[str, Any],
+        *,
+        terminal: bool,
+        total: int,
+    ) -> bool | None:
+        if not terminal or total <= 0:
+            return None
+        unsuccessful = cls._count_statuses(
+            status_counts,
+            "FAILED",
+            "SYSTEM_ERROR",
+            "CANCELLED",
+            "CANCELED",
+            "INVALID",
+        )
+        if unsuccessful > 0:
+            return False
+        terminal_count = cls._count_statuses(status_counts, *_TERMINAL_STATUSES)
+        if terminal_count == total:
+            return True
+        return None
+
+    @classmethod
+    def from_poll_result(
+        cls,
+        poll: "PipelineWaitPoll",
+        result: Mapping[str, Any],
+    ) -> "PipelineWaitOutcome":
+        """Build an outcome from a wait poll and public wait result."""
+
+        timed_out = bool(result.get("timed_out"))
+        early_exit = bool(result.get("early_exit"))
+        success_override = cls._success_override_from_counts(
+            poll.status_counts,
+            terminal=poll.terminal and not timed_out,
+            total=poll.total,
+        )
+        if early_exit and poll.total == 0:
+            early_exit = False
+            success_override = False
+        return cls(
+            status=str(result.get("status")) if result.get("status") is not None else poll.status,
+            timed_out=timed_out,
+            early_exit=early_exit,
+            failed_count=int(poll.status_counts.get("FAILED", 0) or 0),
+            error_count=int(poll.status_counts.get("SYSTEM_ERROR", 0) or 0),
+            elapsed_seconds=poll.elapsed_seconds,
+            success_override=success_override,
+        )
+
+    @classmethod
+    def from_wait_result(
+        cls,
+        result: Mapping[str, Any],
+        metadata: Mapping[str, Any] | None = None,
+    ) -> "PipelineWaitOutcome":
+        """Build an outcome from a public wait result and optional metadata."""
+
+        source = metadata or result
+        status = str(result.get("status")) if result.get("status") is not None else None
+        timed_out = bool(result.get("timed_out") or source.get("timed_out"))
+        early_exit = bool(result.get("early_exit") or source.get("early_exit"))
+        status_counts = source.get("status_counts")
+        status_counts = status_counts if isinstance(status_counts, Mapping) else {}
+        total = 0
+        for count in status_counts.values():
+            try:
+                total += int(count or 0)
+            except (TypeError, ValueError):
+                continue
+        terminal = bool(status and (status.upper() == "ENDED" or status.upper() in _TERMINAL_STATUSES))
+        success_override = cls._success_override_from_counts(
+            status_counts,
+            terminal=terminal and not timed_out,
+            total=total,
+        )
+        if early_exit and total == 0:
+            early_exit = False
+            success_override = False
+        failed_count = int(
+            source.get(
+                "failed_count",
+                result.get("failed_count", cls._count_statuses(status_counts, "FAILED")),
+            )
+            or 0
+        )
+        error_count = int(
+            source.get(
+                "error_count",
+                result.get("error_count", cls._count_statuses(status_counts, "SYSTEM_ERROR")),
+            )
+            or 0
+        )
+        return cls(
+            status=status,
+            timed_out=timed_out,
+            early_exit=early_exit,
+            failed_count=failed_count,
+            error_count=error_count,
+            elapsed_seconds=float(source.get("elapsed_seconds", 0.0) or 0.0),
+            success_override=success_override,
+        )
+
+
+@dataclass
 class PipelineRunContext:
     """First-class context for a pipeline run lifecycle.
 
     Downstreams can use this for mutex ownership, graceful-shutdown state,
     notifications, retries, and scheduled timeout bookkeeping without scraping
     transient manager attributes.
+
+    Fields:
+        run_id: Submitted pipeline run id, when an attempt reaches submit.
+        run_name: Display/pipeline name derived from the submitted spec.
+        root_execution_id: Root execution id returned by the submit API.
+        pipeline_path: Source path or URI used for the run, when path-backed.
+        start_time: Wall-clock attempt start time for downstream reporting.
+        attempt: 1-based attempt number for submit/wait/retry lifecycle hooks.
+        submit_body: Submit body for this attempt after normalization.
+        pipeline_spec: Pipeline spec extracted from ``submit_body``.
+        response: Submit API response for this attempt, when available.
+        wait_outcome: Generic wait result for this attempt, when wait ran.
+        previous_context: Previous attempt context, including attempts that
+            failed during submit before a ``run_id`` existed. This is not just
+            the previous successfully submitted run context.
+        previous_error: Error from the previous attempt that caused this retry.
+        carry_resource_to_retry: Generic resource/mutex handoff flag. Hooks set
+            this directly when a resource should remain held for the replacement
+            attempt. The current attempt's lifecycle context can then skip
+            release, and the next attempt can inspect ``previous_context`` to
+            reuse the carried resource.
+        metadata: Extra hook-specific state carried through the lifecycle.
     """
 
     run_id: str | None = None
@@ -58,6 +268,10 @@ class PipelineRunContext:
     submit_body: dict[str, Any] | None = None
     pipeline_spec: dict[str, Any] | None = None
     response: dict[str, Any] | None = None
+    wait_outcome: PipelineWaitOutcome | None = None
+    previous_context: "PipelineRunContext | None" = None
+    previous_error: Exception | None = None
+    carry_resource_to_retry: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -278,6 +492,17 @@ class PipelineRunHooks:
     def after_wait(self, result: Mapping[str, Any]) -> None:
         """Legacy hook retained for terminal downstream notifications."""
 
+    def wait_outcome(
+        self,
+        poll: PipelineWaitPoll,
+        result: Mapping[str, Any],
+        context: PipelineRunContext,
+    ) -> PipelineWaitOutcome:
+        """Return the typed wait outcome to attach to the run context."""
+
+        del context
+        return PipelineWaitOutcome.from_poll_result(poll, result)
+
     def after_wait_context(self, result: Mapping[str, Any], context: PipelineRunContext) -> None:
         """Hook called after wait returns with full run context.
 
@@ -444,6 +669,23 @@ class PipelineRunManager:
         return cleaned
 
     @staticmethod
+    def normalize_submit_body_in_place(body: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a submit body in place and return it.
+
+        This is the mutable counterpart to :meth:`sanitize_submit_payload` for
+        callers that already have a body object.  It keeps component-ref text
+        normalization and submit-only field stripping in the OSS submit layer,
+        instead of requiring downstream runners to patch bodies before submit.
+        """
+
+        sanitized = PipelineRunManager.sanitize_submit_payload(body)
+        if not isinstance(sanitized, dict):
+            raise PipelineRunError("submit body must be a mapping")
+        body.clear()
+        body.update(sanitized)
+        return body
+
+    @staticmethod
     def is_terminal_status(status: str | None) -> bool:
         return bool(status and status.upper() in _TERMINAL_STATUSES)
 
@@ -592,6 +834,58 @@ class PipelineRunManager:
             hydrate=hydrate,
         )
 
+    def prepare_submit_payload_from_spec(
+        self,
+        pipeline_spec: dict[str, Any],
+        *,
+        run_args: dict[str, Any] | None = None,
+        annotations: dict[str, str] | None = None,
+        pipeline_path: str | Path | None = None,
+        run_as: str | None = None,
+        hydrate: bool = True,
+    ) -> PipelineSubmitPayload:
+        """Prepare the generic submit payload from a pipeline spec.
+
+        The order here is the submit-body contract shared by OSS and TD:
+        prepare the spec, prepare runtime arguments, expand run-name templates,
+        convert/sanitize the payload, then merge downstream/default annotations
+        before caller-supplied annotations override them.
+        """
+
+        prepared_spec = self.prepare_pipeline_spec_for_submit(
+            pipeline_spec,
+            pipeline_path=pipeline_path,
+            run_args=run_args,
+            hydrate=hydrate,
+        )
+        prepared_run_args = self.hooks.prepare_run_arguments(prepared_spec, run_args)
+        prepared_spec = self.apply_run_name_template(prepared_spec, prepared_run_args)
+        payload = self.convert_yaml_to_payload(copy.deepcopy(prepared_spec), prepared_run_args)
+        payload = self.sanitize_submit_payload(payload)
+        root_task = payload["root_task"]
+        component_ref = root_task.get("componentRef") if isinstance(root_task, Mapping) else None
+        submit_spec = (
+            component_ref.get("spec")
+            if isinstance(component_ref, Mapping) and isinstance(component_ref.get("spec"), dict)
+            else prepared_spec
+        )
+        submit_annotations = self.hooks.extra_submit_annotations(
+            pipeline_spec=prepared_spec,
+            pipeline_path=pipeline_path,
+            run_as=run_as,
+        )
+        if annotations:
+            submit_annotations.update({str(k): str(v) for k, v in annotations.items()})
+        run_name = submit_spec.get("name")
+        return PipelineSubmitPayload(
+            prepared_spec=prepared_spec,
+            pipeline_spec=submit_spec,
+            run_args=prepared_run_args,
+            root_task=root_task,
+            annotations=submit_annotations,
+            run_name=run_name if isinstance(run_name, str) and run_name else None,
+        )
+
     def build_submit_body_from_spec(
         self,
         pipeline_spec: dict[str, Any],
@@ -604,24 +898,38 @@ class PipelineRunManager:
     ) -> dict[str, Any]:
         """Build a submit body from an already-prepared pipeline spec."""
 
-        prepared_spec = self.prepare_pipeline_spec_for_submit(
+        return self.prepare_submit_payload_from_spec(
             pipeline_spec,
-            pipeline_path=pipeline_path,
             run_args=run_args,
-            hydrate=hydrate,
-        )
-        run_args = self.hooks.prepare_run_arguments(prepared_spec, run_args)
-        prepared_spec = self.apply_run_name_template(prepared_spec, run_args)
-        payload = self.convert_yaml_to_payload(copy.deepcopy(prepared_spec), run_args)
-        payload = self.sanitize_submit_payload(payload)
-        submit_annotations = self.hooks.extra_submit_annotations(
-            pipeline_spec=prepared_spec,
+            annotations=annotations,
             pipeline_path=pipeline_path,
             run_as=run_as,
+            hydrate=hydrate,
+        ).to_body()
+
+    def prepare_submit_payload(
+        self,
+        pipeline_path: str | Path,
+        *,
+        run_args: dict[str, Any] | None = None,
+        annotations: dict[str, str] | None = None,
+        hydrate: bool = True,
+        run_as: str | None = None,
+        resolution_overrides: dict[str, Any] | None = None,
+    ) -> PipelineSubmitPayload:
+        pipeline_spec = self.load_pipeline_for_submit(
+            pipeline_path,
+            hydrate=hydrate,
+            resolution_overrides=resolution_overrides,
         )
-        if annotations:
-            submit_annotations.update({str(k): str(v) for k, v in annotations.items()})
-        return {"root_task": payload["root_task"], "annotations": submit_annotations}
+        return self.prepare_submit_payload_from_spec(
+            pipeline_spec,
+            run_args=run_args,
+            annotations=annotations,
+            pipeline_path=pipeline_path,
+            run_as=run_as,
+            hydrate=hydrate,
+        )
 
     def build_submit_body(
         self,
@@ -633,19 +941,14 @@ class PipelineRunManager:
         run_as: str | None = None,
         resolution_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        pipeline_spec = self.load_pipeline_for_submit(
+        return self.prepare_submit_payload(
             pipeline_path,
-            hydrate=hydrate,
-            resolution_overrides=resolution_overrides,
-        )
-        return self.build_submit_body_from_spec(
-            pipeline_spec,
             run_args=run_args,
             annotations=annotations,
-            pipeline_path=pipeline_path,
-            run_as=run_as,
             hydrate=hydrate,
-        )
+            run_as=run_as,
+            resolution_overrides=resolution_overrides,
+        ).to_body()
 
     @staticmethod
     def response_run_context(
@@ -659,7 +962,7 @@ class PipelineRunManager:
         run_name = pipeline_spec.get("name") if isinstance(pipeline_spec, dict) else None
         return PipelineRunContext(
             run_id=str(response.get("id")) if response.get("id") is not None else None,
-            run_name=str(run_name) if run_name is not None else None,
+            run_name=run_name if isinstance(run_name, str) and run_name else None,
             root_execution_id=(
                 str(response.get("root_execution_id"))
                 if response.get("root_execution_id") is not None
@@ -681,15 +984,15 @@ class PipelineRunManager:
         attempt: int = 1,
         context: PipelineRunContext | None = None,
     ) -> dict[str, Any]:
+        self.normalize_submit_body_in_place(body)
         pipeline_spec = body["root_task"]["componentRef"]["spec"]
         submit_context = context or PipelineRunContext(
             pipeline_path=pipeline_path,
             start_time=time.time(),
             attempt=attempt,
         )
-        submit_context.run_name = (
-            str(pipeline_spec.get("name")) if isinstance(pipeline_spec, dict) else None
-        )
+        spec_name = pipeline_spec.get("name") if isinstance(pipeline_spec, dict) else None
+        submit_context.run_name = spec_name if isinstance(spec_name, str) and spec_name else None
         submit_context.pipeline_path = pipeline_path
         submit_context.attempt = attempt
         submit_context.submit_body = body
@@ -717,6 +1020,24 @@ class PipelineRunManager:
         self.hooks.after_submit_context(submit_context)
         return response
 
+    def submit_prepared_payload(
+        self,
+        payload: PipelineSubmitPayload,
+        *,
+        pipeline_path: str | Path | None = None,
+        attempt: int = 1,
+        context: PipelineRunContext | None = None,
+    ) -> dict[str, Any]:
+        body = payload.to_body()
+        response = self.submit_prepared_body(
+            body,
+            pipeline_path=pipeline_path,
+            attempt=attempt,
+            context=context,
+        )
+        payload.sync_from_body(body)
+        return response
+
     def submit_pipeline_spec(
         self,
         pipeline_spec: dict[str, Any],
@@ -728,7 +1049,7 @@ class PipelineRunManager:
         hydrate: bool = True,
         attempt: int = 1,
     ) -> dict[str, Any]:
-        body = self.build_submit_body_from_spec(
+        payload = self.prepare_submit_payload_from_spec(
             pipeline_spec,
             run_args=run_args,
             annotations=annotations,
@@ -736,7 +1057,7 @@ class PipelineRunManager:
             run_as=run_as,
             hydrate=hydrate,
         )
-        return self.submit_prepared_body(body, pipeline_path=pipeline_path, attempt=attempt)
+        return self.submit_prepared_payload(payload, pipeline_path=pipeline_path, attempt=attempt)
 
     def submit_pipeline(
         self,
@@ -749,7 +1070,7 @@ class PipelineRunManager:
         resolution_overrides: dict[str, Any] | None = None,
         attempt: int = 1,
     ) -> dict[str, Any]:
-        body = self.build_submit_body(
+        payload = self.prepare_submit_payload(
             pipeline_path,
             run_args=run_args,
             annotations=annotations,
@@ -757,7 +1078,7 @@ class PipelineRunManager:
             run_as=run_as,
             resolution_overrides=resolution_overrides,
         )
-        return self.submit_prepared_body(body, pipeline_path=pipeline_path, attempt=attempt)
+        return self.submit_prepared_payload(payload, pipeline_path=pipeline_path, attempt=attempt)
 
     def get_run(self, run_id: str, *, include_execution_stats: bool = True) -> dict[str, Any]:
         return self.to_plain(
@@ -975,18 +1296,21 @@ class PipelineRunManager:
                 wait_context.metadata["wait_result"] = self._wait_metadata(poll)
                 self.hooks.on_terminal(poll, wait_context)
                 result = self._wait_result(poll, timed_out=False)
+                self._record_wait_outcome(wait_context, poll, result)
                 self.hooks.after_wait_context(result, wait_context)
                 return result
             if self.hooks.should_exit_early(poll, wait_context):
                 wait_context.metadata["wait_result"] = self._wait_metadata(poll, early_exit=True)
                 self.hooks.on_early_exit_before_release(poll, wait_context)
                 result = self._wait_result(poll, timed_out=False, early_exit=True)
+                self._record_wait_outcome(wait_context, poll, result)
                 self.hooks.after_wait_context(result, wait_context)
                 return result
             if deadline is not None and deadline_now() >= deadline:
                 wait_context.metadata["wait_result"] = self._wait_metadata(poll, timed_out=True)
                 self.hooks.on_timeout(poll, wait_context)
                 result = self._wait_result(poll, timed_out=True)
+                self._record_wait_outcome(wait_context, poll, result)
                 self.hooks.after_wait_context(result, wait_context)
                 return result
             if deadline is None:
@@ -1017,6 +1341,14 @@ class PipelineRunManager:
         if early_exit:
             metadata["early_exit"] = True
         return metadata
+
+    def _record_wait_outcome(
+        self,
+        context: PipelineRunContext,
+        poll: PipelineWaitPoll,
+        result: Mapping[str, Any],
+    ) -> None:
+        context.wait_outcome = self.hooks.wait_outcome(poll, result, context)
 
     @staticmethod
     def _wait_result(
@@ -1066,6 +1398,8 @@ class PipelineRunManager:
                 pipeline_path=pipeline_path,
                 start_time=time.time(),
                 attempt=attempt,
+                previous_context=previous_context,
+                previous_error=last_error,
                 metadata=dict(metadata or {}),
             )
             lifecycle_started = False
@@ -1073,16 +1407,24 @@ class PipelineRunManager:
             error: Exception | None = None
             retry_requested = False
             body = body_factory(attempt, previous_context, last_error)
+            self.normalize_submit_body_in_place(body)
             if metadata_factory is not None:
                 context.metadata.update(metadata_factory(attempt, previous_context, last_error))
             pipeline_spec = body.get("root_task", {}).get("componentRef", {}).get("spec")
             context.submit_body = body
             context.pipeline_spec = pipeline_spec if isinstance(pipeline_spec, dict) else None
-            if context.pipeline_spec is not None and context.pipeline_spec.get("name") is not None:
-                context.run_name = str(context.pipeline_spec["name"])
+            if context.pipeline_spec is not None:
+                spec_name = context.pipeline_spec.get("name")
+                if isinstance(spec_name, str) and spec_name:
+                    context.run_name = spec_name
             self.hooks.before_run_lifecycle(context)
             lifecycle_started = True
             attempts.append(context)
+            # ``previous_context`` tracks the previous attempt, not only the
+            # previous successfully submitted run.  Resource-carry hooks need to
+            # hand off mutexes/leases even when an attempt fails during submit
+            # before a run id is available.
+            previous_context = context
             try:
                 with self.hooks.around_run(context):
                     try:
@@ -1092,7 +1434,6 @@ class PipelineRunManager:
                             attempt=attempt,
                             context=context,
                         )
-                        previous_context = context
                         if attempt > 1:
                             self.hooks.after_retry_submit(context)
                         result: dict[str, Any]
@@ -1215,14 +1556,14 @@ class PipelineRunManager:
             _previous_context: PipelineRunContext | None,
             _error: Exception | None,
         ) -> dict[str, Any]:
-            return self.build_submit_body_from_spec(
+            return self.prepare_submit_payload_from_spec(
                 copy.deepcopy(pipeline_spec),
                 run_args=run_args,
                 annotations=annotations,
                 pipeline_path=pipeline_path,
                 run_as=run_as,
                 hydrate=hydrate,
-            )
+            ).to_body()
 
         return self._run_body_factory(
             body_factory,
@@ -1269,14 +1610,14 @@ class PipelineRunManager:
             _previous_context: PipelineRunContext | None,
             _error: Exception | None,
         ) -> dict[str, Any]:
-            return self.build_submit_body(
+            return self.prepare_submit_payload(
                 pipeline_path,
                 run_args=run_args,
                 annotations=annotations,
                 hydrate=hydrate,
                 run_as=run_as,
                 resolution_overrides=resolution_overrides,
-            )
+            ).to_body()
 
         return self._run_body_factory(
             body_factory,

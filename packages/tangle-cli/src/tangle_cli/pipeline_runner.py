@@ -2,7 +2,7 @@
 
 This module owns the generic path-based run flow that downstream CLIs can share:
 load/hydrate a pipeline, perform generic pre-submit preparation, optionally
-layout/validate, then submit/wait/retry through :mod:`tangle_cli.pipeline_runs`.
+layout/validate, then submit/wait/retry through :mod:`tangle_cli.pipeline_run_manager`.
 Downstream-specific behavior (Shopify auth, gs:// I/O, Slack/Observe, mutexes,
 schedulers, service-account annotations, and legacy result shapes) is exposed as
 hooks rather than imported here.
@@ -15,10 +15,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from .pipeline_runs import PipelineRunContext, PipelineRunError, PipelineRunHooks, PipelineRunManager
-
-_SUCCESS_STATUSES = {"SUCCEEDED"}
-_FAILURE_STATUSES = {"FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "SKIPPED", "INVALID"}
+from .pipeline_run_manager import (
+    PipelineRunContext,
+    PipelineRunError,
+    PipelineRunHooks,
+    PipelineRunManager,
+    PipelineSubmitPayload,
+    PipelineWaitOutcome,
+)
 
 
 @dataclass(frozen=True)
@@ -262,20 +266,22 @@ class PipelineRunnerHooks(PipelineRunHooks):
         success: bool | None = True
         if wait_result is not None:
             status = str(wait_result.get("status") or "unknown")
-            status_upper = status.upper()
-            if wait_result.get("timed_out"):
-                success = None
-            elif status_upper in _SUCCESS_STATUSES:
-                success = True
-            elif status_upper in _FAILURE_STATUSES:
-                success = False
-            else:
-                success = None
+            outcome = (
+                context.wait_outcome
+                if isinstance(context, PipelineRunContext) and context.wait_outcome is not None
+                else PipelineWaitOutcome.from_wait_result(wait_result)
+            )
+            success = outcome.success
+        result_pipeline_name = (
+            str(context.run_name)
+            if isinstance(context, PipelineRunContext) and context.run_name
+            else preparation.pipeline_name
+        )
         return {
             **result,
             "success": success,
             "status": status,
-            "pipeline_name": preparation.pipeline_name,
+            "pipeline_name": result_pipeline_name,
             "run_id": run_id,
             "root_execution_id": root_execution_id,
             "preparation": preparation,
@@ -424,7 +430,7 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
     ) -> dict[str, Any]:
         """Submit an already prepared spec and return a normalized summary."""
 
-        body = self.build_submit_body_from_spec(
+        submit_payload = self.prepare_submit_payload_from_spec(
             copy.deepcopy(pipeline_spec),
             run_args=run_args,
             annotations=annotations,
@@ -432,7 +438,7 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
             run_as=run_as,
             hydrate=False,
         )
-        response = self.submit_prepared_body(body, pipeline_path=pipeline_path)
+        response = self.submit_prepared_payload(submit_payload, pipeline_path=pipeline_path)
         run_id = str(response.get("id")) if response.get("id") is not None else None
         root_execution_id = (
             str(response.get("root_execution_id")) if response.get("root_execution_id") is not None else None
@@ -440,7 +446,7 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
         return {
             "success": True,
             "status": "submitted",
-            "pipeline_name": pipeline_name,
+            "pipeline_name": submit_payload.run_name or pipeline_name,
             "run_id": run_id,
             "root_execution_id": root_execution_id,
             "response": response,
@@ -481,6 +487,7 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
         attempts = max_attempts if max_attempts is not None else (retry + 1 if wait else 1)
         hooks = self._high_level_hooks()
         preparations: dict[int, PipelinePreparationResult] = {}
+        submit_payloads: dict[int, PipelineSubmitPayload] = {}
 
         def prepare_attempt(attempt: int) -> PipelinePreparationResult:
             preparation = self.prepare_pipeline_for_run(
@@ -502,7 +509,7 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
             _error: Exception | None,
         ) -> dict[str, Any]:
             preparation = prepare_attempt(attempt)
-            return self.build_submit_body_from_spec(
+            submit_payload = self.prepare_submit_payload_from_spec(
                 copy.deepcopy(preparation.pipeline_spec),
                 run_args=run_args,
                 annotations=annotations,
@@ -510,6 +517,8 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
                 run_as=run_as,
                 hydrate=False,
             )
+            submit_payloads[attempt] = submit_payload
+            return submit_payload.to_body()
 
         def metadata_factory(
             attempt: int,
@@ -517,8 +526,9 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
             _error: Exception | None,
         ) -> dict[str, Any]:
             preparation = preparations[attempt]
+            submit_payload = submit_payloads.get(attempt)
             return hooks.metadata_for_run(
-                pipeline_name=preparation.pipeline_name,
+                pipeline_name=(submit_payload.run_name if submit_payload else None) or preparation.pipeline_name,
                 pipeline_path=pipeline_path,
                 effective_path=preparation.effective_path,
                 wait=wait,

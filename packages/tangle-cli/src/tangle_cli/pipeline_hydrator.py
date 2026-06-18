@@ -402,6 +402,8 @@ class PipelineHydrator:
         message: str,
         exc: Exception | None = None,
     ) -> None:
+        if isinstance(exc, UntrustedHydrationSourceError):
+            raise exc
         if self.error_policy == "raise":
             if isinstance(exc, HydrationError):
                 raise exc
@@ -606,27 +608,36 @@ class PipelineHydrator:
     ) -> tuple[str, dict[str, Any]] | None:
         """Fetch a component by URL and return as dict."""
         scheme = self._uri_scheme(url)
-        try:
-            if scheme is None:
-                if base_dir is None:
-                    raise HydrationError(
-                        f"Scheme-less component URL {url!r} requires a local base directory"
-                    )
-                result = self._fetch_component_from_file_url(f"file://{url}", path, base_dir)
-            elif scheme in self.uri_readers:
-                result = self._fetch_component_from_uri(url, path, base_dir)
-            else:
-                result = self._resolve_registered_component(scheme, url, path, base_dir)
-        except HydrationError as exc:
-            if isinstance(exc, UntrustedHydrationSourceError):
-                raise
-            self._warn_or_raise_hydration_error(str(exc), exc)
-            return None
-        except Exception as exc:
-            self._warn_or_raise_hydration_error(
-                f"Failed to fetch component from URL {url}: {exc}", exc
-            )
-            return None
+        if scheme == "resolve":
+            result = self._fetch_component_by_resolve_url(url, path, base_dir)
+        else:
+            try:
+                if scheme is None:
+                    if base_dir is None and not Path(url).is_absolute():
+                        raise HydrationError(
+                            f"Scheme-less component URL {url!r} requires a local base directory"
+                        )
+                    result = self._fetch_component_from_file_url(f"file://{url}", path, base_dir)
+                elif scheme in {"http", "https"}:
+                    # Preserve HTTP(S) component URL behavior through the
+                    # overridable component resolver. HTTP(S) URI readers are
+                    # registered for non-component URI contexts such as
+                    # ``resolve://https://...`` configs.
+                    result = self._resolve_registered_component(scheme, url, path, base_dir)
+                elif scheme in self.uri_readers:
+                    result = self._fetch_component_from_uri(url, path, base_dir)
+                else:
+                    result = self._resolve_registered_component(scheme, url, path, base_dir)
+            except HydrationError as exc:
+                if isinstance(exc, UntrustedHydrationSourceError):
+                    raise
+                self._warn_or_raise_hydration_error(str(exc), exc)
+                return None
+            except Exception as exc:
+                self._warn_or_raise_hydration_error(
+                    f"Failed to fetch component from URL {url}: {exc}", exc
+                )
+                return None
 
         if self.verbose and result is not None:
             _, spec = result
@@ -1166,11 +1177,24 @@ class PipelineHydrator:
                 if getattr(response, "status_code", None) == 404:
                     continue
                 raise
-            spec_data = self.normalize_component_spec(spec_obj)
-            annotations = spec_data.get("metadata", {}).get("annotations", {}) or {}
             attr_annotations = getattr(spec_obj, "annotations", None)
             if attr_annotations:
                 annotations = attr_annotations
+            else:
+                try:
+                    spec_data = self.normalize_component_spec(spec_obj)
+                except HydrationError as exc:
+                    self.log.warn(
+                        f"   ⚠️ Resolve: skipping component {candidate.digest[:16]}... "
+                        f"while reading annotations: {exc}"
+                    )
+                    continue
+                metadata = spec_data.get("metadata", {})
+                annotations = (
+                    metadata.get("annotations", {})
+                    if isinstance(metadata, Mapping)
+                    else {}
+                ) or {}
             if _annotations_match(annotations, required_annotations):
                 result.append(candidate)
         return result
@@ -1699,6 +1723,17 @@ def _resolve_http(
     return hydrator.fetch_remote_component(str(value), path, base_dir)
 
 
+def _read_http_uri(
+    hydrator: PipelineHydrator,
+    uri: str,
+    context: ResolverContext,
+) -> str | None:
+    del context
+    hydrator.log.info(f"   Downloading URI: {uri}...")
+    with urllib.request.urlopen(uri, timeout=30) as response:
+        return response.read().decode("utf-8")
+
+
 def _resolve_local(
     hydrator: PipelineHydrator,
     value: Any,
@@ -1726,3 +1761,5 @@ register_component_resolver("http", _resolve_http)
 register_component_resolver("https", _resolve_http)
 register_component_resolver("local", _resolve_local)
 register_component_resolver("local_from_python", _resolve_local_from_python)
+register_uri_reader("http", _read_http_uri)
+register_uri_reader("https", _read_http_uri)
