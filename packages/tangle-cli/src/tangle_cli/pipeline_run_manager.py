@@ -105,7 +105,7 @@ class PipelineWaitOutcome:
         if self.early_exit or self.failed_count > 0 or self.error_count > 0:
             return False
         status = str(self.status or "").upper()
-        if status in {"SUCCEEDED", "ENDED"}:
+        if status == "SUCCEEDED":
             return True
         if status in _TERMINAL_STATUSES:
             return False

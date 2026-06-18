@@ -1033,6 +1033,49 @@ def test_pipeline_runs_wait_outcome_from_wait_result_derives_counts_from_status_
     assert outcome.error_count == 1
 
 
+def test_pipeline_runs_wait_outcome_ended_without_counts_is_unknown() -> None:
+    assert PipelineWaitOutcome(status="ENDED").success is None
+
+    outcome = PipelineWaitOutcome.from_wait_result({"status": "ENDED", "timed_out": False})
+
+    assert outcome.success is None
+
+
+def test_pipeline_runs_wait_outcome_ended_uses_reliable_counts() -> None:
+    success = PipelineWaitOutcome.from_wait_result(
+        {"status": "ENDED", "timed_out": False},
+        {"status_counts": {"SUCCEEDED": 2, "SKIPPED": 1}},
+    )
+    failure = PipelineWaitOutcome.from_wait_result(
+        {"status": "ENDED", "timed_out": False},
+        {"status_counts": {"SUCCEEDED": 2, "FAILED": 1}},
+    )
+
+    assert success.success is True
+    assert failure.success is False
+
+
+def test_pipeline_runs_wait_outcome_records_ended_without_counts_as_unknown() -> None:
+    class EndedWithoutStatsClient(FakeClient):
+        def pipeline_runs_get(self, id: str, include_execution_stats: bool | None = None) -> dict[str, Any]:
+            return {"id": id, "execution_summary": {"has_ended": True}}
+
+    manager = PipelineRunManager(client=EndedWithoutStatsClient())
+    context = PipelineRunContext(run_id="run-ended")
+
+    result = manager.wait_for_completion(
+        "run-ended",
+        max_wait=10,
+        poll_interval=0,
+        allow_zero_poll_interval=True,
+        context=context,
+    )
+
+    assert result["status"] == "ENDED"
+    assert context.wait_outcome is not None
+    assert context.wait_outcome.success is None
+
+
 def test_pipeline_runs_graph_state_counts_supports_mapping_like_objects() -> None:
     assert PipelineRunManager.status_counts_from_graph_state(
         SimpleNamespace(status_totals={"SUCCEEDED": 1})
