@@ -1,15 +1,10 @@
-import cyclopts
+"""The ``tangle api`` command group.
 
-app = cyclopts.App(name="api")
+The commands are generated dynamically from the backend's FastAPI routes, so
+they always match the running server's API. See
+:mod:`tangle_cli.api.cli_generator` for details.
+"""
 
-pipeline_runs_app = cyclopts.App(name="pipeline-runs")
-app.command(pipeline_runs_app)
+from .api import cli_generator
 
-execution_nodes_app = cyclopts.App(name="execution-nodes")
-app.command(execution_nodes_app)
-
-artifacts_app = cyclopts.App(name="artifacts")
-app.command(artifacts_app)
-
-published_components_app = cyclopts.App(name="published-components")
-app.command(published_components_app)
+app = cli_generator.build_api_cli_app(name="api")
