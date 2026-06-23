@@ -1,15 +1,15 @@
-import typer
+import cyclopts
 
-app = typer.Typer(no_args_is_help=True)
+app = cyclopts.App(name="api")
 
-pipeline_runs_app = typer.Typer(no_args_is_help=True)
-app.add_typer(pipeline_runs_app, name="pipeline-runs", no_args_is_help=True)
+pipeline_runs_app = cyclopts.App(name="pipeline-runs")
+app.command(pipeline_runs_app)
 
-execution_nodes_app = typer.Typer(no_args_is_help=True)
-app.add_typer(execution_nodes_app, name="execution-nodes", no_args_is_help=True)
+execution_nodes_app = cyclopts.App(name="execution-nodes")
+app.command(execution_nodes_app)
 
-artifacts_app = typer.Typer(no_args_is_help=True)
-app.add_typer(artifacts_app, name="artifacts", no_args_is_help=True)
+artifacts_app = cyclopts.App(name="artifacts")
+app.command(artifacts_app)
 
-published_components_app = typer.Typer(no_args_is_help=True)
-app.add_typer(published_components_app, name="published-components", no_args_is_help=True)
+published_components_app = cyclopts.App(name="published-components")
+app.command(published_components_app)

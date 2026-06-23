@@ -1,19 +1,17 @@
 import pathlib
 
-import typer
+import cyclopts
 
-app = typer.Typer(no_args_is_help=True)
+app = cyclopts.App(name="components")
 
-generate_app = typer.Typer(no_args_is_help=True)
-app.add_typer(generate_app, name="generate", no_args_is_help=True)
+generate_app = cyclopts.App(name="generate")
+app.command(generate_app)
 
-component_references_app = typer.Typer(no_args_is_help=True)
-app.add_typer(
-    component_references_app, name="component-references", no_args_is_help=True
-)
+component_references_app = cyclopts.App(name="component-references")
+app.command(component_references_app)
 
-annotations_app = typer.Typer(no_args_is_help=True)
-app.add_typer(annotations_app, name="annotations", no_args_is_help=True)
+annotations_app = cyclopts.App(name="annotations")
+app.command(annotations_app)
 
 # region components
 
@@ -34,7 +32,7 @@ def components_set_container_image(component_path: str):
 # region components/annotations
 
 
-@annotations_app.command(name="set", no_args_is_help=True)
+@annotations_app.command(name="set")
 def components_annotations_set(
     component_path: str, key: str, value: str, output_component_path: str | None = None
 ):
@@ -42,7 +40,7 @@ def components_annotations_set(
     raise NotImplementedError()
 
 
-@annotations_app.command(name="get", no_args_is_help=True)
+@annotations_app.command(name="get")
 def components_annotations_get(component_path: str, keys: list[str]):
     """Sets annotation values from component file."""
     print(locals())
@@ -54,8 +52,11 @@ def components_annotations_get(component_path: str, keys: list[str]):
 
 # region components/generate
 
+_from_template_app = cyclopts.App(name="from-template", show=False)
+generate_app.command(_from_template_app)
 
-@generate_app.command(name="from-template", hidden=True)
+
+@_from_template_app.default
 def components_generate_from_template(
     template_name: str,
     output_component_path: pathlib.Path,
@@ -65,9 +66,7 @@ def components_generate_from_template(
 
 @generate_app.command(name="from-python-function")
 def components_generate_from_python_function(output_component_path: str):
-    """
-    Generates component from a Python function
-    """
+    """Generates component from a Python function"""
     raise NotImplementedError()
 
 

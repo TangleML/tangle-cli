@@ -52,6 +52,15 @@ wheels = [
 ]
 
 [[package]]
+name = "attrs"
+version = "26.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/8e/82a0fe20a541c03148528be8cac2408564a6c9a0cc7e9171802bc1d26985/attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32", size = 952055, upload-time = "2026-03-19T14:22:25.026Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", size = 67548, upload-time = "2026-03-19T14:22:23.645Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.2.25"
 source = { registry = "https://pypi.org/simple" }
@@ -216,6 +225,23 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
+
+[[package]]
+name = "cyclopts"
+version = "4.19.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "docstring-parser" },
+    { name = "rich" },
+    { name = "rich-rst" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/65/e7/4b3048094559b86a800e0f0de7faf8e6d8213727cf31553ec58453f25abc/cyclopts-4.19.0.tar.gz", hash = "sha256:c7532803ab8560d4de8600769793c3de4b2dc8c3b23ec707b989d84d9bae6ff4", size = 189274, upload-time = "2026-06-22T23:58:54.176Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/e8/b84c32f35a19107b55b8ceed260de9469206464da26bd0b979db470782c3/cyclopts-4.19.0-py3-none-any.whl", hash = "sha256:a8c11adb45afae25db310122950c7639c70b56e2ce341e5b29848bf3a8ecc1d4", size = 228005, upload-time = "2026-06-22T23:58:52.495Z" },
 ]
 
 [[package]]
@@ -1403,6 +1429,19 @@ wheels = [
 ]
 
 [[package]]
+name = "rich-rst"
+version = "2.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pygments" },
+    { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/57/56/3191bae66b08ccc637ea8120426068bcb361cc323c96404c310886937067/rich_rst-2.0.1.tar.gz", hash = "sha256:cbe236ed0901d1ec8427cc6a50bf0a34353ba28ad014dc24def68bfe7f3b9e68", size = 300570, upload-time = "2026-05-16T00:47:57.362Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/3d/55c17d3ebdf3cd81356002afe5bef9bb8af631db2819785b6eac845b925b/rich_rst-2.0.1-py3-none-any.whl", hash = "sha256:7ee15f345ce25fa02b582c272a6cdbaf0c21243e38061cea273cff659bf3ef61", size = 272922, upload-time = "2026-05-16T00:47:55.508Z" },
+]
+
+[[package]]
 name = "rich-toolkit"
 version = "0.19.7"
 source = { registry = "https://pypi.org/simple" }
@@ -1655,12 +1694,12 @@ wheels = [
 
 [[package]]
 name = "tangle-cli"
-version = "0.1.0"
+version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "cloud-pipelines" },
     { name = "cloud-pipelines-backend" },
-    { name = "typer" },
+    { name = "cyclopts" },
 ]
 
 [package.dev-dependencies]
@@ -1672,7 +1711,7 @@ dev = [
 requires-dist = [
     { name = "cloud-pipelines", specifier = ">=0.26.3.12" },
     { name = "cloud-pipelines-backend", git = "https://github.com/TangleML/tangle?rev=stable_cli" },
-    { name = "typer", specifier = ">=0.24.1" },
+    { name = "cyclopts", specifier = ">=3.0" },
 ]
 
 [package.metadata.requires-dev]
