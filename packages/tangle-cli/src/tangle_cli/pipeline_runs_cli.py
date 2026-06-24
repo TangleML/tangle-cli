@@ -154,6 +154,7 @@ def pipeline_runs_submit(
         "pipeline_path": ("pipeline_path", pipeline_path, None, False, True, optional_path),
         "arg": (arg, None),
         "args_json": (args_json, None),
+        "args_config": ("args", None, None, True),
         "annotation": (annotation, None),
         "hydrate": (hydrate, True),
         "dry_run": (dry_run, None),
@@ -166,7 +167,7 @@ def pipeline_runs_submit(
 
     def action(manager: PipelineRunManager, args: ArgsContainer) -> dict[str, Any]:
         kwargs = {
-            "run_args": parse_json_or_key_values(args.args_json, args.arg),
+            "run_args": parse_json_or_key_values(args.args_json or args.args_config, args.arg),
             "annotations": parse_key_value_entries(args.annotation),
             "hydrate": bool(args.hydrate),
             "run_as": args.run_as,
@@ -460,6 +461,10 @@ def pipeline_runs_export(
     run_id: str | None = None,
     *,
     output: pathlib.Path | None = None,
+    dehydrate: Annotated[
+        bool | None,
+        Parameter(help="Dehydrate exported pipeline specs into portable component refs."),
+    ] = None,
     base_url: BaseUrlOption = None,
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
@@ -471,12 +476,13 @@ def pipeline_runs_export(
     specs = {
         "run_id": (run_id,),
         "output": (output, None, optional_path),
+        "dehydrate": (dehydrate, None),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
 
     def action(manager: PipelineRunManager, args: ArgsContainer) -> object:
-        result = manager.export_run(args.run_id, args.output)
+        result = manager.export_run(args.run_id, args.output, dehydrate=bool(args.dehydrate))
         if args.output is None and "yaml" in result:
             print(result["yaml"], end="" if result["yaml"].endswith("\n") else "\n")
             return None

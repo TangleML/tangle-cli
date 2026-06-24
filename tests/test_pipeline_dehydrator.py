@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from tangle_cli import utils
@@ -62,6 +63,75 @@ def test_pipeline_dehydrator_replaces_refs_by_explicit_choice(tmp_path: Path) ->
 
     keep_result = PipelineDehydrator({"": DehydrateChoice.KEEP}, output_file=tmp_path / "out.yaml").dehydrate(data)
     assert "spec" in keep_result["implementation"]["graph"]["tasks"]["task"]["componentRef"]
+
+
+def test_pipeline_dehydrator_construction_is_auth_env_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auth-free dehydration construction must not require TANGLE_API_URL."""
+
+    monkeypatch.setenv("TANGLE_API_TOKEN", "token")
+    monkeypatch.delenv("TANGLE_API_URL", raising=False)
+
+    dehydrator = PipelineDehydrator({"": DehydrateChoice.DIGEST})
+
+    assert dehydrator.remembered_choices == {"": DehydrateChoice.DIGEST}
+
+
+def test_pipeline_dehydrator_auto_with_url_does_not_create_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Auto mode should not create a client when canonical URL is enough to decide."""
+
+    def fail_api_client(_self):
+        raise AssertionError("client should not be created")
+
+    monkeypatch.setattr(PipelineDehydrator, "_api_client", fail_api_client)
+    data = _pipeline({"canonical": _task("Canonical", "digest-url", canonical_url="https://example.test/canonical.yaml")})
+
+    result = PipelineDehydrator({"": DehydrateChoice.AUTO}, output_file=tmp_path / "out.yaml").dehydrate(data)
+
+    tasks = result["implementation"]["graph"]["tasks"]
+    assert tasks["canonical"]["componentRef"] == {"url": "https://example.test/canonical.yaml"}
+
+
+def test_pipeline_dehydrator_auto_lazily_creates_client_for_library_lookup(tmp_path: Path) -> None:
+    """Auto mode creates a default client only when a library lookup is needed."""
+
+    client = FakeClient({"digest-found"})
+
+    class LazyDehydrator(PipelineDehydrator):
+        def _api_client(self):
+            return client
+
+    data = _pipeline({"published": _task("Published", "digest-found")})
+
+    result = LazyDehydrator({"": DehydrateChoice.AUTO}, output_file=tmp_path / "out.yaml").dehydrate(data)
+
+    tasks = result["implementation"]["graph"]["tasks"]
+    assert tasks["published"]["componentRef"] == {"digest": "digest-found"}
+    assert client.calls == ["digest-found"]
+
+
+def test_pipeline_dehydrator_auto_falls_back_to_file_when_client_creation_fails(
+    tmp_path: Path,
+) -> None:
+    """Auto mode should stay local when no safe API client can be created."""
+
+    class UnavailableClientDehydrator(PipelineDehydrator):
+        def _api_client(self):
+            raise SystemExit("missing api configuration")
+
+    data = _pipeline({"local": _task("Local Only", "digest-missing")})
+
+    result = UnavailableClientDehydrator(
+        {"": DehydrateChoice.AUTO},
+        output_file=tmp_path / "out.yaml",
+    ).dehydrate(data)
+
+    tasks = result["implementation"]["graph"]["tasks"]
+    assert tasks["local"]["componentRef"] == {"url": "file://./components/local_only.yaml"}
+    saved_component = yaml.safe_load((tmp_path / "components" / "local_only.yaml").read_text(encoding="utf-8"))
+    assert saved_component["name"] == "Local Only"
 
 
 def test_pipeline_dehydrator_auto_uses_url_digest_then_file(tmp_path: Path) -> None:

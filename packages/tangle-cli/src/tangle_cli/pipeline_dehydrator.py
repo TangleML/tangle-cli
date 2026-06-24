@@ -23,9 +23,9 @@ from typing import Any
 import yaml
 
 from . import utils
+from .api_transport import DEFAULT_TIMEOUT_SECONDS
 from .logger import Logger, get_default_logger
 from .pipeline_hydrator import PipelineHydrator, ResolverContext, UriReader, UriWriter
-
 
 PATH_SEPARATOR = "|"  # Use | as separator since task names can contain dots.
 
@@ -83,9 +83,22 @@ class PipelineDehydrator:
         logger: Logger | None = None,
         component_extension: str | None = None,
         *,
+        base_url: str | None = None,
+        token: str | None = None,
+        auth_header: str | None = None,
+        header: list[str] | None = None,
+        include_env_credentials: bool = True,
         uri_readers: Mapping[str, UriReader] | None = None,
         uri_writers: Mapping[str, UriWriter] | None = None,
     ) -> None:
+        self.client = client
+        self._client_options = {
+            "base_url": base_url,
+            "token": token,
+            "auth_header": auth_header,
+            "header": header,
+            "include_env_credentials": include_env_credentials,
+        }
         self.remembered_choices = dict(remembered_choices or {})
         self.output_file = output_file
         self.log = logger or get_default_logger()
@@ -100,15 +113,29 @@ class PipelineDehydrator:
             self.components_dir = Path("components")
 
         self.interactive = interactive
-        self.client = client
         self._saved_components: dict[str, Path | str] = {}
         self._current_reference_file: Path | str | None = output_file
         self._io = PipelineHydrator(
             enable_resolution=False,
             logger=self.log,
+            base_url=base_url,
+            token=token,
+            auth_header=auth_header,
+            header=header,
+            include_env_credentials=include_env_credentials,
             uri_readers=uri_readers,
             uri_writers=uri_writers,
         )
+
+    def _api_client(self) -> Any:
+        if self.client is None:
+            from . import client as client_module
+
+            self.client = client_module.TangleApiClient(
+                timeout=DEFAULT_TIMEOUT_SECONDS,
+                **self._client_options,
+            )
+        return self.client
 
     def _is_auto_mode(self) -> bool:
         """Return True when any remembered choice asks for auto mode."""
@@ -210,16 +237,14 @@ class PipelineDehydrator:
         if not resolved_digest or resolved_digest == "unknown":
             self.log.info("   Auto: no digest -> file")
             return "file"
-        if self.client is not None:
-            try:
-                self.client.get_component_spec(resolved_digest)
-                self.log.info(f"   Auto: digest {resolved_digest[:16]} found in library -> digest ref")
-                return "digest"
-            except Exception:
-                self.log.info(f"   Auto: digest {resolved_digest[:16]} not in library -> file")
-                return "file"
-        self.log.info("   Auto: no API client provided -> file")
-        return "file"
+        try:
+            client = self._api_client()
+            client.get_component_spec(resolved_digest)
+            self.log.info(f"   Auto: digest {resolved_digest[:16]} found in library -> digest ref")
+            return "digest"
+        except (Exception, SystemExit):
+            self.log.info(f"   Auto: digest {resolved_digest[:16]} not in library -> file")
+            return "file"
 
     def _prompt_choice(self, name: str, digest: str, canonical_url: str | None, path: str) -> str:
         self.log.info(f"\n📦 Found componentRef at: {path}")
@@ -341,7 +366,10 @@ class PipelineDehydrator:
             destination = self._join_destination(self.components_dir, filename)
             self._write_text(destination, utils.dump_yaml(spec), kind="component")
             if self._is_local_destination(destination):
-                destination = Path(str(destination)[7:] if str(destination).startswith("file://") else str(destination)).resolve()
+                destination_text = str(destination)
+                if destination_text.startswith("file://"):
+                    destination_text = destination_text[7:]
+                destination = Path(destination_text).resolve()
             self._saved_components[digest] = destination
         return self._make_ref_url(self._saved_components[digest])
 
@@ -418,7 +446,10 @@ class PipelineDehydrator:
                 self._current_reference_file = original_ref
 
             if self._is_local_destination(destination):
-                destination_path = Path(str(destination)[7:] if str(destination).startswith("file://") else str(destination))
+                destination_text = str(destination)
+                if destination_text.startswith("file://"):
+                    destination_text = destination_text[7:]
+                destination_path = Path(destination_text)
                 self._relativize_file_urls(spec_to_write, destination_path.parent)
                 self._write_text(destination_path, utils.dump_yaml(spec_to_write) + "\n", kind="subgraph")
                 component_url = f"file://{destination_path.resolve()}"
@@ -431,7 +462,10 @@ class PipelineDehydrator:
             component_ref["url"] = component_url
 
         if self.output_file and self._is_local_destination(self.output_file):
-            output_path = Path(str(self.output_file)[7:] if str(self.output_file).startswith("file://") else str(self.output_file))
+            output_file_text = str(self.output_file)
+            if output_file_text.startswith("file://"):
+                output_file_text = output_file_text[7:]
+            output_path = Path(output_file_text)
             self._relativize_file_urls(data, output_path.parent)
 
         return data

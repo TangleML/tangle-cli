@@ -105,6 +105,9 @@ class FakeClient:
             raw={"componentRef": {"spec": {"name": "Exported", "implementation": {"graph": {"tasks": {}}}}}}
         )
 
+    def get_component_spec(self, digest: str) -> dict[str, Any]:
+        return {"name": digest}
+
 
 def test_pipeline_runs_help_exposes_run_commands_not_local_pipeline_commands(capsys):
     app = cli.build_app()
@@ -161,6 +164,25 @@ def test_pipeline_runs_submit_builds_create_payload(monkeypatch, tmp_path: Path,
     root_task = fake_client.created[0]["root_task"]
     assert root_task["componentRef"]["spec"]["name"] == "Demo Pipeline"
     assert root_task["arguments"] == {"query": "default", "required": "value"}
+
+
+def test_pipeline_runs_submit_accepts_export_config_args_and_hydrate(monkeypatch, tmp_path: Path):
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    config = tmp_path / "pipeline.config.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {"pipeline_path": str(pipeline_path), "args": {"required": "value", "query": "custom"}, "hydrate": True},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit", "--config", str(config)])
+
+    assert fake_client.created[0]["root_task"]["arguments"] == {"query": "custom", "required": "value"}
 
 
 def test_pipeline_runs_submit_dry_run_prints_sanitized_payload(monkeypatch, tmp_path: Path, capsys):
@@ -487,6 +509,163 @@ def test_pipeline_runs_commands_call_generated_operations(monkeypatch, tmp_path:
     output = tmp_path / "export.yaml"
     run_app(app, ["sdk", "pipeline-runs", "export", "run-1", "--output", str(output)])
     assert yaml.safe_load(output.read_text(encoding="utf-8"))["name"] == "Exported"
+
+
+def test_pipeline_runs_export_writes_execution_config(monkeypatch, tmp_path: Path):
+    class ExportClient(FakeClient):
+        def get_run_pipeline_spec(self, run_id: str) -> Any:
+            return SimpleNamespace(
+                raw={
+                    "componentRef": {
+                        "spec": {"name": "Exported", "implementation": {"graph": {"tasks": {}}}}
+                    }
+                },
+                arguments={"query": "boots", "limit": 10},
+            )
+
+    app = cli.build_app()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: ExportClient())
+
+    output = tmp_path / "export.yaml"
+    run_app(app, ["sdk", "pipeline-runs", "export", "run-1", "--output", str(output)])
+
+    config = yaml.safe_load((tmp_path / "export.config.yaml").read_text(encoding="utf-8"))
+    assert config == {"pipeline_path": "export.yaml", "args": {"query": "boots", "limit": 10}}
+
+
+def test_pipeline_runs_export_requires_output_for_dehydration() -> None:
+    manager = PipelineRunManager(client=FakeClient())
+
+    with pytest.raises(PipelineRunError, match="--dehydrate requires --output"):
+        manager.export_run("run-1", dehydrate=True)
+
+
+def test_pipeline_runs_export_rejects_empty_pipeline_spec() -> None:
+    class ExportClient(FakeClient):
+        def get_run_pipeline_spec(self, run_id: str) -> Any:
+            return SimpleNamespace(raw={"componentRef": {"spec": {}}}, arguments={})
+
+    manager = PipelineRunManager(client=ExportClient())
+
+    with pytest.raises(PipelineRunError, match="Pipeline spec for run run-1 is not exportable"):
+        manager.export_run("run-1")
+
+
+def test_pipeline_runs_export_can_dehydrate_pipeline(monkeypatch, tmp_path: Path):
+    class ExportClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.spec_lookups: list[str] = []
+
+        def get_run_pipeline_spec(self, run_id: str) -> Any:
+            return SimpleNamespace(
+                raw={
+                    "componentRef": {
+                        "spec": {
+                            "name": "Exported",
+                            "implementation": {
+                                "graph": {
+                                    "tasks": {
+                                        "step": {
+                                            "componentRef": {
+                                                "name": "Step",
+                                                "digest": "digest-1",
+                                                "spec": {"name": "Step", "version": "1.0.0"},
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+                arguments={"query": "boots"},
+            )
+
+        def get_component_spec(self, digest: str) -> dict[str, Any]:
+            self.spec_lookups.append(digest)
+            return {"name": "published"}
+
+    app = cli.build_app()
+    fake_client = ExportClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+
+    output = tmp_path / "export-dehydrated.yaml"
+    run_app(app, ["sdk", "pipeline-runs", "export", "run-1", "--output", str(output), "--dehydrate"])
+
+    exported = yaml.safe_load(output.read_text(encoding="utf-8"))
+    component_ref = exported["implementation"]["graph"]["tasks"]["step"]["componentRef"]
+    assert component_ref == {"digest": "digest-1"}
+    config = yaml.safe_load((tmp_path / "export-dehydrated.config.yaml").read_text(encoding="utf-8"))
+    assert config == {
+        "pipeline_path": "export-dehydrated.yaml",
+        "hydrate": True,
+        "args": {"query": "boots"},
+    }
+    assert fake_client.spec_lookups == ["digest-1"]
+
+
+def test_pipeline_runs_export_config_dehydrate_can_be_disabled(monkeypatch, tmp_path: Path):
+    class ExportClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.spec_lookups: list[str] = []
+
+        def get_run_pipeline_spec(self, run_id: str) -> Any:
+            return SimpleNamespace(
+                raw={
+                    "componentRef": {
+                        "spec": {
+                            "name": "Exported",
+                            "implementation": {
+                                "graph": {
+                                    "tasks": {
+                                        "step": {
+                                            "componentRef": {
+                                                "name": "Step",
+                                                "digest": "digest-1",
+                                                "spec": {"name": "Step", "version": "1.0.0"},
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+                arguments={"query": "boots"},
+            )
+
+        def get_component_spec(self, digest: str) -> dict[str, Any]:
+            self.spec_lookups.append(digest)
+            return {"name": "published"}
+
+    app = cli.build_app()
+    fake_client = ExportClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    config = tmp_path / "export.config.yaml"
+    config.write_text("dehydrate: true\n", encoding="utf-8")
+
+    output = tmp_path / "export.yaml"
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "export",
+            "run-1",
+            "--output",
+            str(output),
+            "--config",
+            str(config),
+            "--no-dehydrate",
+        ],
+    )
+
+    exported = yaml.safe_load(output.read_text(encoding="utf-8"))
+    component_ref = exported["implementation"]["graph"]["tasks"]["step"]["componentRef"]
+    assert "spec" in component_ref
+    assert fake_client.spec_lookups == []
 
 
 def test_pipeline_runs_rich_search_builds_filters_and_formats_pages() -> None:

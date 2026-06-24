@@ -22,6 +22,7 @@ from typing import Any, Mapping
 import yaml
 
 from .logger import Logger, get_default_logger
+from .pipeline_dehydrator import DehydrateChoice, PipelineDehydrator
 from .pipeline_hydrator import HydrationError, PipelineHydrator
 from .pipeline_run_details import get_graph_state_output, get_run_details_output
 from .pipeline_run_search import search_pipeline_runs
@@ -1176,7 +1177,13 @@ class PipelineRunManager:
         self.client.pipeline_runs_delete_annotations(run_id, key)
         return {"id": run_id, "key": key, "deleted": True}
 
-    def export_run(self, run_id: str, output: str | Path | None = None) -> dict[str, Any]:
+    def export_run(
+        self,
+        run_id: str,
+        output: str | Path | None = None,
+        *,
+        dehydrate: bool = False,
+    ) -> dict[str, Any]:
         task_spec = self.client.get_run_pipeline_spec(run_id)
         if task_spec is None:
             raise PipelineRunError(f"No pipeline spec found for run {run_id}")
@@ -1188,15 +1195,37 @@ class PipelineRunManager:
         component_spec = getattr(task_spec, "component_spec", None)
         if not isinstance(spec, dict) and component_spec is not None:
             spec = getattr(component_spec, "data", None)
-        if not isinstance(spec, dict):
+        if not isinstance(spec, dict) or not spec:
             raise PipelineRunError(f"Pipeline spec for run {run_id} is not exportable")
+        if dehydrate and output is None:
+            raise PipelineRunError("--dehydrate requires --output")
+        if dehydrate:
+            spec = PipelineDehydrator(
+                remembered_choices={"": DehydrateChoice.AUTO},
+                output_file=output,
+                client=self.client,
+            ).dehydrate(spec)
         content = dump_yaml(spec)
         if output is None:
-            return {"run_id": run_id, "pipeline": spec, "yaml": content}
+            return {"run_id": run_id, "pipeline": spec, "yaml": content, "dehydrated": dehydrate}
         output_path = Path(output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(content, encoding="utf-8")
-        return {"run_id": run_id, "output": str(output_path)}
+
+        result = {"run_id": run_id, "output": str(output_path), "dehydrated": dehydrate}
+        arguments = self.to_plain(getattr(task_spec, "arguments", None) or {})
+        if not arguments and isinstance(raw, Mapping):
+            arguments = self.to_plain(raw.get("arguments") or {})
+        if isinstance(arguments, Mapping) and (arguments or dehydrate):
+            config_path = output_path.parent / f"{output_path.stem}.config.yaml"
+            config_data: dict[str, Any] = {"pipeline_path": output_path.name}
+            if dehydrate:
+                config_data["hydrate"] = True
+            if arguments:
+                config_data["args"] = dict(arguments)
+            config_path.write_text(dump_yaml(config_data), encoding="utf-8")
+            result["config_path"] = str(config_path)
+        return result
 
     def _poll_run_status(
         self,
@@ -1646,10 +1675,13 @@ def parse_key_value_entries(entries: list[str] | None) -> dict[str, str]:
     return parsed
 
 
-def parse_json_or_key_values(text: str | None, entries: list[str] | None = None) -> dict[str, Any]:
+def parse_json_or_key_values(
+    text: str | Mapping[str, Any] | None,
+    entries: list[str] | None = None,
+) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if text:
-        loaded = json.loads(text)
+        loaded = dict(text) if isinstance(text, Mapping) else json.loads(text)
         if not isinstance(loaded, dict):
             raise PipelineRunError("JSON value must be an object")
         result.update(loaded)
