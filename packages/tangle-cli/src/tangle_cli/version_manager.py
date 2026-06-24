@@ -12,7 +12,7 @@ import yaml
 
 from tangle_cli import utils
 from tangle_cli.component_from_func import extract_file_metadata, find_function_in_source
-from tangle_cli.component_generator import regenerate_yaml
+from tangle_cli.component_generator import ComponentGenerator
 from tangle_cli.logger import Logger, get_default_logger
 
 ReferenceContentGetter = Callable[[str], str | None]
@@ -429,7 +429,7 @@ def bump_version(
             )
             if success:
                 log.info("   🔄 Regenerating YAML...")
-                success = regenerate_yaml(
+                success = ComponentGenerator(logger=log).regenerate_yaml(
                     python_full_path,
                     output_path=yaml_path,
                     function_name=generation_function_name,
@@ -438,7 +438,6 @@ def bump_version(
                     strip_code=not has_original_code,
                     mode=generation_mode,
                     resolve_root=resolve_root,
-                    logger=log,
                 )
         else:
             log.error(f"❌ Python source not found: {python_path}")

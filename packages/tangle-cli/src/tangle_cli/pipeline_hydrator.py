@@ -24,9 +24,10 @@ import yaml
 
 from . import utils
 from .api_transport import DEFAULT_TIMEOUT_SECONDS
-from .component_generator import regenerate_yaml
+from .component_generator import ComponentGenerator
+from .handler import TangleCliHandler
 from .hydration_trust import is_trusted_python_source, trusted_python_source_guidance
-from .logger import Logger, get_default_logger
+from .logger import Logger
 from .utils import add_official_prefix
 
 if TYPE_CHECKING:
@@ -85,6 +86,17 @@ UriWriter = Callable[["PipelineHydrator", str, str, ResolverContext], None]
 COMPONENT_RESOLVERS: dict[str, ComponentResolver] = {}
 URI_READERS: dict[str, UriReader] = {}
 URI_WRITERS: dict[str, UriWriter] = {}
+
+
+def regenerate_yaml(**kwargs: Any) -> bool:
+    """Generate a local Python component YAML.
+
+    Kept as a module-level seam for callers/tests that patch this operation.
+    """
+
+    logger = kwargs.pop("logger", None)
+    verbose = bool(kwargs.pop("verbose", False))
+    return ComponentGenerator(logger=logger, verbose=verbose).regenerate_yaml(**kwargs)
 
 
 def register_component_resolver(kind: str, resolver: ComponentResolver) -> None:
@@ -172,7 +184,7 @@ def render_template(
     return template.render(**merged_context)
 
 
-class PipelineHydrator:
+class PipelineHydrator(TangleCliHandler):
     """Hydrates pipeline YAML by resolving component references.
 
     This class mirrors TD's ``PipelineHydrator`` shape.  Supported generic refs:
@@ -199,12 +211,13 @@ class PipelineHydrator:
         component_resolvers: Mapping[str, ComponentResolver] | None = None,
         uri_readers: Mapping[str, UriReader] | None = None,
         uri_writers: Mapping[str, UriWriter] | None = None,
+        component_generator: ComponentGenerator | None = None,
         trusted_python_sources: list[str] | None = None,
         allow_all_hydration: bool = False,
         recursive_context: str | None = None,
         error_policy: str = "warn",
     ) -> None:
-        self.client = client
+        super().__init__(client=client, logger=logger, base_url=base_url)
         self._client_options = {
             "base_url": base_url,
             "token": token,
@@ -217,7 +230,6 @@ class PipelineHydrator:
         self.verbose = verbose
         self.enable_resolution = enable_resolution
         self._postprocess_callback = postprocess_task
-        self.log = logger or get_default_logger()
         self.component_resolvers: dict[str, ComponentResolver] = dict(COMPONENT_RESOLVERS)
         if component_resolvers:
             self.component_resolvers.update(component_resolvers)
@@ -227,6 +239,7 @@ class PipelineHydrator:
         self.uri_writers: dict[str, UriWriter] = dict(URI_WRITERS)
         if uri_writers:
             self.uri_writers.update(uri_writers)
+        self.component_generator = component_generator
         self.resolution_overrides: dict[str, Any] = resolution_overrides or {}
         self.trusted_python_sources = trusted_python_sources or []
         self.allow_all_hydration = allow_all_hydration
@@ -237,15 +250,19 @@ class PipelineHydrator:
             k: str(v) for k, v in self.resolution_overrides.items()
         }
 
-    def _api_client(self) -> TangleApiClient:
-        if self.client is None:
-            from . import client as client_module
+    def _create_client(self) -> TangleApiClient | None:
+        from . import client as client_module
 
-            self.client = client_module.TangleApiClient(
-                timeout=DEFAULT_TIMEOUT_SECONDS,
-                **self._client_options,
-            )
-        return self.client
+        return client_module.TangleApiClient(
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+            **self._client_options,
+        )
+
+    def _api_client(self) -> TangleApiClient:
+        client = self._get_client()
+        if client is None:
+            raise HydrationError("Failed to create TangleApiClient")
+        return client
 
     @staticmethod
     def _recursive_context_value(value: Any) -> str | None:
@@ -1267,18 +1284,21 @@ class PipelineHydrator:
         output_folder.mkdir(parents=True, exist_ok=True)
 
         out_path = output_folder / (python_file.stem.replace("_", "-") + ".yaml")
-        success = regenerate_yaml(
-            python_file=python_file,
-            output_path=out_path,
-            function_name=gen_config.get("function"),
-            custom_name=gen_config.get("name"),
-            image=gen_config.get("image"),
-            dependencies_from=_resolve_path(gen_config.get("dependencies_from")),
-            strip_code=bool(gen_config.get("strip_code", False)),
-            verbose=False,
-            mode=str(gen_config.get("mode", "inline")),
-            resolve_root=resolve_root,
-        )
+        generation_kwargs = {
+            "python_file": python_file,
+            "output_path": out_path,
+            "function_name": gen_config.get("function"),
+            "custom_name": gen_config.get("name"),
+            "image": gen_config.get("image"),
+            "dependencies_from": _resolve_path(gen_config.get("dependencies_from")),
+            "strip_code": bool(gen_config.get("strip_code", False)),
+            "mode": str(gen_config.get("mode", "inline")),
+            "resolve_root": resolve_root,
+        }
+        if self.component_generator is not None:
+            success = self.component_generator.regenerate_yaml(**generation_kwargs)
+        else:
+            success = regenerate_yaml(**generation_kwargs, logger=self.log)
         if not success or not out_path.exists():
             self.log.warn(f"   ⚠️ local_from_python failed to generate {out_path}")
             return None

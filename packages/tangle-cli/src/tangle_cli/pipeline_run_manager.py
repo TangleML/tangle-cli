@@ -10,6 +10,7 @@ are intentionally extension points rather than OSS behavior.
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import re
 import time
@@ -21,6 +22,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from .handler import TangleCliHandler
 from .logger import Logger, get_default_logger
 from .pipeline_dehydrator import DehydrateChoice, PipelineDehydrator
 from .pipeline_hydrator import HydrationError, PipelineHydrator
@@ -321,9 +323,13 @@ class PipelineRunHooks:
         self,
         pipeline_path: str | Path,
         *,
-        client: Any,
         resolution_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        client = getattr(self, "client", None)
+        if client is None and hasattr(self, "_get_client"):
+            client = self._get_client()
+        if client is None:
+            raise PipelineRunError("Failed to create TangleApiClient")
         hydrator = PipelineHydrator(
             client=client,
             resolution_overrides=resolution_overrides,
@@ -563,10 +569,21 @@ class PipelineRunHooks:
 
 
 @dataclass
-class PipelineRunManager:
+class PipelineRunManager(TangleCliHandler):
     client: Any
     hooks: PipelineRunHooks = field(default_factory=PipelineRunHooks)
     logger: Logger = field(default_factory=get_default_logger)
+    base_url: str | None = None
+
+    def __post_init__(self) -> None:
+        TangleCliHandler.__init__(
+            self,
+            client=self.client,
+            logger=self.logger,
+            base_url=self.base_url,
+        )
+        if self.hooks is not self:
+            setattr(self.hooks, "client", self.client)
 
     @staticmethod
     def to_plain(value: Any) -> Any:
@@ -769,6 +786,17 @@ class PipelineRunManager:
                     return status
         return None
 
+    @staticmethod
+    def _accepts_client_keyword(method: Any) -> bool:
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        return "client" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
     def load_pipeline_for_submit(
         self,
         pipeline_path: str | Path,
@@ -777,11 +805,11 @@ class PipelineRunManager:
         resolution_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if hydrate:
-            return self.hooks.hydrate_pipeline(
-                pipeline_path,
-                client=self.client,
-                resolution_overrides=resolution_overrides,
-            )
+            hydrate_pipeline = self.hooks.hydrate_pipeline
+            hydrate_kwargs: dict[str, Any] = {"resolution_overrides": resolution_overrides}
+            if self._accepts_client_keyword(hydrate_pipeline):
+                hydrate_kwargs["client"] = self._get_client()
+            return hydrate_pipeline(pipeline_path, **hydrate_kwargs)
         return self.hooks.read_pipeline_yaml(pipeline_path)
 
     @staticmethod
@@ -999,8 +1027,9 @@ class PipelineRunManager:
         submit_context.submit_body = body
         submit_context.pipeline_spec = pipeline_spec if isinstance(pipeline_spec, dict) else None
         self.hooks.before_submit_context(submit_context)
+        client = self._require_client()
         try:
-            response = self.to_plain(self.client.pipeline_runs_create(body=body))
+            response = self.to_plain(client.pipeline_runs_create(body=body))
         except Exception as exc:
             self.hooks.on_submit_error(exc, context=submit_context)
             raise

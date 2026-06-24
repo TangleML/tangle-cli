@@ -123,20 +123,21 @@ def _components_generate_from_python_impl(
     )
     for args in all_args:
         logger, finalize_logs = logger_for_log_type(args.log_type)
-        from .component_generator import determine_output_path, regenerate_yaml
+        from .component_generator import ComponentGenerator
 
+        generator = ComponentGenerator(logger=logger, verbose=True)
         selected_mode = args.mode or "inline"
         if selected_mode not in {"inline", "bundle"}:
             raise SystemExit("--mode must be 'inline' or 'bundle'")
         python_path = pathlib.Path(args.python_file)
-        output_path = determine_output_path(
+        output_path = generator.determine_output_path(
             python_path,
             args.output,
             output_is_dir=False,
             use_legacy_naming=bool(args.use_legacy_naming),
         )
         try:
-            success = regenerate_yaml(
+            success = generator.regenerate_yaml(
                 python_file=python_path,
                 output_path=output_path,
                 function_name=args.function_name,
@@ -146,8 +147,6 @@ def _components_generate_from_python_impl(
                 strip_code=bool(args.strip_code),
                 mode=selected_mode,
                 resolve_root=args.resolve_root,
-                verbose=True,
-                logger=logger,
             )
             if not success:
                 raise SystemExit(1)

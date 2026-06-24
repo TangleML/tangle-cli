@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import tangle_cli.utils as utils
 
-from .logger import Logger, get_default_logger
+from .handler import TangleCliHandler
+from .logger import Logger
 
 if TYPE_CHECKING:
     from tangle_api.generated.models import ComponentSpec
@@ -115,163 +116,14 @@ class ComponentPublishHook(Protocol):
 
 
 # ============================================================================
-# Tangle API Functions
-# ============================================================================
-
-
-def deprecate_old_components(
-    existing_components: Sequence[Any],
-    new_digest: str,
-    client: Any = None,
-    logger: Logger | None = None,
-) -> int:
-    """Deprecate old versions of a component after publishing a new one.
-
-    ``existing_components`` must already be owner-scoped by the caller. This
-    function refuses to operate without a client and skips the newly published
-    digest to avoid self-deprecation.
-    """
-
-    log = logger or get_default_logger()
-
-    if not existing_components:
-        return 0
-    if not client:
-        log.warn("   ⚠️ Cannot deprecate components without TangleApiClient")
-        return 0
-
-    log.info(f"   Deprecating {len(existing_components)} previous version(s)...")
-    deprecation_count = 0
-
-    for old_component in existing_components:
-        old_digest = _component_digest(old_component)
-        if old_digest and old_digest != new_digest:
-            try:
-                result = client.published_components_update(
-                    digest=old_digest,
-                    deprecated=True,
-                    superseded_by=new_digest,
-                )
-                if result:
-                    deprecation_count += 1
-                    log.info(f"   ✅ Successfully deprecated component {old_digest[:16]}...")
-                else:
-                    log.warn(f"   ⚠️  No response from deprecation request for component {old_digest[:16]}...")
-            except Exception as exc:
-                log.warn(f"   ⚠️  Warning: Failed to deprecate component {old_digest[:16]}...: {exc}")
-
-    if deprecation_count > 0:
-        log.info(f"   ✅ Deprecated {deprecation_count} old version(s)")
-
-    return deprecation_count
-
-
-def perform_version_check(
-    spec: Any,
-    dry_run: bool,
-    client: Any = None,
-    logger: Logger | None = None,
-    published_by: str | None = None,
-) -> ProcessingResult:
-    """Perform owner-scoped version checking for a component.
-
-    If ``published_by`` is omitted, the current authenticated user is resolved
-    via ``client.users_me().id``. Failure to determine an owner is an error so
-    callers do not accidentally compare/deprecate components owned by others.
-    """
-
-    log = logger or get_default_logger()
-    local_version = spec.version
-    log.info(f"   Local version: {local_version}")
-
-    latest_version = None
-
-    if dry_run:
-        test_version = os.environ.get("TEST_LATEST_VERSION")
-        if test_version:
-            latest_version = test_version
-            log.info(f"   Remote version (test): {latest_version}")
-    else:
-        if client is None:
-            return ProcessingResult(
-                outcome=ProcessingOutcome.ERROR,
-                local_version=str(local_version),
-                latest_version=None,
-                reason="Failed to create API client",
-            )
-
-        filter_by = published_by or _current_user_id(client)
-        if not filter_by:
-            log.error("❌ Cannot determine current user — aborting to avoid deprecating components owned by others")
-            return ProcessingResult(
-                outcome=ProcessingOutcome.ERROR,
-                local_version=str(local_version),
-                latest_version=None,
-                reason="Cannot determine current user for author filtering",
-            )
-
-        existing_components = client.find_existing_components(
-            spec.search_names,
-            verbose=False,
-            published_by=filter_by,
-        )
-
-        if existing_components:
-            for component in existing_components:
-                digest = _component_digest(component)
-                if not digest:
-                    continue
-                try:
-                    full_spec = client.get_component_spec(digest)
-                    remote_version = full_spec.version if full_spec else None
-                    if remote_version and (
-                        not latest_version or utils.compare_versions(remote_version, latest_version) > 0
-                    ):
-                        latest_version = remote_version
-                except Exception as exc:
-                    log.warn(f"   Warning: Failed to get version for component {digest[:16]}: {exc}")
-                    continue
-
-            if latest_version:
-                log.info(f"   Remote version: {latest_version}")
-            else:
-                log.info(f"   ℹ️  Found {len(existing_components)} component(s) but couldn't extract version")
-
-    should_proceed = not latest_version or utils.compare_versions(local_version, latest_version) != 0
-
-    if should_proceed:
-        is_older = latest_version is not None and utils.compare_versions(latest_version, local_version) > 0
-        version_suffix = " (older)" if is_older else ""
-        log.info(
-            "   ➡️  Version "
-            + (f"{latest_version}{version_suffix}" if latest_version else "new")
-            + f" → {local_version}"
-        )
-        return ProcessingResult(
-            outcome=ProcessingOutcome.PROCEED,
-            local_version=local_version,
-            latest_version=latest_version,
-            spec=spec,
-        )
-
-    log.info(f"   ⏭️  Skipping: Version {local_version} unchanged")
-
-    return ProcessingResult(
-        outcome=ProcessingOutcome.SKIP,
-        local_version=local_version,
-        latest_version=latest_version,
-        spec=spec,
-        reason=f"Version {local_version} unchanged (matches remote)",
-    )
-
-
-# ============================================================================
 # Publisher
 # ============================================================================
 
 
-class ComponentPublisher:
+class ComponentPublisher(TangleCliHandler):
     """Publisher for Tangle components."""
+
+    component_spec_model: type[Any] | None = None
 
     def __init__(
         self,
@@ -286,6 +138,7 @@ class ComponentPublisher:
         client_factory: Callable[[], Any] | None = None,
         hooks: Sequence[ComponentPublishHook] | None = None,
         logger: Logger | None = None,
+        base_url: str | None = None,
     ) -> None:
         """Initialize the ComponentPublisher.
 
@@ -296,12 +149,15 @@ class ComponentPublisher:
         control.
         """
 
-        self.dry_run = dry_run
-        self._client = client
-        self._client_factory = client_factory
+        super().__init__(
+            dry_run=dry_run,
+            client=client,
+            client_factory=client_factory,
+            logger=logger,
+            base_url=base_url,
+        )
         self.published_by = published_by
         self.hooks = list(hooks or [])
-        self.log = logger or get_default_logger()
         self.results: list[tuple[str, ProcessingResult]] = []
 
         git_info = utils.get_git_info(Path.cwd(), logger=self.log)
@@ -311,30 +167,231 @@ class ComponentPublisher:
         self.git_remote_url = git_remote_url or git_info.get("git_remote_url")
         self.git_repo = git_repo
 
-    def _get_client(self) -> Any | None:
-        """Get or create a Tangle API client instance.
+    def _component_spec_model(self) -> type[Any]:
+        if self.component_spec_model is not None:
+            return self.component_spec_model
+        try:
+            from tangle_api.generated.models import ComponentSpec
+        except ModuleNotFoundError as exc:
+            if exc.name == "tangle_api":
+                raise RuntimeError(
+                    "Native generated Tangle API bindings are required for component publishing. "
+                    "Install tangle-cli[native] or provide a local tangle_api.generated package."
+                ) from exc
+            raise
+        return ComponentSpec
 
-        Downstream packages can either pass ``client_factory`` to the
-        constructor or subclass and override this method to provide custom auth
-        and lazy client construction.
+    def component_digest(self, component: Any) -> str | None:
+        """Return a published component digest from mapping or object shapes."""
+
+        if isinstance(component, Mapping):
+            digest = component.get("digest")
+            return str(digest) if digest else None
+        digest = getattr(component, "digest", None)
+        return str(digest) if digest else None
+
+    def current_user_id(self, client: Any) -> str | None:
+        """Return the current Tangle user id for owner-scoped lookups."""
+
+        try:
+            user_info = client.users_me()
+        except Exception:
+            return None
+        if user_info is None:
+            return None
+        if isinstance(user_info, Mapping):
+            value = user_info.get("id")
+        else:
+            value = getattr(user_info, "id", None)
+        return str(value) if value else None
+
+    def perform_version_check(self, spec: Any) -> ProcessingResult:
+        """Perform owner-scoped version checking for a component.
+
+        If ``published_by`` is omitted, the current authenticated user is
+        resolved via ``client.users_me().id``. Failure to determine an owner is
+        an error so callers do not accidentally compare/deprecate components
+        owned by others.
         """
 
-        if self._client is None and not self.dry_run:
-            if self._client_factory is not None:
-                self._client = self._client_factory()
-                return self._client
-            try:
-                from .client import TangleApiClient
-            except ModuleNotFoundError as exc:
-                if exc.name == "tangle_api":
-                    self.log.error(
-                        "❌ Native generated Tangle API bindings are required for component publishing. "
-                        "Install tangle-cli[native] or provide a local tangle_api.generated package."
+        local_version = spec.version
+        self.log.info(f"   Local version: {local_version}")
+
+        latest_version = None
+
+        if self.dry_run:
+            test_version = os.environ.get("TEST_LATEST_VERSION")
+            if test_version:
+                latest_version = test_version
+                self.log.info(f"   Remote version (test): {latest_version}")
+        else:
+            client = self._get_client()
+            if client is None:
+                return ProcessingResult(
+                    outcome=ProcessingOutcome.ERROR,
+                    local_version=str(local_version),
+                    latest_version=None,
+                    reason="Failed to create API client",
+                )
+
+            filter_by = self.published_by or self.current_user_id(client)
+            if not filter_by:
+                self.log.error(
+                    "❌ Cannot determine current user — aborting to avoid deprecating components owned by others"
+                )
+                return ProcessingResult(
+                    outcome=ProcessingOutcome.ERROR,
+                    local_version=str(local_version),
+                    latest_version=None,
+                    reason="Cannot determine current user for author filtering",
+                )
+
+            existing_components = client.find_existing_components(
+                spec.search_names,
+                verbose=False,
+                published_by=filter_by,
+            )
+
+            if existing_components:
+                for component in existing_components:
+                    digest = self.component_digest(component)
+                    if not digest:
+                        continue
+                    try:
+                        full_spec = client.get_component_spec(digest)
+                        remote_version = full_spec.version if full_spec else None
+                        if remote_version and (
+                            not latest_version or utils.compare_versions(remote_version, latest_version) > 0
+                        ):
+                            latest_version = remote_version
+                    except Exception as exc:
+                        self.log.warn(f"   Warning: Failed to get version for component {digest[:16]}: {exc}")
+                        continue
+
+                if latest_version:
+                    self.log.info(f"   Remote version: {latest_version}")
+                else:
+                    self.log.info(
+                        f"   ℹ️  Found {len(existing_components)} component(s) but couldn't extract version"
                     )
-                    return None
-                raise
-            self._client = TangleApiClient(logger=self.log)
-        return self._client
+
+        should_proceed = not latest_version or utils.compare_versions(local_version, latest_version) != 0
+
+        if should_proceed:
+            is_older = latest_version is not None and utils.compare_versions(latest_version, local_version) > 0
+            version_suffix = " (older)" if is_older else ""
+            self.log.info(
+                "   ➡️  Version "
+                + (f"{latest_version}{version_suffix}" if latest_version else "new")
+                + f" → {local_version}"
+            )
+            return ProcessingResult(
+                outcome=ProcessingOutcome.PROCEED,
+                local_version=local_version,
+                latest_version=latest_version,
+                spec=spec,
+            )
+
+        self.log.info(f"   ⏭️  Skipping: Version {local_version} unchanged")
+
+        return ProcessingResult(
+            outcome=ProcessingOutcome.SKIP,
+            local_version=local_version,
+            latest_version=latest_version,
+            spec=spec,
+            reason=f"Version {local_version} unchanged (matches remote)",
+        )
+
+    def deprecate_old_components(
+        self,
+        existing_components: Sequence[Any],
+        new_digest: str,
+    ) -> int:
+        """Deprecate previous component versions after a successful publish.
+
+        ``existing_components`` must already be owner-scoped by the caller.
+        This method refuses to operate without a client and skips the newly
+        published digest to avoid self-deprecation.
+        """
+
+        if not existing_components:
+            return 0
+
+        client = self._get_client()
+        if not client:
+            self.log.warn("   ⚠️ Cannot deprecate components without TangleApiClient")
+            return 0
+
+        self.log.info(f"   Deprecating {len(existing_components)} previous version(s)...")
+        deprecation_count = 0
+
+        for old_component in existing_components:
+            old_digest = self.component_digest(old_component)
+            if old_digest and old_digest != new_digest:
+                try:
+                    result = client.published_components_update(
+                        digest=old_digest,
+                        deprecated=True,
+                        superseded_by=new_digest,
+                    )
+                    if result:
+                        deprecation_count += 1
+                        self.log.info(f"   ✅ Successfully deprecated component {old_digest[:16]}...")
+                    else:
+                        self.log.warn(
+                            f"   ⚠️  No response from deprecation request for component {old_digest[:16]}..."
+                        )
+                except Exception as exc:
+                    self.log.warn(f"   ⚠️  Warning: Failed to deprecate component {old_digest[:16]}...: {exc}")
+
+        if deprecation_count > 0:
+            self.log.info(f"   ✅ Deprecated {deprecation_count} old version(s)")
+
+        return deprecation_count
+
+    def load_component_spec(
+        self,
+        component_path: str | Path,
+        *,
+        annotations: Mapping[str, str] | None = None,
+    ) -> "ComponentSpec":
+        """Load a component YAML file into the generated ``ComponentSpec`` model."""
+
+        text = read_component_yaml_text(component_path)
+        return self._component_spec_model().from_yaml(text, annotations=dict(annotations or {}))
+
+    def prepare_component_for_publish(
+        self,
+        component_path: str | Path,
+        *,
+        image: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
+        annotations: Mapping[str, str] | None = None,
+    ) -> "ComponentSpec":
+        """Load and apply generic publish-time overrides/metadata."""
+
+        spec = self.load_component_spec(component_path, annotations=annotations)
+        if name:
+            spec.name = name
+            spec.data["name"] = name
+        if description:
+            spec.description = description
+            spec.data["description"] = description
+        component_yaml_path = None
+        if self._git_root:
+            try:
+                component_yaml_path = str(Path(component_path).resolve().relative_to(Path(self._git_root).resolve()))
+            except ValueError:
+                pass
+        spec.update_fields(
+            git_remote_sha=self.git_remote_sha,
+            git_remote_branch=self.git_remote_branch,
+            git_remote_url=self.git_remote_url,
+            image=image,
+            component_yaml_path=component_yaml_path,
+        )
+        return spec
 
     def deprecate_component(
         self,
@@ -387,7 +444,7 @@ class ComponentPublisher:
 
         try:
             path = Path(file_path)
-            local_yaml_content = path.read_text(encoding="utf-8")
+            local_yaml_content = read_component_yaml_text(path)
         except Exception as exc:
             self.log.error(f"❌ Failed to read file {file_path}: {exc}")
             return ProcessingResult(
@@ -398,7 +455,7 @@ class ComponentPublisher:
             )
 
         try:
-            spec = _component_spec_from_yaml(local_yaml_content, annotations=annotations)
+            spec = self._component_spec_model().from_yaml(local_yaml_content, annotations=dict(annotations or {}))
             if spec.version is None:
                 self.log.warn("   ⏭️  Skipping: Component version is required but not found in YAML")
                 return ProcessingResult(
@@ -435,13 +492,7 @@ class ComponentPublisher:
                 reason="Failed to create TangleApiClient",
             )
 
-        version_check_result = perform_version_check(
-            spec=spec,
-            dry_run=self.dry_run,
-            client=client,
-            logger=self.log,
-            published_by=self.published_by,
-        )
+        version_check_result = self.perform_version_check(spec=spec)
 
         if version_check_result.outcome == ProcessingOutcome.SKIP:
             self.log.info(f"   ⏭️  Skipping API publish: {version_check_result.reason}")
@@ -453,7 +504,7 @@ class ComponentPublisher:
         component_yaml_path = None
         if self._git_root:
             try:
-                component_yaml_path = str(Path(file_path).resolve().relative_to(self._git_root))
+                component_yaml_path = str(Path(file_path).resolve().relative_to(Path(self._git_root).resolve()))
             except ValueError:
                 pass
 
@@ -482,9 +533,11 @@ class ComponentPublisher:
                 response={"name": spec.name, "text": local_yaml_content},
             )
 
-        filter_by = self.published_by or _current_user_id(client)
+        filter_by = self.published_by or self.current_user_id(client)
         if not filter_by:
-            self.log.error("❌ Cannot determine current user — aborting to avoid deprecating components owned by others")
+            self.log.error(
+                "❌ Cannot determine current user — aborting to avoid deprecating components owned by others"
+            )
             return ProcessingResult(
                 outcome=ProcessingOutcome.ERROR,
                 local_version=version_check_result.local_version,
@@ -501,7 +554,7 @@ class ComponentPublisher:
 
             if new_digest:
                 self.log.info(f"✅ Published: {spec.name} (digest: {str(new_digest)[:16]}...)")
-                deprecate_old_components(existing_components, str(new_digest), client=client, logger=self.log)
+                self.deprecate_old_components(existing_components, str(new_digest))
                 return ProcessingResult(
                     outcome=ProcessingOutcome.SUCCESS,
                     local_version=version_check_result.local_version,
@@ -689,8 +742,45 @@ class ComponentPublisher:
 
 
 # ============================================================================
-# Convenience wrapper functions
+# Internal helpers
 # ============================================================================
+
+
+def read_component_yaml_text(component_path: str | Path) -> str:
+    """Read component YAML text from disk."""
+
+    return Path(component_path).read_text(encoding="utf-8")
+
+
+def deprecate_old_components(
+    existing_components: Sequence[Any],
+    new_digest: str,
+    client: Any = None,
+    logger: Logger | None = None,
+) -> int:
+    """Deprecate old versions of a component after publishing a new one."""
+
+    return ComponentPublisher(client=client, logger=logger).deprecate_old_components(
+        existing_components,
+        new_digest,
+    )
+
+
+def perform_version_check(
+    spec: Any,
+    dry_run: bool,
+    client: Any = None,
+    logger: Logger | None = None,
+    published_by: str | None = None,
+) -> ProcessingResult:
+    """Perform owner-scoped version checking for a component."""
+
+    return ComponentPublisher(
+        dry_run=dry_run,
+        client=client,
+        logger=logger,
+        published_by=published_by,
+    ).perform_version_check(spec)
 
 
 def publish_component_to_tangle(
@@ -712,12 +802,12 @@ def publish_component_to_tangle(
 
     publisher = ComponentPublisher(
         dry_run=dry_run,
+        client=client,
+        client_factory=client_factory,
         git_remote_sha=git_remote_sha,
         git_remote_branch=git_remote_branch,
         git_remote_url=git_remote_url,
         git_repo=git_repo,
-        client=client,
-        client_factory=client_factory,
         published_by=published_by,
     )
     return publisher.publish_component(
@@ -762,17 +852,6 @@ def deprecate_component(
     )
 
 
-def load_component_spec(
-    component_path: str | Path,
-    *,
-    annotations: Mapping[str, str] | None = None,
-) -> "ComponentSpec":
-    """Load a component YAML file into the generated ``ComponentSpec`` model."""
-
-    text = Path(component_path).read_text(encoding="utf-8")
-    return _component_spec_from_yaml(text, annotations=annotations)
-
-
 def prepare_component_for_publish(
     component_path: str | Path,
     *,
@@ -787,27 +866,18 @@ def prepare_component_for_publish(
 ) -> "ComponentSpec":
     """Load and apply generic publish-time overrides/metadata."""
 
-    path = Path(component_path)
-    spec = load_component_spec(path, annotations=annotations)
-    if name:
-        spec.name = name
-        spec.data["name"] = name
-    if description:
-        spec.description = description
-        spec.data["description"] = description
-    spec.update_fields(
+    return ComponentPublisher(
         git_remote_sha=git_remote_sha,
         git_remote_branch=git_remote_branch,
         git_remote_url=git_remote_url,
+        git_root=git_root,
+    ).prepare_component_for_publish(
+        component_path,
         image=image,
-        component_yaml_path=_component_yaml_path(path, git_root),
+        name=name,
+        description=description,
+        annotations=annotations,
     )
-    return spec
-
-
-# ============================================================================
-# Internal helpers
-# ============================================================================
 
 
 def _hook_accepts_context(method: Any) -> bool:
@@ -821,47 +891,6 @@ def _hook_accepts_context(method: Any) -> bool:
         if parameter.name == "context":
             return True
     return False
-
-
-def _component_spec_from_yaml(
-    yaml_content: str,
-    *,
-    annotations: Mapping[str, str] | None = None,
-) -> "ComponentSpec":
-    from tangle_api.generated.models import ComponentSpec
-
-    return ComponentSpec.from_yaml(yaml_content, annotations=dict(annotations or {}))
-
-
-def _component_yaml_path(component_path: Path, git_root: str | Path | None) -> str | None:
-    if git_root is None:
-        return None
-    try:
-        return str(component_path.resolve().relative_to(Path(git_root).resolve()))
-    except ValueError:
-        return None
-
-
-def _component_digest(component: Any) -> str | None:
-    if isinstance(component, Mapping):
-        digest = component.get("digest")
-        return str(digest) if digest else None
-    digest = getattr(component, "digest", None)
-    return str(digest) if digest else None
-
-
-def _current_user_id(client: Any) -> str | None:
-    try:
-        user_info = client.users_me()
-    except Exception:
-        return None
-    if user_info is None:
-        return None
-    if isinstance(user_info, Mapping):
-        value = user_info.get("id")
-    else:
-        value = getattr(user_info, "id", None)
-    return str(value) if value else None
 
 
 def _to_plain(value: Any) -> Any:
@@ -884,9 +913,9 @@ __all__ = [
     "ProcessingResult",
     "deprecate_component",
     "deprecate_old_components",
-    "load_component_spec",
     "perform_version_check",
     "prepare_component_for_publish",
     "publish_component",
     "publish_component_to_tangle",
+    "read_component_yaml_text",
 ]

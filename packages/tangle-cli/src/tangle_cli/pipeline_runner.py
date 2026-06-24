@@ -11,6 +11,7 @@ hooks rather than imported here.
 from __future__ import annotations
 
 import copy
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -62,7 +63,7 @@ class PipelineRunnerHooks(PipelineRunHooks):
         self,
         pipeline_path: str | Path,
         *,
-        client: Any,
+        client: Any | None = None,
         resolution_overrides: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | Path | None]:
         """Hydrate a pipeline path for a run.
@@ -72,11 +73,21 @@ class PipelineRunnerHooks(PipelineRunHooks):
         to a temporary file.  OSS hydration is in-memory by default.
         """
 
+        hydrate_kwargs: dict[str, Any] = {"resolution_overrides": resolution_overrides}
+        try:
+            parameters = inspect.signature(self.hydrate_pipeline).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if client is not None and (
+            "client" in parameters
+            or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+        ):
+            hydrate_kwargs["client"] = client
+
         return (
             self.hydrate_pipeline(
                 pipeline_path,
-                client=client,
-                resolution_overrides=resolution_overrides,
+                **hydrate_kwargs,
             ),
             None,
         )
@@ -294,11 +305,27 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
 
     hooks: PipelineRunnerHooks = field(default_factory=PipelineRunnerHooks)
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.hooks is not self:
+            setattr(self.hooks, "client", self.client)
+
     @staticmethod
     def _ensure_mapping(value: Any) -> dict[str, Any]:
         if not isinstance(value, dict):
             raise PipelineRunError("pipeline spec must be a mapping")
         return value
+
+    @staticmethod
+    def _accepts_client_keyword(method: Any) -> bool:
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        return "client" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
 
     def _high_level_hooks(self) -> PipelineRunnerHooks:
         """Return the object that owns high-level path/spec hooks.
@@ -332,10 +359,13 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
         preparation: PipelinePreparationResult | None = None
         try:
             if hydrate:
-                pipeline_spec, hydrated_effective_path = hooks.hydrate_pipeline_for_run(
+                hydrate_pipeline_for_run = hooks.hydrate_pipeline_for_run
+                hydrate_kwargs: dict[str, Any] = {"resolution_overrides": resolution_overrides}
+                if self._accepts_client_keyword(hydrate_pipeline_for_run):
+                    hydrate_kwargs["client"] = self._get_client()
+                pipeline_spec, hydrated_effective_path = hydrate_pipeline_for_run(
                     pipeline_path,
-                    client=self.client,
-                    resolution_overrides=resolution_overrides,
+                    **hydrate_kwargs,
                 )
                 if hydrated_effective_path is not None:
                     effective_path = hydrated_effective_path

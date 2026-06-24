@@ -23,7 +23,8 @@ from typing import Any
 import yaml
 
 from . import utils
-from .api_transport import DEFAULT_TIMEOUT_SECONDS
+from .api_transport import DEFAULT_API_URL
+from .handler import TangleCliHandler
 from .logger import Logger, get_default_logger
 from .pipeline_hydrator import PipelineHydrator, ResolverContext, UriReader, UriWriter
 
@@ -56,7 +57,7 @@ class DehydrateChoice:
     AUTO = "a"
 
 
-class PipelineDehydrator:
+class PipelineDehydrator(TangleCliHandler):
     """Dehydrate pipeline YAML by replacing full component specs with refs.
 
     Supported choices:
@@ -84,24 +85,16 @@ class PipelineDehydrator:
         component_extension: str | None = None,
         *,
         base_url: str | None = None,
-        token: str | None = None,
-        auth_header: str | None = None,
-        header: list[str] | None = None,
-        include_env_credentials: bool = True,
         uri_readers: Mapping[str, UriReader] | None = None,
         uri_writers: Mapping[str, UriWriter] | None = None,
     ) -> None:
-        self.client = client
-        self._client_options = {
-            "base_url": base_url,
-            "token": token,
-            "auth_header": auth_header,
-            "header": header,
-            "include_env_credentials": include_env_credentials,
-        }
+        super().__init__(
+            client=client,
+            logger=logger,
+            base_url=base_url or DEFAULT_API_URL,
+        )
         self.remembered_choices = dict(remembered_choices or {})
         self.output_file = output_file
-        self.log = logger or get_default_logger()
         self.component_extension = component_extension or ".yaml"
 
         self._components_dir_explicit = components_dir is not None
@@ -118,24 +111,10 @@ class PipelineDehydrator:
         self._io = PipelineHydrator(
             enable_resolution=False,
             logger=self.log,
-            base_url=base_url,
-            token=token,
-            auth_header=auth_header,
-            header=header,
-            include_env_credentials=include_env_credentials,
+            base_url=self.base_url,
             uri_readers=uri_readers,
             uri_writers=uri_writers,
         )
-
-    def _api_client(self) -> Any:
-        if self.client is None:
-            from . import client as client_module
-
-            self.client = client_module.TangleApiClient(
-                timeout=DEFAULT_TIMEOUT_SECONDS,
-                **self._client_options,
-            )
-        return self.client
 
     def _is_auto_mode(self) -> bool:
         """Return True when any remembered choice asks for auto mode."""
@@ -238,11 +217,18 @@ class PipelineDehydrator:
             self.log.info("   Auto: no digest -> file")
             return "file"
         try:
-            client = self._api_client()
+            client = self._get_client()
+        except (Exception, SystemExit):
+            self.log.info("   Auto: no API client available -> file")
+            return "file"
+        if client is None:
+            self.log.info("   Auto: no API client provided -> file")
+            return "file"
+        try:
             client.get_component_spec(resolved_digest)
             self.log.info(f"   Auto: digest {resolved_digest[:16]} found in library -> digest ref")
             return "digest"
-        except (Exception, SystemExit):
+        except Exception:
             self.log.info(f"   Auto: digest {resolved_digest[:16]} not in library -> file")
             return "file"
 

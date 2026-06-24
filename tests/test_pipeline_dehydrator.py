@@ -82,10 +82,10 @@ def test_pipeline_dehydrator_auto_with_url_does_not_create_client(
 ) -> None:
     """Auto mode should not create a client when canonical URL is enough to decide."""
 
-    def fail_api_client(_self):
+    def fail_get_client(_self):
         raise AssertionError("client should not be created")
 
-    monkeypatch.setattr(PipelineDehydrator, "_api_client", fail_api_client)
+    monkeypatch.setattr(PipelineDehydrator, "_get_client", fail_get_client)
     data = _pipeline({"canonical": _task("Canonical", "digest-url", canonical_url="https://example.test/canonical.yaml")})
 
     result = PipelineDehydrator({"": DehydrateChoice.AUTO}, output_file=tmp_path / "out.yaml").dehydrate(data)
@@ -100,7 +100,7 @@ def test_pipeline_dehydrator_auto_lazily_creates_client_for_library_lookup(tmp_p
     client = FakeClient({"digest-found"})
 
     class LazyDehydrator(PipelineDehydrator):
-        def _api_client(self):
+        def _get_client(self):
             return client
 
     data = _pipeline({"published": _task("Published", "digest-found")})

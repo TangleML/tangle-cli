@@ -8,8 +8,8 @@ from typing import Annotated, Any
 from cyclopts import App, Parameter
 
 from .cli_helpers import (
-    api_arg_specs,
     LazyTangleApiClient,
+    api_arg_specs,
     include_env_credentials_for_args,
     load_args_or_exit,
     optional_path,
@@ -23,8 +23,8 @@ from .cli_options import (
     LogTypeOption,
     TokenOption,
 )
-from .logger import logger_for_log_type
 from .component_publisher import ComponentPublisher, deprecate_component
+from .logger import logger_for_log_type
 
 
 def _client_from_options(

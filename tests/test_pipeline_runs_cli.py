@@ -858,7 +858,7 @@ def test_pipeline_runs_submit_refuses_untrusted_local_from_python(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from tangle_cli import pipeline_hydrator as hydrator_module
+    from tangle_cli.component_generator import ComponentGenerator
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -868,10 +868,10 @@ def test_pipeline_runs_submit_refuses_untrusted_local_from_python(
     outside_python.write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
     pipeline_path = _write_submit_local_from_python_pipeline(project_dir, str(outside_python))
 
-    def fake_regenerate_yaml(**kwargs):
+    def fake_regenerate_yaml(self, **kwargs):
         raise AssertionError("untrusted local_from_python must be blocked before generation")
 
-    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+    monkeypatch.setattr(ComponentGenerator, "regenerate_yaml", fake_regenerate_yaml)
     manager = PipelineRunManager(client=FakeClient())
 
     with pytest.raises(PipelineRunError, match="Refusing to execute untrusted local_from_python source"):
@@ -882,7 +882,7 @@ def test_pipeline_runs_submit_ignores_untrusted_resolve_root_for_python_trust(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from tangle_cli import pipeline_hydrator as hydrator_module
+    from tangle_cli.component_generator import ComponentGenerator
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -896,10 +896,10 @@ def test_pipeline_runs_submit_ignores_untrusted_resolve_root_for_python_trust(
         resolve_root=str(outside_dir),
     )
 
-    def fake_regenerate_yaml(**kwargs):
+    def fake_regenerate_yaml(self, **kwargs):
         raise AssertionError("untrusted resolve_root must not authorize execution")
 
-    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+    monkeypatch.setattr(ComponentGenerator, "regenerate_yaml", fake_regenerate_yaml)
     manager = PipelineRunManager(client=FakeClient())
 
     with pytest.raises(PipelineRunError, match="Refusing to execute untrusted local_from_python source"):
@@ -911,7 +911,7 @@ def test_pipeline_runs_submit_trusted_hydration_allows_untrusted_local_from_pyth
     tmp_path: Path,
     capsys,
 ) -> None:
-    from tangle_cli import pipeline_hydrator as hydrator_module
+    from tangle_cli.component_generator import ComponentGenerator
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -922,7 +922,7 @@ def test_pipeline_runs_submit_trusted_hydration_allows_untrusted_local_from_pyth
     pipeline_path = _write_submit_local_from_python_pipeline(project_dir, str(outside_python))
     regenerated: list[Path] = []
 
-    def fake_regenerate_yaml(**kwargs):
+    def fake_regenerate_yaml(self, **kwargs):
         regenerated.append(kwargs["python_file"])
         kwargs["output_path"].write_text(
             "name: Submit Generated Component\nimplementation:\n  container:\n    image: busybox\n",
@@ -931,7 +931,7 @@ def test_pipeline_runs_submit_trusted_hydration_allows_untrusted_local_from_pyth
         return True
 
     fake_client = FakeClient()
-    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+    monkeypatch.setattr(ComponentGenerator, "regenerate_yaml", fake_regenerate_yaml)
     monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
     app = cli.build_app()
 
