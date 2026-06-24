@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 import yaml
 
-from tangle_cli import cli, pipeline_runs_cli
+from tangle_cli import cli, pipeline_run_manager, pipeline_runs_cli
 from tangle_cli.pipeline_runner import PipelineRunner, PipelineRunnerHooks
 from tangle_cli.pipeline_run_manager import (
     PipelineRunContext,
@@ -549,6 +549,35 @@ def test_pipeline_runs_export_rejects_empty_pipeline_spec() -> None:
 
     with pytest.raises(PipelineRunError, match="Pipeline spec for run run-1 is not exportable"):
         manager.export_run("run-1")
+
+
+def test_pipeline_runs_export_dehydrator_inherits_manager_logger(monkeypatch, tmp_path: Path) -> None:
+    class ExportClient(FakeClient):
+        def get_run_pipeline_spec(self, run_id: str) -> Any:
+            return SimpleNamespace(
+                raw={"componentRef": {"spec": {"name": "Exported", "implementation": {"graph": {"tasks": {}}}}}},
+                arguments={},
+            )
+
+    captured: dict[str, Any] = {}
+
+    class FakeDehydrator:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def dehydrate(self, spec: dict[str, Any]) -> dict[str, Any]:
+            return spec
+
+    logger = object()
+    monkeypatch.setattr(pipeline_run_manager, "PipelineDehydrator", FakeDehydrator)
+
+    PipelineRunManager(client=ExportClient(), logger=logger).export_run(
+        "run-1",
+        output=tmp_path / "export.yaml",
+        dehydrate=True,
+    )
+
+    assert captured["logger"] is logger
 
 
 def test_pipeline_runs_export_can_dehydrate_pipeline(monkeypatch, tmp_path: Path):

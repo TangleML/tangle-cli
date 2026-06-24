@@ -1233,6 +1233,7 @@ class PipelineRunManager(TangleCliHandler):
                 remembered_choices={"": DehydrateChoice.AUTO},
                 output_file=output,
                 client=self.client,
+                logger=self.logger,
             ).dehydrate(spec)
         content = dump_yaml(spec)
         if output is None:
