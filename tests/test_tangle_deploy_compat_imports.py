@@ -25,33 +25,13 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
         publish_component,
         publish_component_to_tangle,
     )
-    from tangle_cli.artifacts import (
-        ArtifactManager,
-        _collect_artifacts,
-        _collect_execution_artifacts,
-        _serialize_artifacts,
-        get_artifacts,
-        serialize_artifacts,
-    )
+    from tangle_cli.artifacts import ArtifactManager
     from tangle_cli.module_bundler import ModuleBundler
-    from tangle_cli.secrets import (
-        SecretsManager,
-        _resolve_secret_value,
-        create_secret,
-        delete_secret,
-        list_secrets,
-        update_secret,
-    )
+    from tangle_cli.secrets import SecretsManager
     from tangle_cli.version_manager import bump_version
     from tangle_cli.pipeline_run_details import PipelineRunDetails
     from tangle_cli.pipeline_run_search import PipelineRunSearch
-    from tangle_cli.component_inspector import (
-        get_standard_library,
-        inspect_by_digest,
-        inspect_by_name,
-        search_components,
-        transparency_check,
-    )
+    from tangle_cli.component_inspector import ComponentInspector
     from tangle_cli.pipeline_dehydrator import (
         DehydrateChoice,
         Jinja2ExportResult,
@@ -149,24 +129,16 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     assert callable(bump_version)
     assert ModuleBundler is not None
     assert ArtifactManager is not None
-    assert callable(_collect_artifacts)
-    assert callable(_collect_execution_artifacts)
-    assert callable(_serialize_artifacts)
-    assert callable(serialize_artifacts)
-    assert callable(get_artifacts)
+    assert callable(ArtifactManager.serialize_artifacts)
     assert SecretsManager is not None
     assert PipelineRunDetails is not None
     assert PipelineRunSearch is not None
-    assert callable(_resolve_secret_value)
-    assert callable(list_secrets)
-    assert callable(create_secret)
-    assert callable(update_secret)
-    assert callable(delete_secret)
-    assert callable(get_standard_library)
-    assert callable(inspect_by_digest)
-    assert callable(inspect_by_name)
-    assert callable(search_components)
-    assert callable(transparency_check)
+    assert callable(SecretsManager.resolve_secret_value)
+    assert callable(ComponentInspector.get_standard_library)
+    assert callable(ComponentInspector.inspect_by_digest)
+    assert callable(ComponentInspector.inspect_by_name)
+    assert callable(ComponentInspector.search_components)
+    assert callable(ComponentInspector.transparency_check)
     assert DehydrateChoice.AUTO == "a"
     assert Jinja2ExportResult is not None
     assert PipelineDehydrator is not None

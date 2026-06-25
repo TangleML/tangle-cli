@@ -26,6 +26,7 @@ from .cli_options import (
     TokenOption,
 )
 from .logger import Logger, logger_for_log_type
+from .pipeline_run_annotations import AnnotationManager
 from .pipeline_run_manager import (
     PipelineRunError,
     PipelineRunHooks,
@@ -67,17 +68,20 @@ def _allow_all_hydration_for_args(args: ArgsContainer) -> bool:
     return bool(config.get("allow_all", False))
 
 
-def _manager(args: ArgsContainer, *, cli_base_url: str | None, logger: Logger) -> PipelineRunManager:
-    client = LazyTangleApiClient(
+def _api_client(args: ArgsContainer, *, cli_base_url: str | None, command_name: str) -> LazyTangleApiClient:
+    return LazyTangleApiClient(
         base_url=args.base_url,
         token=args.token,
         auth_header=args.auth_header,
         header=args.header,
         include_env_credentials=include_env_credentials_for_args(args, cli_base_url),
-        command_name="pipeline-run commands",
+        command_name=command_name,
     )
+
+
+def _manager(args: ArgsContainer, *, cli_base_url: str | None, logger: Logger) -> PipelineRunManager:
     return PipelineRunManager(
-        client=client,
+        client=_api_client(args, cli_base_url=cli_base_url, command_name="pipeline-run commands"),
         hooks=PipelineRunHooks(
             logger=logger,
             trusted_python_sources=_trusted_sources_for_args(args),
@@ -100,6 +104,22 @@ def _run_manager_action(config: str | None, cli_base_url: str | None, specs: dic
                 raise SystemExit(str(exc)) from exc
             if result is not None:
                 print_json(result)
+        finally:
+            finalize_logs()
+
+
+def _run_annotation_action(config: str | None, cli_base_url: str | None, specs: dict[str, tuple[Any, ...]], fn):
+    for args in load_args_or_exit(config, **specs):
+        try:
+            logger, finalize_logs = logger_for_log_type(getattr(args, "log_type", "console"))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        try:
+            manager = AnnotationManager(
+                client=_api_client(args, cli_base_url=cli_base_url, command_name="pipeline-run annotation commands"),
+                logger=logger,
+            )
+            print_json(fn(manager, args))
         finally:
             finalize_logs()
 
@@ -507,7 +527,7 @@ def pipeline_runs_annotations_list(
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
-    _run_manager_action(config, base_url, specs, lambda manager, args: manager.annotations_list(args.run_id))
+    _run_annotation_action(config, base_url, specs, lambda manager, args: manager.list_annotations(args.run_id))
 
 
 @annotations_app.command(name="set")
@@ -530,11 +550,11 @@ def pipeline_runs_annotations_set(
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
-    _run_manager_action(
+    _run_annotation_action(
         config,
         base_url,
         specs,
-        lambda manager, args: manager.annotations_set(args.run_id, args.key, args.value),
+        lambda manager, args: manager.set_annotation(args.run_id, args.key, args.value),
     )
 
 
@@ -556,9 +576,9 @@ def pipeline_runs_annotations_delete(
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
-    _run_manager_action(
+    _run_annotation_action(
         config,
         base_url,
         specs,
-        lambda manager, args: manager.annotations_delete(args.run_id, args.key),
+        lambda manager, args: manager.delete_annotation(args.run_id, args.key),
     )

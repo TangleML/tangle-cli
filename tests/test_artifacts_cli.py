@@ -50,16 +50,16 @@ def test_sdk_artifacts_get_cli_config_auth_and_env_isolation(monkeypatch, tmp_pa
         client_calls.append(kwargs)
         return fake_client
 
-    def fake_get_artifacts(run_id: str, query: dict[str, Any], *, client: object) -> dict[str, object]:
-        get_calls.append({"run_id": run_id, "query": query, "client": client})
+    def fake_get_artifacts(self, run_id: str, query: dict[str, Any]) -> dict[str, object]:
+        get_calls.append({"run_id": run_id, "query": query, "client": self._require_client()})
         return {"artifact-config": object()}
 
     monkeypatch.setattr(artifacts_cli, "LazyTangleApiClient", fake_client_from_options)
-    monkeypatch.setattr(artifacts_module, "get_artifacts", fake_get_artifacts)
+    monkeypatch.setattr(artifacts_module.ArtifactManager, "get_artifacts", fake_get_artifacts)
     monkeypatch.setattr(
-        artifacts_module,
-        "_serialize_artifacts",
-        lambda artifacts: [{"id": "artifact-config", "uri": "gs://bucket/config", "key": "artifact-config"}],
+        artifacts_module.ArtifactManager,
+        "serialize_artifacts",
+        staticmethod(lambda artifacts: [{"id": "artifact-config", "uri": "gs://bucket/config", "key": "artifact-config"}]),
     )
 
     app = cli.build_app()
@@ -107,8 +107,8 @@ def test_sdk_artifacts_get_cli_base_url_keeps_env_credentials(monkeypatch, tmp_p
         return object()
 
     monkeypatch.setattr(artifacts_cli, "LazyTangleApiClient", fake_client_from_options)
-    monkeypatch.setattr(artifacts_module, "get_artifacts", lambda *args, **kwargs: {})
-    monkeypatch.setattr(artifacts_module, "_serialize_artifacts", lambda artifacts: [])
+    monkeypatch.setattr(artifacts_module.ArtifactManager, "get_artifacts", lambda self, *args, **kwargs: {})
+    monkeypatch.setattr(artifacts_module.ArtifactManager, "serialize_artifacts", staticmethod(lambda artifacts: []))
 
     app = cli.build_app()
     run_app(

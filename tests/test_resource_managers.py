@@ -8,11 +8,11 @@ from typing import Any
 
 import pytest
 
-from tangle_cli.artifacts import ArtifactManager, get_artifacts, serialize_artifacts
+from tangle_cli.artifacts import ArtifactManager
 from tangle_cli.models import ArtifactInfo
-from tangle_cli.pipeline_run_details import PipelineRunDetails, get_graph_state_output, get_run_details_output
-from tangle_cli.pipeline_run_search import PipelineRunSearch, search_pipeline_runs
-from tangle_cli.secrets import SecretValueError, SecretsManager, create_secret, list_secrets
+from tangle_cli.pipeline_run_details import PipelineRunDetails
+from tangle_cli.pipeline_run_search import PipelineRunSearch
+from tangle_cli.secrets import SecretValueError, SecretsManager
 
 
 class ArtifactClient:
@@ -47,7 +47,7 @@ def test_artifact_manager_lazy_factory_and_public_serialization() -> None:
 
     assert calls == ["created"]
     assert artifacts["artifact-1"].uri == "gs://bucket/artifact-1"
-    assert serialize_artifacts(artifacts) == [
+    assert ArtifactManager.serialize_artifacts(artifacts) == [
         {
             "id": "artifact-1",
             "uri": "gs://bucket/artifact-1",
@@ -56,15 +56,6 @@ def test_artifact_manager_lazy_factory_and_public_serialization() -> None:
             "is_dir": False,
         }
     ]
-
-
-def test_artifact_function_wrapper_delegates_to_manager() -> None:
-    client = ArtifactClient()
-
-    artifacts = get_artifacts("run-1", {"executions": {"exec-1": ["model"]}}, client=client)
-
-    assert artifacts["exec-1/model"].id == "artifact-model"
-    assert client.calls == ["execution:exec-1", "artifact:artifact-model"]
 
 
 class SecretClient:
@@ -120,9 +111,6 @@ def test_secrets_manager_methods_and_function_wrappers(monkeypatch: pytest.Monke
         "secret": {"secret_name": "NEW_SECRET", "description": "demo"},
     }
     assert client.created == [("NEW_SECRET", "super-secret")]
-    assert list_secrets(client)["count"] == 1
-    assert create_secret(client, "WRAPPED", value="wrapped")["action"] == "created"
-
     with pytest.raises(SecretValueError):
         SecretsManager.resolve_secret_value("inline", "SECRET_VALUE")
 
@@ -151,7 +139,7 @@ class SearchClient:
         }
 
 
-def test_pipeline_run_search_class_and_function_wrapper() -> None:
+def test_pipeline_run_search_class() -> None:
     client = SearchClient()
     manager = PipelineRunSearch(client=client)
 
@@ -165,8 +153,6 @@ def test_pipeline_run_search_class_and_function_wrapper() -> None:
         "and": [{"value_contains": {"key": "system/pipeline_run.name", "value_substring": "pulse"}}]
     }
 
-    wrapped = search_pipeline_runs(client=client, query={"and": []}, limit=1)
-    assert wrapped["count"] == 1
 
 
 def test_pipeline_run_search_lazy_factory() -> None:
@@ -213,7 +199,7 @@ class DetailsClient:
         )
 
 
-def test_pipeline_run_details_class_and_function_wrappers() -> None:
+def test_pipeline_run_details_class() -> None:
     client = DetailsClient()
     manager = PipelineRunDetails(client=client)
 
@@ -226,11 +212,9 @@ def test_pipeline_run_details_class_and_function_wrappers() -> None:
         "include_execution_state": False,
         "execution_id": "exec-1",
     }
-    assert get_run_details_output(client, "run-2")["run"]["id"] == "run-2"
 
     graph = manager.get_graph_state_output(["run-1"])
     assert graph["results"][0]["status_totals"] == {"SUCCEEDED": 1}
-    assert get_graph_state_output(client, ["exec-root"])["results"][0]["root_execution_id"] == "exec-root"
 
 
 def test_pipeline_run_details_lazy_factory() -> None:
@@ -286,14 +270,13 @@ assert PipelineRunnerHooks is not None
 
 def test_resource_manager_import_surface() -> None:
     from tangle_cli.artifacts import ArtifactManager as ImportedArtifactManager
-    from tangle_cli.artifacts import serialize_artifacts as imported_serialize_artifacts
     from tangle_cli.pipeline_run_details import PipelineRunDetails as ImportedPipelineRunDetails
     from tangle_cli.pipeline_run_search import PipelineRunSearch as ImportedPipelineRunSearch
     from tangle_cli.pipeline_runner import PipelineRunner as ImportedPipelineRunner
     from tangle_cli.secrets import SecretsManager as ImportedSecretsManager
 
     assert ImportedArtifactManager is ArtifactManager
-    assert imported_serialize_artifacts({"a": ArtifactInfo(id="a", uri="u", key="a")})[0]["id"] == "a"
+    assert ArtifactManager.serialize_artifacts({"a": ArtifactInfo(id="a", uri="u", key="a")})[0]["id"] == "a"
     assert ImportedSecretsManager is SecretsManager
     assert ImportedPipelineRunSearch is PipelineRunSearch
     assert ImportedPipelineRunDetails is PipelineRunDetails

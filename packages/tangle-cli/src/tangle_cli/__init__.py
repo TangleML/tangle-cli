@@ -6,6 +6,14 @@ Import ``tangle_cli.client.TangleApiClient`` explicitly when those generated
 bindings are available.
 """
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as metadata_version
+
 from tangle_cli.dynamic_discovery_client import TangleDynamicDiscoveryClient
 
-__all__ = ["TangleDynamicDiscoveryClient"]
+try:
+    __version__ = metadata_version("tangle-cli")
+except PackageNotFoundError:
+    __version__ = "0.0.1"
+
+__all__ = ["TangleDynamicDiscoveryClient", "__version__"]

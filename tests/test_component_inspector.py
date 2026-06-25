@@ -8,13 +8,7 @@ from typing import Any
 import pytest
 
 from tangle_cli import component_inspector
-from tangle_cli.component_inspector import (
-    get_standard_library,
-    inspect_by_digest,
-    inspect_by_name,
-    search_components,
-    transparency_check,
-)
+from tangle_cli.component_inspector import ComponentInspector
 from tangle_cli.models import ComponentInfo, ComponentSpec
 
 
@@ -85,7 +79,7 @@ class TestTransparencyCheck:
             },
         })
 
-        transparent, reason = transparency_check(spec)
+        transparent, reason = ComponentInspector.transparency_check(spec)
 
         assert transparent is True
         assert "standard public base image" in reason
@@ -98,7 +92,7 @@ class TestTransparencyCheck:
             },
         })
 
-        transparent, reason = transparency_check(spec)
+        transparent, reason = ComponentInspector.transparency_check(spec)
 
         assert transparent is False
         assert "no inline source" in reason
@@ -125,7 +119,7 @@ class TestComponentLibrary:
 
         client = LibraryClient()
 
-        library = get_standard_library(client)
+        library = ComponentInspector(client=client).get_standard_library()
 
         assert client.paths == ["/component_library.yaml"]
         assert library["folders"][0]["components"][0] == {
@@ -155,7 +149,7 @@ class TestComponentLibrary:
 
         client = LibraryClient()
 
-        library = get_standard_library(client)
+        library = ComponentInspector(client=client).get_standard_library()
 
         assert client.paths == ["/component_library.yaml", "/components/demo.yaml"]
         assert library["folders"][0]["components"][0]["spec"]["name"] == "demo"
@@ -192,8 +186,8 @@ class TestComponentLibrary:
         first_client = LibraryFallbackClient("private-a")
         second_client = LibraryFallbackClient(None)
 
-        first_result = inspect_by_name(first_client, "private-a")
-        second_result = inspect_by_name(second_client, "private-a")
+        first_result = ComponentInspector(client=first_client).inspect_by_name("private-a")
+        second_result = ComponentInspector(client=second_client).inspect_by_name("private-a")
 
         assert first_result["status"] == "success"
         assert second_result["status"] == "not_found"
@@ -203,7 +197,7 @@ class TestComponentLibrary:
 
 class TestInspectComponents:
     def test_inspect_by_digest_merges_spec_and_publication_metadata(self):
-        result = inspect_by_digest(FakeClient(), "abc123")
+        result = ComponentInspector(client=FakeClient()).inspect_by_digest("abc123")
 
         assert result["status"] == "success"
         assert result["name"] == "demo"
@@ -213,7 +207,7 @@ class TestInspectComponents:
         assert "implementation" not in result["spec"]
 
     def test_inspect_by_digest_can_follow_deprecated_chain(self):
-        result = inspect_by_digest(FakeClient(), "old", follow_deprecated=True)
+        result = ComponentInspector(client=FakeClient()).inspect_by_digest("old", follow_deprecated=True)
 
         assert result["status"] == "success"
         assert result["digest"] == "abc123"
@@ -225,7 +219,7 @@ class TestInspectComponents:
                     return [ComponentInfo(name="demo", digest="abc123")]
                 return super().list_published_component_infos(**params)
 
-        result = inspect_by_digest(MissingPublishedVersionClient(), "abc123")
+        result = ComponentInspector(client=MissingPublishedVersionClient()).inspect_by_digest("abc123")
 
         assert result["status"] == "success"
         assert result["version"] == "1.2.3"
@@ -237,13 +231,13 @@ class TestInspectComponents:
                     return [ComponentInfo(name="demo", digest="abc123")]
                 return super().list_published_component_infos(**params)
 
-        result = inspect_by_name(MissingPublishedVersionClient(), "demo")
+        result = ComponentInspector(client=MissingPublishedVersionClient()).inspect_by_name("demo")
 
         assert result["status"] == "success"
         assert result["versions"][0]["version"] == "1.2.3"
 
     def test_inspect_by_name_returns_matching_versions(self):
-        result = inspect_by_name(FakeClient(), "demo")
+        result = ComponentInspector(client=FakeClient()).inspect_by_name("demo")
 
         assert result["status"] == "success"
         assert result["name"] == "demo"
@@ -251,7 +245,7 @@ class TestInspectComponents:
         assert result["versions"][0]["digest"] == "abc123"
 
     def test_search_components_returns_summary_rows(self):
-        result = search_components(FakeClient(), name="demo")
+        result = ComponentInspector(client=FakeClient()).search_components(name="demo")
 
         assert result == {
             "status": "success",
@@ -271,6 +265,6 @@ class TestInspectComponents:
             def list_published_component_infos(self, **params: Any) -> list[ComponentInfo]:
                 return [ComponentInfo(name="demo", digest="abc123", description=None)]
 
-        result = search_components(NullDescriptionClient(), name="demo")
+        result = ComponentInspector(client=NullDescriptionClient()).search_components(name="demo")
 
         assert result["components"][0]["description"] == ""

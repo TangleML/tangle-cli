@@ -52,30 +52,6 @@ def _client_from_options(
     )
 
 
-def search_components(*args: Any, **kwargs: Any) -> Any:
-    from .component_inspector import search_components as _search_components
-
-    return _search_components(*args, **kwargs)
-
-
-def inspect_by_digest(*args: Any, **kwargs: Any) -> Any:
-    from .component_inspector import inspect_by_digest as _inspect_by_digest
-
-    return _inspect_by_digest(*args, **kwargs)
-
-
-def inspect_by_name(*args: Any, **kwargs: Any) -> Any:
-    from .component_inspector import inspect_by_name as _inspect_by_name
-
-    return _inspect_by_name(*args, **kwargs)
-
-
-def get_standard_library(*args: Any, **kwargs: Any) -> Any:
-    from .component_inspector import get_standard_library as _get_standard_library
-
-    return _get_standard_library(*args, **kwargs)
-
-
 app = App(
     name="published-components",
     help="Inspect and search published Tangle components from the registry.",
@@ -125,9 +101,10 @@ def published_components_search(
             if require_available := getattr(client, "require_available", None):
                 require_available()
 
+            from .component_inspector import ComponentInspector
+
             print_json(
-                search_components(
-                    client,
+                ComponentInspector(client=client, logger=logger, base_url=args.base_url).search_components(
                     name=args.name,
                     include_deprecated=bool(args.include_deprecated),
                     published_by=args.published_by,
@@ -189,16 +166,17 @@ def published_components_inspect(
             )
             if require_available := getattr(client, "require_available", None):
                 require_available()
+            from .component_inspector import ComponentInspector
+
+            inspector = ComponentInspector(client=client, logger=logger, base_url=args.base_url)
             if args.digest:
-                result = inspect_by_digest(
-                    client,
+                result = inspector.inspect_by_digest(
                     args.digest,
                     full_spec=bool(args.full_spec),
                     follow_deprecated=bool(args.follow_deprecated),
                 )
             else:
-                result = inspect_by_name(
-                    client,
+                result = inspector.inspect_by_name(
                     args.name or "",
                     include_all_versions=bool(args.all_versions),
                     include_deprecated=bool(args.include_deprecated),
@@ -245,7 +223,9 @@ def published_components_library(
             if require_available := getattr(client, "require_available", None):
                 require_available()
 
-            print_json(get_standard_library(client))
+            from .component_inspector import ComponentInspector
+
+            print_json(ComponentInspector(client=client, logger=logger, base_url=args.base_url).get_standard_library())
         finally:
             finalize_logs()
 

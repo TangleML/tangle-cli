@@ -26,13 +26,15 @@ from .handler import TangleCliHandler
 from .logger import Logger, get_default_logger
 from .pipeline_dehydrator import DehydrateChoice, PipelineDehydrator
 from .pipeline_hydrator import HydrationError, PipelineHydrator
-from .pipeline_run_details import get_graph_state_output, get_run_details_output
-from .pipeline_run_search import search_pipeline_runs
+from .pipeline_run_details import PipelineRunDetails
+from .pipeline_run_search import PipelineRunSearch
 from .utils import dump_yaml
 
 _TERMINAL_STATUSES = ("FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "SKIPPED", "SUCCEEDED", "INVALID")
 _ACTIVE_STATUSES = ("RUNNING", "CANCELLING", "CANCELING", "PENDING", "QUEUED")
 _FAILURE_EARLY_EXIT_STATUSES = ("FAILED", "SYSTEM_ERROR")
+_EXECUTION_STATE_TIMINGS_METADATA_KEY = "execution_state_timings"
+_EXECUTION_STATE_TIMING_MONOTONIC_METADATA_KEY = "_execution_state_timing_monotonic"
 
 
 class PipelineRunError(RuntimeError):
@@ -290,6 +292,7 @@ class PipelineWaitPoll:
     terminal: bool
     graph_state: dict[str, Any] | None = None
     elapsed_seconds: float = 0.0
+    execution_state_timings: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -755,6 +758,32 @@ class PipelineRunManager(TangleCliHandler):
         return totals
 
     @staticmethod
+    def execution_status_counts_from_graph_state(graph_state: Mapping[str, Any] | Any) -> dict[str, dict[str, int]]:
+        """Return per-execution status counts from a graph-state response."""
+
+        child_stats = (
+            graph_state.get("child_execution_status_stats")
+            if isinstance(graph_state, Mapping)
+            else getattr(graph_state, "child_execution_status_stats", None)
+        )
+        child_counts = PipelineRunManager._counts_mapping(child_stats)
+        if child_counts is None:
+            return {}
+        result: dict[str, dict[str, int]] = {}
+        for execution_id, stats in child_counts.items():
+            counts = PipelineRunManager._counts_mapping(stats)
+            if counts is None:
+                continue
+            status_counts: dict[str, int] = {}
+            for status, count in counts.items():
+                try:
+                    status_counts[str(status).upper()] = int(count or 0)
+                except (TypeError, ValueError):
+                    continue
+            result[str(execution_id)] = status_counts
+        return result
+
+    @staticmethod
     def status_from_counts(status_counts: Mapping[str, int]) -> str | None:
         for status in _ACTIVE_STATUSES:
             if int(status_counts.get(status, 0) or 0) > 0:
@@ -1127,8 +1156,7 @@ class PipelineRunManager(TangleCliHandler):
         include_implementations: bool = False,
         execution_id: str | None = None,
     ) -> dict[str, Any]:
-        return get_run_details_output(
-            self.client,
+        return PipelineRunDetails(client=self.client).get_run_details_output(
             run_id,
             include_implementations=include_implementations,
             include_annotations=include_annotations,
@@ -1144,7 +1172,7 @@ class PipelineRunManager(TangleCliHandler):
         return self.to_plain(graph_state)
 
     def graph_state_output(self, run_ids: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
-        return get_graph_state_output(self.client, run_ids, timeout=timeout)
+        return PipelineRunDetails(client=self.client).get_graph_state_output(run_ids, timeout=timeout)
 
     def logs(self, execution_id: str) -> dict[str, Any]:
         return self.to_plain(self.hooks.fetch_logs(self.client, execution_id))
@@ -1181,8 +1209,7 @@ class PipelineRunManager(TangleCliHandler):
         limit: int = 10,
         page_token: str | None = None,
     ) -> dict[str, Any]:
-        return search_pipeline_runs(
-            client=self.client,
+        return PipelineRunSearch(client=self.client, logger=self.logger).search(
             name=name,
             created_by=created_by,
             annotations=annotations,
@@ -1192,19 +1219,7 @@ class PipelineRunManager(TangleCliHandler):
             query=query,
             limit=limit,
             page_token=page_token,
-            logger=self.logger,
         )
-
-    def annotations_list(self, run_id: str) -> dict[str, Any]:
-        return self.to_plain(self.client.pipeline_runs_annotations(run_id))
-
-    def annotations_set(self, run_id: str, key: str, value: Any) -> dict[str, Any]:
-        self.client.pipeline_runs_put_annotations(run_id, key, value=value)
-        return {"id": run_id, "key": key, "value": value}
-
-    def annotations_delete(self, run_id: str, key: str) -> dict[str, Any]:
-        self.client.pipeline_runs_delete_annotations(run_id, key)
-        return {"id": run_id, "key": key, "deleted": True}
 
     def export_run(
         self,
@@ -1257,6 +1272,58 @@ class PipelineRunManager(TangleCliHandler):
             result["config_path"] = str(config_path)
         return result
 
+    def _update_execution_state_timings(
+        self,
+        context: PipelineRunContext,
+        graph_state: Mapping[str, Any] | Any,
+    ) -> dict[str, dict[str, Any]]:
+        """Track how long each execution has stayed in its observed state."""
+
+        execution_status_counts = self.execution_status_counts_from_graph_state(graph_state)
+        if not execution_status_counts:
+            context.metadata[_EXECUTION_STATE_TIMINGS_METADATA_KEY] = {}
+            context.metadata[_EXECUTION_STATE_TIMING_MONOTONIC_METADATA_KEY] = {}
+            return {}
+
+        existing_value = context.metadata.get(_EXECUTION_STATE_TIMINGS_METADATA_KEY)
+        existing = existing_value if isinstance(existing_value, Mapping) else {}
+        monotonic_value = context.metadata.get(_EXECUTION_STATE_TIMING_MONOTONIC_METADATA_KEY)
+        monotonic_state_entered = monotonic_value if isinstance(monotonic_value, Mapping) else {}
+        now_wall = time.time()
+        now_monotonic = time.monotonic()
+        timings: dict[str, dict[str, Any]] = {}
+        next_monotonic_state_entered: dict[str, float] = {}
+
+        for execution_id, status_counts in execution_status_counts.items():
+            state = self.status_from_counts(status_counts) or "UNKNOWN"
+            existing_record = existing.get(execution_id)
+            previous = existing_record if isinstance(existing_record, Mapping) else {}
+            previous_state = previous.get("state")
+            if previous_state == state:
+                try:
+                    state_entered_at = float(previous.get("state_entered_at", now_wall))
+                except (TypeError, ValueError):
+                    state_entered_at = now_wall
+                try:
+                    state_entered_monotonic = float(monotonic_state_entered.get(execution_id, now_monotonic))
+                except (TypeError, ValueError):
+                    state_entered_monotonic = now_monotonic
+            else:
+                state_entered_at = now_wall
+                state_entered_monotonic = now_monotonic
+
+            timings[execution_id] = {
+                "state": state,
+                "state_entered_at": state_entered_at,
+                "elapsed_seconds": max(0.0, now_monotonic - state_entered_monotonic),
+                "last_observed_at": now_wall,
+            }
+            next_monotonic_state_entered[execution_id] = state_entered_monotonic
+
+        context.metadata[_EXECUTION_STATE_TIMINGS_METADATA_KEY] = timings
+        context.metadata[_EXECUTION_STATE_TIMING_MONOTONIC_METADATA_KEY] = next_monotonic_state_entered
+        return copy.deepcopy(timings)
+
     def _poll_run_status(
         self,
         run_id: str,
@@ -1273,6 +1340,7 @@ class PipelineRunManager(TangleCliHandler):
         if not isinstance(run, dict):
             run = {}
         graph_state: dict[str, Any] | None = None
+        execution_state_timings: dict[str, dict[str, Any]] = {}
         status_counts = self.status_counts_from_run(run)
         if use_graph_state:
             root_execution_id = self.hooks.graph_state_execution_id(run, wait_context)
@@ -1281,6 +1349,7 @@ class PipelineRunManager(TangleCliHandler):
                 graph_counts = self.status_counts_from_graph_state(graph_state)
                 if graph_counts:
                     status_counts = graph_counts
+                execution_state_timings = self._update_execution_state_timings(wait_context, graph_state)
         status = self.status_from_counts(status_counts) or self.status_from_run(run) or "UNKNOWN"
         terminal = self.is_terminal_status(status) or status == "ENDED"
         total = sum(status_counts.values())
@@ -1296,6 +1365,7 @@ class PipelineRunManager(TangleCliHandler):
             terminal=terminal,
             graph_state=graph_state if isinstance(graph_state, dict) else None,
             elapsed_seconds=time.monotonic() - started_at,
+            execution_state_timings=execution_state_timings,
         )
 
     def wait_for_completion(

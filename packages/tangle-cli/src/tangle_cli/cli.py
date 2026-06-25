@@ -1,13 +1,22 @@
 from cyclopts import App
 
-from . import api_cli
-from . import artifacts_cli
-from . import components_cli
-from . import pipeline_runs_cli
-from . import pipelines_cli
-from . import published_components_cli
-from . import quickstart
-from . import secrets_cli
+from . import (
+    __version__,
+    api_cli,
+    artifacts_cli,
+    components_cli,
+    pipeline_runs_cli,
+    pipelines_cli,
+    published_components_cli,
+    quickstart,
+    secrets_cli,
+)
+
+
+def version() -> None:
+    """Print the installed tangle-cli package version."""
+
+    print(__version__)
 
 
 def build_sdk_app() -> App:
@@ -31,8 +40,9 @@ def build_app() -> App:
 
     app = App(
         help="CLI for Tangle, the open-source ML pipeline orchestration platform.",
-        version="0.0.1",
+        version=__version__,
     )
+    app.command(name="version")(version)
     app.command(quickstart.app)
     app.command(api_cli.build_app())
     app.command(build_sdk_app())

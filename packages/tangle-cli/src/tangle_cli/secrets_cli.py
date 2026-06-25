@@ -24,7 +24,7 @@ from .cli_options import (
     TokenOption,
 )
 from .logger import Logger, logger_for_log_type
-from .secrets import SecretValueError
+from .secrets import SecretsManager, SecretValueError
 
 ValueOption = Annotated[
     str | None,
@@ -143,9 +143,7 @@ def secrets_list(
     }
 
     def action(client: Any, args: ArgsContainer, logger: Logger) -> dict[str, Any]:
-        from .secrets import list_secrets
-
-        result = list_secrets(client)
+        result = SecretsManager(client=client).list()
         logger.info(f"Listed {result['count']} secret(s).")
         return result
 
@@ -183,10 +181,7 @@ def secrets_create(
     )
 
     def action(client: Any, args: ArgsContainer, logger: Logger) -> dict[str, Any]:
-        from .secrets import create_secret
-
-        result = create_secret(
-            client,
+        result = SecretsManager(client=client).create(
             args.secret_name,
             value=args.value,
             from_env=args.from_env,
@@ -230,10 +225,7 @@ def secrets_update(
     )
 
     def action(client: Any, args: ArgsContainer, logger: Logger) -> dict[str, Any]:
-        from .secrets import update_secret
-
-        result = update_secret(
-            client,
+        result = SecretsManager(client=client).update(
             args.secret_name,
             value=args.value,
             from_env=args.from_env,
@@ -268,11 +260,9 @@ def secrets_delete(
     }
 
     def action(client: Any, args: ArgsContainer, logger: Logger) -> dict[str, Any]:
-        from .secrets import delete_secret
-
         if not args.force:
             _confirm_delete(args.secret_name)
-        result = delete_secret(client, args.secret_name)
+        result = SecretsManager(client=client).delete(args.secret_name)
         logger.info(f"Deleted secret: {args.secret_name}")
         return result
 

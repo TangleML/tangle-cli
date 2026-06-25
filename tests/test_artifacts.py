@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from tangle_cli.artifacts import get_artifacts, _serialize_artifacts
+from tangle_cli.artifacts import ArtifactManager
 
 
 def _artifact_response(artifact_id: str, uri: str) -> SimpleNamespace:
@@ -75,10 +75,9 @@ def test_get_artifacts_resolves_direct_artifact_ids_without_run_tree() -> None:
         "artifact-2": _artifact_response("artifact-2", "gs://bucket/artifact-2"),
     }
 
-    artifacts = get_artifacts(
+    artifacts = ArtifactManager(client=client).get_artifacts(
         "run-1",
         {"artifact_ids": ["artifact-1", "artifact-2"]},
-        client=client,
     )
 
     assert list(artifacts) == ["artifact-1", "artifact-2"]
@@ -95,7 +94,7 @@ def test_get_artifacts_resolves_execution_output_lookup() -> None:
     )
     client.artifact_responses["artifact-model"] = _artifact_response("artifact-model", "gs://bucket/model")
 
-    artifacts = get_artifacts("run-1", {"executions": {"exec-1": ["model"]}}, client=client)
+    artifacts = ArtifactManager(client=client).get_artifacts("run-1", {"executions": {"exec-1": ["model"]}})
 
     assert list(artifacts) == ["exec-1/model"]
     assert artifacts["exec-1/model"].id == "artifact-model"
@@ -117,7 +116,7 @@ def test_get_artifacts_resolves_task_query_from_run_details_tree() -> None:
     )
     client.artifact_responses["artifact-model"] = _artifact_response("artifact-model", "gs://bucket/model")
 
-    artifacts = get_artifacts("run-1", {"tasks": {"Train": ["model"]}}, client=client)
+    artifacts = ArtifactManager(client=client).get_artifacts("run-1", {"tasks": {"Train": ["model"]}})
 
     assert list(artifacts) == ["Train/model"]
     assert artifacts["Train/model"].uri == "gs://bucket/model"
@@ -137,7 +136,7 @@ def test_get_artifacts_resolves_component_name_and_digest_queries() -> None:
     client.artifact_responses["artifact-vectors"] = _artifact_response("artifact-vectors", "gs://bucket/vectors")
     client.artifact_responses["artifact-scores"] = _artifact_response("artifact-scores", "gs://bucket/scores")
 
-    artifacts = get_artifacts(
+    artifacts = ArtifactManager(client=client).get_artifacts(
         "run-1",
         {
             "components": [
@@ -145,7 +144,6 @@ def test_get_artifacts_resolves_component_name_and_digest_queries() -> None:
                 {"digest": "sha256:score"},
             ]
         },
-        client=client,
     )
 
     assert list(artifacts) == ["Embed/vectors", "Score/scores"]
@@ -169,13 +167,12 @@ def test_get_artifacts_unions_outputs_from_multiple_matching_selectors() -> None
     client.artifact_responses["artifact-model"] = _artifact_response("artifact-model", "gs://bucket/model")
     client.artifact_responses["artifact-metrics"] = _artifact_response("artifact-metrics", "gs://bucket/metrics")
 
-    artifacts = get_artifacts(
+    artifacts = ArtifactManager(client=client).get_artifacts(
         "run-1",
         {
             "tasks": {"Train": ["model"]},
             "components": [{"digest": "sha256:trainer", "outputs": ["metrics"]}],
         },
-        client=client,
     )
 
     assert list(artifacts) == ["Train/model", "Train/metrics"]
@@ -196,7 +193,7 @@ def test_get_artifacts_resolves_nested_subgraph_task_paths() -> None:
     )
     client.artifact_responses["artifact-inner"] = _artifact_response("artifact-inner", "gs://bucket/inner")
 
-    artifacts = get_artifacts("run-1", {"tasks": {"Subgraph/Inner": ["out"]}}, client=client)
+    artifacts = ArtifactManager(client=client).get_artifacts("run-1", {"tasks": {"Subgraph/Inner": ["out"]}})
 
     assert list(artifacts) == ["Subgraph/Inner/out"]
     assert artifacts["Subgraph/Inner/out"].uri == "gs://bucket/inner"
@@ -207,14 +204,14 @@ def test_get_artifacts_serializes_per_artifact_lookup_errors() -> None:
     client.artifact_responses["good"] = _artifact_response("good", "gs://bucket/good")
     client.artifact_errors["bad"] = RuntimeError("not found")
 
-    artifacts = get_artifacts("run-1", {"artifact_ids": ["good", "bad"]}, client=client)
+    artifacts = ArtifactManager(client=client).get_artifacts("run-1", {"artifact_ids": ["good", "bad"]})
 
     assert artifacts["good"].uri == "gs://bucket/good"
     assert artifacts["bad"].id == "bad"
     assert artifacts["bad"].uri == ""
     assert artifacts["bad"].error == "not found"
 
-    serialized = _serialize_artifacts(artifacts)
+    serialized = ArtifactManager.serialize_artifacts(artifacts)
     assert {entry["key"]: entry for entry in serialized}["bad"] == {
         "id": "bad",
         "uri": "",
@@ -230,4 +227,4 @@ def test_get_artifacts_requires_execution_details_for_task_queries() -> None:
     client.run_details["run-1"] = SimpleNamespace(execution=None)
 
     with pytest.raises(RuntimeError, match="No execution details"):
-        get_artifacts("run-1", {"tasks": {"Train": []}}, client=client)
+        ArtifactManager(client=client).get_artifacts("run-1", {"tasks": {"Train": []}})

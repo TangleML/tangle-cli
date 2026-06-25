@@ -3,7 +3,7 @@
 This module is native-free and API-client agnostic.  It builds Tangle search
 ``filter_query`` payloads, resolves ``created_by=me`` via ``users_me()``, and
 formats results for CLI/MCP consumers.  Downstreams such as tangle-deploy can
-wrap these helpers with Shopify auth and legacy Typer entry points.
+subclass ``PipelineRunSearch`` with Shopify-authenticated client creation.
 """
 
 from __future__ import annotations
@@ -13,10 +13,10 @@ import re
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from collections.abc import Callable
 from typing import Any
 
-from .logger import Logger, get_default_logger
+from .handler import TangleCliHandler
+from .logger import Logger
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _MAX_PIPELINE_NAME_WIDTH = 50
@@ -40,33 +40,24 @@ class PageChunk:
     next_ui_filter_url: str | None
 
 
-class PipelineRunSearch:
+class PipelineRunSearch(TangleCliHandler):
     """Resource manager for pipeline-run search/filter behavior.
 
     The class is intentionally native-free. Downstream packages can inject an
     authenticated client or lazy ``client_factory`` and subclass the formatting
-    or predicate builders while the legacy module-level functions remain
-    available.
+    or predicate builders.
     """
 
     def __init__(
         self,
         client: Any = None,
         *,
-        client_factory: Callable[[], Any] | None = None,
+        client_factory: Any | None = None,
         logger: Logger | None = None,
+        **kwargs: Any,
     ) -> None:
-        self._client = client
-        self._client_factory = client_factory
-        self.logger = logger or get_default_logger()
-
-    @property
-    def client(self) -> Any:
-        if self._client is None:
-            if self._client_factory is None:
-                raise ValueError("PipelineRunSearch requires a client or client_factory")
-            self._client = self._client_factory()
-        return self._client
+        super().__init__(client=client, client_factory=client_factory, logger=logger, **kwargs)
+        self.logger = self.log
 
     @staticmethod
     def build_predicate(*, predicate_type: str, **fields: Any) -> dict[str, Any]:
@@ -141,7 +132,7 @@ class PipelineRunSearch:
         )
 
     def resolve_created_by(self, *, created_by: str | None) -> tuple[str | None, dict[str, Any] | None]:
-        return resolve_created_by(created_by=created_by, client=self.client, logger=self.logger)
+        return resolve_created_by(created_by=created_by, client=self._require_client(), logger=self.logger)
 
     def resolve_dates(
         self,
@@ -173,7 +164,7 @@ class PipelineRunSearch:
         end_date: str | None,
     ) -> tuple[list[dict[str, Any]], list[PageChunk], str | None]:
         return fetch_pipeline_run_search_pages(
-            client=self.client,
+            client=self._require_client(),
             filter_query_str=filter_query_str,
             limit=limit,
             page_token=page_token,
@@ -232,7 +223,7 @@ class PipelineRunSearch:
         )
         filter_query_str = json.dumps(filter_query_dict, separators=(",", ":")) if filter_query_dict else None
         self.logger.info(f"Searching pipeline runs (limit={limit})...")
-        base_url = getattr(self.client, "base_url", "").rstrip("/")
+        base_url = getattr(self._require_client(), "base_url", "").rstrip("/")
         all_rows, page_chunks, final_next_token = self.fetch_pages(
             filter_query_str=filter_query_str,
             limit=limit,
@@ -719,32 +710,3 @@ def build_pipeline_run_search_result(
         "next_page_token": final_next_token,
         "ui_filter_url": first_ui_url,
     }
-
-
-def search_pipeline_runs(
-    *,
-    client: Any,
-    name: str | None = None,
-    created_by: str | None = None,
-    annotations: dict[str, str | None] | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    local_time: bool = False,
-    query: dict[str, Any] | None = None,
-    limit: int = 10,
-    page_token: str | None = None,
-    logger: Logger | None = None,
-) -> dict[str, Any]:
-    """Backward-compatible wrapper for :meth:`PipelineRunSearch.search`."""
-
-    return PipelineRunSearch(client=client, logger=logger).search(
-        name=name,
-        created_by=created_by,
-        annotations=annotations,
-        start_date=start_date,
-        end_date=end_date,
-        local_time=local_time,
-        query=query,
-        limit=limit,
-        page_token=page_token,
-    )

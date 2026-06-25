@@ -297,33 +297,38 @@ def test_sdk_published_components_commands_call_inspection_helpers(monkeypatch, 
         "_client_from_options",
         fake_client_from_options,
     )
+    from tangle_cli import component_inspector
+
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector.ComponentInspector,
         "search_components",
-        lambda client, **kwargs: {"client_ok": client is fake_client, "search": kwargs},
+        lambda self, **kwargs: {"client_ok": self._require_client() is fake_client, "search": kwargs},
     )
+
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector.ComponentInspector,
         "inspect_by_name",
-        lambda client, name, **kwargs: {
-            "client_ok": client is fake_client,
+        lambda self, name, **kwargs: {
+            "client_ok": self._require_client() is fake_client,
             "name": name,
             "inspect": kwargs,
         },
     )
+
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector.ComponentInspector,
         "inspect_by_digest",
-        lambda client, digest, **kwargs: {
-            "client_ok": client is fake_client,
+        lambda self, digest, **kwargs: {
+            "client_ok": self._require_client() is fake_client,
             "digest": digest,
             "inspect": kwargs,
         },
     )
+
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector.ComponentInspector,
         "get_standard_library",
-        lambda client: {"client_ok": client is fake_client, "folders": []},
+        lambda self: {"client_ok": self._require_client() is fake_client, "folders": []},
     )
 
     run_app(
@@ -419,10 +424,12 @@ def test_sdk_published_components_search_uses_config_with_cli_precedence(monkeyp
         return fake_client
 
     monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    from tangle_cli import component_inspector
+
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector.ComponentInspector,
         "search_components",
-        lambda client, **kwargs: {"client_ok": client is fake_client, "search": kwargs},
+        lambda self, **kwargs: {"client_ok": self._require_client() is fake_client, "search": kwargs},
     )
 
     run_app(
@@ -476,19 +483,22 @@ def test_sdk_published_components_inspect_and_library_use_config(monkeypatch, tm
         return fake_client
 
     monkeypatch.setattr(published_components_cli, "_client_from_options", fake_client_from_options)
+    from tangle_cli import component_inspector
+
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector.ComponentInspector,
         "inspect_by_digest",
-        lambda client, digest, **kwargs: {
-            "client_ok": client is fake_client,
+        lambda self, digest, **kwargs: {
+            "client_ok": self._require_client() is fake_client,
             "digest": digest,
             "inspect": kwargs,
         },
     )
+
     monkeypatch.setattr(
-        published_components_cli,
+        component_inspector.ComponentInspector,
         "get_standard_library",
-        lambda client: {"client_ok": client is fake_client},
+        lambda self: {"client_ok": self._require_client() is fake_client},
     )
 
     run_app(

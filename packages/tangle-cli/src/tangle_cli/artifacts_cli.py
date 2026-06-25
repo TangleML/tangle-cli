@@ -7,8 +7,8 @@ from typing import Annotated, Any
 from cyclopts import App, Parameter
 
 from .cli_helpers import (
-    api_arg_specs,
     LazyTangleApiClient,
+    api_arg_specs,
     include_env_credentials_for_args,
     load_args_or_exit,
     print_json,
@@ -83,10 +83,11 @@ def artifacts_get(
             )
             if require_available := getattr(client, "require_available", None):
                 require_available()
-            from .artifacts import _serialize_artifacts, get_artifacts
+            from .artifacts import ArtifactManager
 
+            manager = ArtifactManager(client=client)
             try:
-                artifacts = get_artifacts(args.run_id, args.query, client=client)
+                artifacts = manager.get_artifacts(args.run_id, args.query)
             except RuntimeError as exc:
                 print_json({"status": "error", "error": str(exc)})
                 raise SystemExit(1) from exc
@@ -96,7 +97,7 @@ def artifacts_get(
                     "status": "success",
                     "run_id": args.run_id,
                     "count": len(artifacts),
-                    "artifacts": _serialize_artifacts(artifacts),
+                    "artifacts": ArtifactManager.serialize_artifacts(artifacts),
                 }
             )
         finally:

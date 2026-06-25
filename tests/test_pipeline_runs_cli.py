@@ -495,7 +495,9 @@ def test_pipeline_runs_commands_call_generated_operations(monkeypatch, tmp_path:
     assert fake_client.list_calls[-1]["filter_query"] == "status:running"
 
     run_app(app, ["sdk", "pipeline-runs", "annotations", "list", "run-1"])
-    assert json.loads(capsys.readouterr().out)["owner"] == "alice"
+    annotation_result = json.loads(capsys.readouterr().out)
+    assert annotation_result["annotations"]["owner"] == "alice"
+    assert annotation_result["count"] == 2
 
     run_app(app, ["sdk", "pipeline-runs", "annotations", "set", "run-1", "owner", "bob"])
     assert fake_client.annotation_sets == [("run-1", "owner", "bob")]

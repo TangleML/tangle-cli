@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 from weakref import WeakKeyDictionary
 
 import yaml
 
-from tangle_cli.client import TangleApiClient
+from tangle_cli.handler import TangleCliHandler
 from tangle_cli.models import ComponentInfo, ComponentSpec
+
+if TYPE_CHECKING:
+    from tangle_cli.client import TangleApiClient
 
 # ============================================================================
 # Client helpers
@@ -33,11 +36,6 @@ def _request_path(client: TangleApiClient, path: str) -> Any:
         response = client._make_request("GET", path)
     response.raise_for_status()
     return response
-
-
-def _is_not_found_error(exc: Exception) -> bool:
-    response = getattr(exc, "response", None)
-    return getattr(response, "status_code", None) == 404
 
 
 def _published_components(
@@ -198,67 +196,247 @@ def _ensure_library_loaded(client: TangleApiClient) -> _LibraryState:
     return state
 
 
-def get_standard_library(client: TangleApiClient) -> dict[str, Any]:
-    """Return the standard component library organised by folders.
+class ComponentInspector(TangleCliHandler):
+    """Inspector for published component metadata and specs.
 
-    Each component entry has a stripped spec (no implementation blocks), an
-    optional ``url``, and a ``digest``.
+    Generic inspection and search behavior lives here. Downstreams provide an
+    authenticated client by subclassing the shared handler or by passing
+    ``client=`` explicitly in tests/callers.
     """
 
-    library_full, _ = _ensure_library_loaded(client)
-    return {
-        "folders": [
-            {
-                "name": folder.get("name"),
-                "components": [_strip_entry(comp) for comp in folder.get("components", [])],
+    def get_standard_library(self) -> dict[str, Any]:
+        """Return the standard component library organised by folders.
+
+        Each component entry has a stripped spec (no implementation blocks), an
+        optional ``url``, and a ``digest``.
+        """
+
+        library_full, _ = _ensure_library_loaded(self._require_client())
+        return {
+            "folders": [
+                {
+                    "name": folder.get("name"),
+                    "components": [_strip_entry(comp) for comp in folder.get("components", [])],
+                }
+                for folder in library_full.get("folders", [])
+            ],
+        }
+
+    def inspect_by_digest(
+        self,
+        digest: str,
+        full_spec: bool = False,
+        follow_deprecated: bool = False,
+    ) -> dict[str, Any]:
+        """Inspect a single component by digest.
+
+        Fetches the full spec and publication metadata via static client helpers.
+        """
+
+        client = self._require_client()
+        if follow_deprecated:
+            resolved = _resolve_digest(client, digest)
+            if resolved != digest:
+                digest = resolved
+
+        comp = _get_component_spec(client, digest)
+        if comp is None:
+            _, library_cache = _ensure_library_loaded(client)
+            for entry in library_cache.values():
+                if entry.get("digest") == digest:
+                    out = _strip_entry(entry) if not full_spec else dict(entry)
+                    return {
+                        "status": "success",
+                        "source": "component_library",
+                        "transparent": True,
+                        "transparency_reason": "curated standard component from the component library",
+                        "name": (entry.get("spec") or {}).get("name", ""),
+                        **out,
+                    }
+            return {"status": "not_found", "digest": digest, "error": f"Component not found: {digest}"}
+
+        published = _published_components(client, digest=digest, include_deprecated=True)
+        pub_info = published[0] if published else None
+
+        if pub_info:
+            info = pub_info
+        else:
+            info = ComponentInfo(digest=digest)
+            info.version = comp.version if comp else None
+
+        info.component_spec = comp
+        _backfill_version_from_spec(info)
+
+        result: dict[str, Any] = {"status": "success"}
+        if not pub_info:
+            result["published"] = False
+        if comp:
+            result["name"] = comp.name
+            transparent, transparency_reason = self.transparency_check(comp)
+            result["transparent"] = transparent
+            result["transparency_reason"] = transparency_reason
+        result.update(info.to_dict(strip_spec=not full_spec))
+        if comp:
+            git_source = _resolve_git_source(comp)
+            if git_source:
+                result["source"] = git_source
+        return result
+
+    def inspect_by_name(
+        self,
+        name: str,
+        include_all_versions: bool = False,
+        include_deprecated: bool = False,
+        full_spec: bool = False,
+        published_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Inspect component(s) by name."""
+
+        client = self._require_client()
+        published = _published_components(
+            client,
+            name_substring=name,
+            include_deprecated=include_deprecated,
+            published_by_substring=published_by,
+        )
+        published = [c for c in published if str(c.name or "").lower() == name.lower()]
+
+        if not published:
+            _, library_cache = _ensure_library_loaded(client)
+            entry = library_cache.get(name.lower())
+            if entry:
+                out = _strip_entry(entry) if not full_spec else dict(entry)
+                return {
+                    "status": "success",
+                    "source": "component_library",
+                    "transparent": True,
+                    "transparency_reason": "curated standard component from the component library",
+                    "name": name,
+                    **out,
+                }
+            return {
+                "status": "not_found",
+                "query": name,
+                "message": f"No published component found with name: {name}",
             }
-            for folder in library_full.get("folders", [])
-        ],
-    }
+
+        def _version_key(component: ComponentInfo) -> tuple[int, ...]:
+            """Parse version string into numeric tuple for proper sorting."""
+
+            v = str(component.version or "0.0.1")
+            try:
+                return tuple(int(p) for p in v.split("."))
+            except ValueError:
+                return (0, 0, 1)
+
+        published.sort(key=_version_key, reverse=True)
+
+        if not include_all_versions:
+            published = published[:1]
+
+        versions: list[dict[str, Any]] = []
+        for info in published:
+            if info.digest:
+                try:
+                    info.component_spec = _get_component_spec(client, info.digest)
+                    _backfill_version_from_spec(info)
+                except Exception as e:
+                    info.spec_error = str(e)
+            entry = info.to_dict(strip_spec=not full_spec)
+            if info.component_spec:
+                transparent, transparency_reason = self.transparency_check(info.component_spec)
+                entry["transparent"] = transparent
+                entry["transparency_reason"] = transparency_reason
+                git_source = _resolve_git_source(info.component_spec)
+                if git_source:
+                    entry["source"] = git_source
+            versions.append(entry)
+
+        return {
+            "status": "success",
+            "name": name,
+            "version_count": len(versions),
+            "versions": versions,
+        }
+
+    def search_components(
+        self,
+        name: str | None = None,
+        include_deprecated: bool = False,
+        published_by: str | None = None,
+        digest: str | None = None,
+    ) -> dict[str, Any]:
+        """Search for published components."""
+
+        components = _published_components(
+            self._require_client(),
+            name_substring=name,
+            include_deprecated=include_deprecated,
+            published_by_substring=published_by,
+            digest=digest,
+        )
+
+        results = [
+            {
+                "name": comp.name,
+                "digest": comp.digest,
+                "version": comp.version,
+                "deprecated": comp.deprecated,
+                "description": (comp.description or "")[:200],
+            }
+            for comp in components
+        ]
+
+        return {
+            "status": "success",
+            "query": name,
+            "count": len(results),
+            "components": results,
+        }
+
+    @staticmethod
+    def transparency_check(spec: ComponentSpec) -> tuple[bool, str]:
+        """Check if a component's definition is transparent (source-inspectable).
+
+        Returns a ``(transparent, reason)`` tuple. The *reason* is a short
+        human-readable explanation of **why** the component was classified as
+        transparent or opaque so that consuming agents can understand the decision
+        before applying their own judgment.
+        """
+
+        ann = spec.annotations
+
+        if ann.get("python_original_code"):
+            return True, "inline Python source code embedded in annotations"
+
+        canonical = ann.get("canonical_location")
+        if isinstance(canonical, str) and canonical.startswith(("https://", "http://")):
+            return True, f"canonical_location annotation points to {canonical}"
+
+        if ann.get("git_remote_url") and (
+            ann.get("component_yaml_path") or ann.get("git_relative_dir")
+        ):
+            return True, f"git source metadata links to {ann['git_remote_url']}"
+
+        impl = spec.implementation or {}
+        container = impl.get("container", {})
+        image = container.get("image", "")
+        if any(image.startswith(prefix) for prefix in _TRANSPARENT_IMAGE_PREFIXES):
+            return (
+                True,
+                f"uses standard public base image ({image})"
+                " — code logic is in the component definition, not hidden in the container",
+            )
+
+        return False, "no inline source, canonical location, git metadata, or standard public image found"
 
 
 # ============================================================================
-# Core functions (usable by wrappers and CLIs)
+# Private function-level implementation helpers
 # ============================================================================
 
 
 _TRANSPARENT_IMAGE_PREFIXES = ("python:", "ubuntu:", "debian:", "alpine:")
-
-
-def transparency_check(spec: ComponentSpec) -> tuple[bool, str]:
-    """Check if a component's definition is transparent (source-inspectable).
-
-    Returns a ``(transparent, reason)`` tuple. The *reason* is a short
-    human-readable explanation of **why** the component was classified as
-    transparent or opaque so that consuming agents can understand the decision
-    before applying their own judgment.
-    """
-
-    ann = spec.annotations
-
-    if ann.get("python_original_code"):
-        return True, "inline Python source code embedded in annotations"
-
-    canonical = ann.get("canonical_location")
-    if isinstance(canonical, str) and canonical.startswith(("https://", "http://")):
-        return True, f"canonical_location annotation points to {canonical}"
-
-    if ann.get("git_remote_url") and (
-        ann.get("component_yaml_path") or ann.get("git_relative_dir")
-    ):
-        return True, f"git source metadata links to {ann['git_remote_url']}"
-
-    impl = spec.implementation or {}
-    container = impl.get("container", {})
-    image = container.get("image", "")
-    if any(image.startswith(prefix) for prefix in _TRANSPARENT_IMAGE_PREFIXES):
-        return (
-            True,
-            f"uses standard public base image ({image})"
-            " — code logic is in the component definition, not hidden in the container",
-        )
-
-    return False, "no inline source, canonical location, git metadata, or standard public image found"
 
 
 def _resolve_git_source(spec: ComponentSpec) -> dict[str, Any] | None:
@@ -306,192 +484,11 @@ def _backfill_version_from_spec(info: ComponentInfo) -> None:
         info.version = info.component_spec.version
 
 
-def _enrich_with_spec(
-    info: ComponentInfo,
-    client: TangleApiClient,
-) -> None:
-    """Fetch the full component data and attach it to *info*."""
-
-    if not info.digest:
-        return
-    try:
-        info.component_spec = _get_component_spec(client, info.digest)
-        _backfill_version_from_spec(info)
-    except Exception as e:
-        info.spec_error = str(e)
-
-
 def _get_component_spec(client: TangleApiClient, digest: str) -> ComponentSpec | None:
     try:
         return client.get_component_spec(digest)
     except Exception as exc:
-        if _is_not_found_error(exc):
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) == 404:
             return None
         raise
-
-
-def inspect_by_digest(
-    client: TangleApiClient,
-    digest: str,
-    full_spec: bool = False,
-    follow_deprecated: bool = False,
-) -> dict[str, Any]:
-    """Inspect a single component by digest.
-
-    Fetches the full spec and publication metadata via static client helpers.
-    """
-
-    if follow_deprecated:
-        resolved = _resolve_digest(client, digest)
-        if resolved != digest:
-            digest = resolved
-
-    comp = _get_component_spec(client, digest)
-    if comp is None:
-        _, library_cache = _ensure_library_loaded(client)
-        for entry in library_cache.values():
-            if entry.get("digest") == digest:
-                out = _strip_entry(entry) if not full_spec else dict(entry)
-                return {
-                    "status": "success",
-                    "source": "component_library",
-                    "transparent": True,
-                    "transparency_reason": "curated standard component from the component library",
-                    "name": (entry.get("spec") or {}).get("name", ""),
-                    **out,
-                }
-        return {"status": "not_found", "digest": digest, "error": f"Component not found: {digest}"}
-
-    published = _published_components(client, digest=digest, include_deprecated=True)
-    pub_info = published[0] if published else None
-
-    if pub_info:
-        info = pub_info
-    else:
-        info = ComponentInfo(digest=digest)
-        info.version = comp.version if comp else None
-
-    info.component_spec = comp
-    _backfill_version_from_spec(info)
-
-    result: dict[str, Any] = {"status": "success"}
-    if not pub_info:
-        result["published"] = False
-    if comp:
-        result["name"] = comp.name
-        transparent, transparency_reason = transparency_check(comp)
-        result["transparent"] = transparent
-        result["transparency_reason"] = transparency_reason
-    result.update(info.to_dict(strip_spec=not full_spec))
-    if comp:
-        git_source = _resolve_git_source(comp)
-        if git_source:
-            result["source"] = git_source
-    return result
-
-
-def inspect_by_name(
-    client: TangleApiClient,
-    name: str,
-    include_all_versions: bool = False,
-    include_deprecated: bool = False,
-    full_spec: bool = False,
-    published_by: str | None = None,
-) -> dict[str, Any]:
-    """Inspect component(s) by name."""
-
-    published = _published_components(
-        client,
-        name_substring=name,
-        include_deprecated=include_deprecated,
-        published_by_substring=published_by,
-    )
-    published = [c for c in published if str(c.name or "").lower() == name.lower()]
-
-    if not published:
-        _, library_cache = _ensure_library_loaded(client)
-        entry = library_cache.get(name.lower())
-        if entry:
-            out = _strip_entry(entry) if not full_spec else dict(entry)
-            return {
-                "status": "success",
-                "source": "component_library",
-                "transparent": True,
-                "transparency_reason": "curated standard component from the component library",
-                "name": name,
-                **out,
-            }
-        return {
-            "status": "not_found",
-            "query": name,
-            "message": f"No published component found with name: {name}",
-        }
-
-    def _version_key(component: ComponentInfo) -> tuple[int, ...]:
-        """Parse version string into numeric tuple for proper sorting."""
-
-        v = str(component.version or "0.0.1")
-        try:
-            return tuple(int(p) for p in v.split("."))
-        except ValueError:
-            return (0, 0, 1)
-
-    published.sort(key=_version_key, reverse=True)
-
-    if not include_all_versions:
-        published = published[:1]
-
-    versions: list[dict[str, Any]] = []
-    for info in published:
-        _enrich_with_spec(info, client)
-        entry = info.to_dict(strip_spec=not full_spec)
-        if info.component_spec:
-            transparent, transparency_reason = transparency_check(info.component_spec)
-            entry["transparent"] = transparent
-            entry["transparency_reason"] = transparency_reason
-            git_source = _resolve_git_source(info.component_spec)
-            if git_source:
-                entry["source"] = git_source
-        versions.append(entry)
-
-    return {
-        "status": "success",
-        "name": name,
-        "version_count": len(versions),
-        "versions": versions,
-    }
-
-
-def search_components(
-    client: TangleApiClient,
-    name: str | None = None,
-    include_deprecated: bool = False,
-    published_by: str | None = None,
-    digest: str | None = None,
-) -> dict[str, Any]:
-    """Search for published components."""
-
-    components = _published_components(
-        client,
-        name_substring=name,
-        include_deprecated=include_deprecated,
-        published_by_substring=published_by,
-        digest=digest,
-    )
-
-    results = []
-    for comp in components:
-        results.append({
-            "name": comp.name,
-            "digest": comp.digest,
-            "version": comp.version,
-            "deprecated": comp.deprecated,
-            "description": (comp.description or "")[:200],
-        })
-
-    return {
-        "status": "success",
-        "query": name,
-        "count": len(results),
-        "components": results,
-    }

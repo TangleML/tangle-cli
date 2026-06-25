@@ -7,13 +7,14 @@ Observe/GCP/Slack output through ``PipelineRunHooks.fetch_logs`` or wrappers.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
+from .handler import TangleCliHandler
 
-class PipelineRunDetails:
+
+class PipelineRunDetails(TangleCliHandler):
     """Resource manager for pipeline run details and graph-state output.
 
     Downstream packages can subclass this class or inject a lazy
@@ -25,18 +26,11 @@ class PipelineRunDetails:
         self,
         client: Any = None,
         *,
-        client_factory: Callable[[], Any] | None = None,
+        client_factory: Any | None = None,
+        logger: Any | None = None,
+        **kwargs: Any,
     ) -> None:
-        self._client = client
-        self._client_factory = client_factory
-
-    @property
-    def client(self) -> Any:
-        if self._client is None:
-            if self._client_factory is None:
-                raise ValueError("PipelineRunDetails requires a client or client_factory")
-            self._client = self._client_factory()
-        return self._client
+        super().__init__(client=client, client_factory=client_factory, logger=logger, **kwargs)
 
     @staticmethod
     def to_plain(value: Any) -> Any:
@@ -53,9 +47,9 @@ class PipelineRunDetails:
         if component_spec:
             out["component"] = _value(component_spec, "name", "unknown") or "unknown"
             try:
-                from .component_inspector import transparency_check
+                from .component_inspector import ComponentInspector
 
-                transparent, reason = transparency_check(component_spec)
+                transparent, reason = ComponentInspector.transparency_check(component_spec)
                 out["transparent"] = transparent
                 out["transparency_reason"] = reason
             except Exception:
@@ -128,21 +122,22 @@ class PipelineRunDetails:
             kwargs["include_implementations"] = include_implementations
         if execution_id is not None:
             kwargs["execution_id"] = execution_id
-        details = self.client.get_run_details(run_id, **kwargs)
+        details = self._require_client().get_run_details(run_id, **kwargs)
         return self.serialize_run_details(details)
 
     def fetch_graph_state_one(self, run_id: str) -> dict[str, Any]:
         """Fetch graph state for a pipeline run id or root execution id."""
 
         try:
-            run = self.client.pipeline_runs_get(run_id)
+            run = self._require_client().pipeline_runs_get(run_id)
         except Exception as exc:
-            if _status_code(exc) != 404:
+            response = getattr(exc, "response", None)
+            if getattr(response, "status_code", None) != 404:
                 raise
             run = None
         root_execution_id = _value(run, "root_execution_id") if run else None
         root_execution_id = root_execution_id or run_id
-        state = self.client.executions_graph_execution_state(root_execution_id)
+        state = self._require_client().executions_graph_execution_state(root_execution_id)
         return {
             "run_id": run_id,
             "root_execution_id": root_execution_id,
@@ -176,11 +171,6 @@ class PipelineRunDetails:
         return {"results": results}
 
 
-# ---------------------------------------------------------------------------
-# Compatibility helpers and thin module-level wrappers
-# ---------------------------------------------------------------------------
-
-
 def _value(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(key, default)
@@ -199,49 +189,6 @@ def _to_plain(value: Any) -> Any:
     return value
 
 
-def serialize_execution(execution: Any) -> dict[str, Any]:
-    """Backward-compatible wrapper for :meth:`PipelineRunDetails.serialize_execution`."""
-
-    return PipelineRunDetails().serialize_execution(execution)
-
-
-def serialize_run_details(details: Any) -> dict[str, Any]:
-    """Backward-compatible wrapper for :meth:`PipelineRunDetails.serialize_run_details`."""
-
-    return PipelineRunDetails().serialize_run_details(details)
-
-
-def get_run_details_output(
-    client: Any,
-    run_id: str,
-    *,
-    include_implementations: bool = False,
-    include_annotations: bool = False,
-    include_execution_state: bool = False,
-    execution_id: str | None = None,
-) -> dict[str, Any]:
-    """Backward-compatible wrapper for :meth:`PipelineRunDetails.get_run_details_output`."""
-
-    return PipelineRunDetails(client=client).get_run_details_output(
-        run_id,
-        include_implementations=include_implementations,
-        include_annotations=include_annotations,
-        include_execution_state=include_execution_state,
-        execution_id=execution_id,
-    )
-
-
-def _status_code(exc: Exception) -> int | None:
-    response = getattr(exc, "response", None)
-    return getattr(response, "status_code", None)
-
-
-def fetch_graph_state_one(client: Any, run_id: str) -> dict[str, Any]:
-    """Backward-compatible wrapper for :meth:`PipelineRunDetails.fetch_graph_state_one`."""
-
-    return PipelineRunDetails(client=client).fetch_graph_state_one(run_id)
-
-
 def _error_result(run_id: str, message: str) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -253,22 +200,4 @@ def _error_result(run_id: str, message: str) -> dict[str, Any]:
     }
 
 
-def get_graph_state_output(
-    client: Any,
-    run_ids: list[str],
-    *,
-    timeout: float = 30.0,
-) -> dict[str, Any]:
-    """Backward-compatible wrapper for :meth:`PipelineRunDetails.get_graph_state_output`."""
-
-    return PipelineRunDetails(client=client).get_graph_state_output(run_ids, timeout=timeout)
-
-
-__all__ = [
-    "PipelineRunDetails",
-    "fetch_graph_state_one",
-    "get_graph_state_output",
-    "get_run_details_output",
-    "serialize_execution",
-    "serialize_run_details",
-]
+__all__ = ["PipelineRunDetails"]

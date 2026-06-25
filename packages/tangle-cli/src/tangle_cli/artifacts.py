@@ -6,9 +6,10 @@ signed URLs, download remote objects, write local files, or mutate artifacts.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Protocol
+
+from .handler import TangleCliHandler
 
 
 class ArtifactClient(Protocol):
@@ -80,7 +81,7 @@ class ArtifactInfo:
         )
 
 
-class ArtifactManager:
+class ArtifactManager(TangleCliHandler):
     """Read-only artifact metadata manager.
 
     Downstream packages can inject an already-authenticated client or a lazy
@@ -93,18 +94,11 @@ class ArtifactManager:
         self,
         client: ArtifactClient | None = None,
         *,
-        client_factory: Callable[[], ArtifactClient] | None = None,
+        client_factory: Any | None = None,
+        logger: Any | None = None,
+        **kwargs: Any,
     ) -> None:
-        self._client = client
-        self._client_factory = client_factory
-
-    @property
-    def client(self) -> ArtifactClient:
-        if self._client is None:
-            if self._client_factory is None:
-                raise ValueError("ArtifactManager requires a client or client_factory")
-            self._client = self._client_factory()
-        return self._client
+        super().__init__(client=client, client_factory=client_factory, logger=logger, **kwargs)
 
     def collect_artifacts(
         self,
@@ -173,8 +167,9 @@ class ArtifactManager:
         """Collect artifact IDs directly from execution IDs."""
 
         artifact_ids: dict[str, str] = {}
+        client = self._require_client()
         for execution_id, output_filter in execution_ids.items():
-            execution = self.client.get_execution_details(execution_id)
+            execution = client.get_execution_details(execution_id)
             output_artifacts = _artifact_id_map(_mapping_or_attr(execution, "output_artifacts", {}))
             for output_name, artifact_id in output_artifacts.items():
                 if not output_filter or output_name in output_filter:
@@ -211,7 +206,7 @@ class ArtifactManager:
         tasks_query = query.get("tasks", {}) or {}
         components_query_raw = query.get("components", []) or []
         if tasks_query or components_query_raw:
-            details = self.client.get_run_details(run_id)
+            details = self._require_client().get_run_details(run_id)
             execution = _mapping_or_attr(details, "execution")
             if not execution:
                 raise RuntimeError("No execution details found for run")
@@ -226,7 +221,7 @@ class ArtifactManager:
         artifacts: dict[str, ArtifactInfo] = {}
         for key, artifact_id in artifact_ids.items():
             try:
-                response = self.client.artifacts_get(artifact_id)
+                response = self._require_client().artifacts_get(artifact_id)
                 artifacts[key] = _artifact_info_from_response(response, artifact_id=artifact_id, key=key)
             except Exception as exc:
                 artifacts[key] = ArtifactInfo(id=artifact_id, uri="", key=key, error=str(exc))
@@ -242,11 +237,6 @@ class ArtifactManager:
             data = asdict(artifact) if is_dataclass(artifact) else dict(artifact)
             result.append({key: value for key, value in data.items() if value is not None})
         return result
-
-
-# ---------------------------------------------------------------------------
-# Compatibility helpers and thin module-level wrappers
-# ---------------------------------------------------------------------------
 
 
 def _mapping_or_attr(value: Any, key: str, default: Any = None) -> Any:
@@ -295,56 +285,9 @@ def _artifact_info_from_response(response: Any, *, artifact_id: str, key: str) -
     return ArtifactInfo.from_response(response, key=key)
 
 
-def _collect_artifacts(
-    execution: Any,
-    tasks_query: dict[str, list[str]],
-    components_query: list[ArtifactComponentQuery],
-    prefix: str = "",
-) -> dict[str, str]:
-    """Backward-compatible wrapper for :meth:`ArtifactManager.collect_artifacts`."""
-
-    return ArtifactManager().collect_artifacts(execution, tasks_query, components_query, prefix)
-
-
-def _collect_execution_artifacts(
-    client: ArtifactClient,
-    execution_ids: dict[str, list[str]],
-) -> dict[str, str]:
-    """Backward-compatible wrapper for :meth:`ArtifactManager.collect_execution_artifacts`."""
-
-    return ArtifactManager(client=client).collect_execution_artifacts(execution_ids)
-
-
-def get_artifacts(
-    run_id: str,
-    query: dict[str, Any],
-    client: ArtifactClient,
-) -> dict[str, ArtifactInfo]:
-    """Backward-compatible wrapper for :meth:`ArtifactManager.get_artifacts`."""
-
-    return ArtifactManager(client=client).get_artifacts(run_id, query)
-
-
-def serialize_artifacts(artifacts: dict[str, ArtifactInfo]) -> list[dict[str, Any]]:
-    """Serialize artifact dict to a JSON-friendly list, dropping ``None`` fields."""
-
-    return ArtifactManager.serialize_artifacts(artifacts)
-
-
-def _serialize_artifacts(artifacts: dict[str, ArtifactInfo]) -> list[dict[str, Any]]:
-    """Deprecated compatibility alias; use :func:`serialize_artifacts`."""
-
-    return serialize_artifacts(artifacts)
-
-
 __all__ = [
     "ArtifactClient",
     "ArtifactComponentQuery",
     "ArtifactInfo",
     "ArtifactManager",
-    "_collect_artifacts",
-    "_collect_execution_artifacts",
-    "_serialize_artifacts",
-    "get_artifacts",
-    "serialize_artifacts",
 ]
