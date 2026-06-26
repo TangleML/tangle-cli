@@ -1,5 +1,5 @@
 """
-API-contract dataclasses for the Tangle (Oasis) Cloud Pipelines API.
+API-contract dataclasses for the Tangle Cloud Pipelines API.
 
 These dataclasses model the shapes of HTTP request/response bodies on the
 Tangle API — ``PipelineRun``, ``ComponentSpec``, container state, artifacts,

@@ -3,9 +3,9 @@
 This module owns the generic path-based run flow that downstream CLIs can share:
 load/hydrate a pipeline, perform generic pre-submit preparation, optionally
 layout/validate, then submit/wait/retry through :mod:`tangle_cli.pipeline_run_manager`.
-Downstream-specific behavior (Shopify auth, gs:// I/O, Slack/Observe, mutexes,
-schedulers, service-account annotations, and legacy result shapes) is exposed as
-hooks rather than imported here.
+Downstream-specific behavior (provider auth, cloud-object I/O, hosted logs,
+notifications, mutexes, schedulers, service-account annotations, and legacy
+result shapes) is exposed as hooks rather than imported here.
 """
 
 from __future__ import annotations

@@ -2,8 +2,8 @@
 
 This module is native-free and API-client agnostic.  It builds Tangle search
 ``filter_query`` payloads, resolves ``created_by=me`` via ``users_me()``, and
-formats results for CLI/MCP consumers.  Downstreams such as tangle-deploy can
-subclass ``PipelineRunSearch`` with Shopify-authenticated client creation.
+formats results for CLI/MCP consumers. Downstreams such as tangle-deploy can
+subclass ``PipelineRunSearch`` with provider-authenticated client creation.
 """
 
 from __future__ import annotations

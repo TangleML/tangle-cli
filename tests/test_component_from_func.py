@@ -484,7 +484,7 @@ class TestBuildComponentDict:
         assert len(impl["args"]) > 0
 
     def test_missing_docstring_falls_back_to_placeholder_description(self):
-        """Regression test for https://github.com/Shopify/discovery/issues/28703.
+        """Regression test for functions without docstrings.
 
         When a function has no docstring, ``spec.description`` is ``None``.
         Without a fallback, the generated YAML emits ``description: null``,
@@ -2236,7 +2236,7 @@ class TestGeneratorStripsTaskEnvAuthoring:
         # A TaskEnv authoring-violation must be a HARD, LOUD failure carrying
         # the actionable guidance -- NOT swallowed into warn + success=False
         # (which would resurface as a confusing broken component at hydrate /
-        # real-Oasis run). generate_component_yaml re-raises AuthoringStripError
+        # backend run time). generate_component_yaml re-raises AuthoringStripError
         # specifically while keeping warn+False for every other failure.
         output_file = tmp_path / "mixed.yaml"
         with pytest.raises(AuthoringStripError) as excinfo:
@@ -2389,7 +2389,7 @@ class TestNamedTupleReturnType:
             """Create a table.
 
             Args:
-                project: The GCP project.
+                project: The cloud project.
                 table_name: The table name.
 
             Returns:
@@ -2469,10 +2469,10 @@ class TestNamedTupleReturnType:
                 project: str,
                 table_name: str,
             ) -> NamedTuple("Outputs", created_table=str):
-                \"\"\"Create a BigQuery table.
+                \"\"\"Create a data warehouse table.
 
                 Args:
-                    project: The GCP project.
+                    project: The cloud project.
                     table_name: The table name.
 
                 Returns:

@@ -85,7 +85,7 @@ class ArtifactManager(TangleCliHandler):
     """Read-only artifact metadata manager.
 
     Downstream packages can inject an already-authenticated client or a lazy
-    ``client_factory`` (for example, one that applies Shopify auth). The manager
+    ``client_factory`` (for example, one that applies provider auth). The manager
     keeps the same read-only constraints as the module-level helpers: it never
     downloads artifact contents, signs URLs, writes files, or mutates artifacts.
     """
