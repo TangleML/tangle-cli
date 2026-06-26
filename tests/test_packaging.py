@@ -111,8 +111,8 @@ def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
     requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
     assert not any(name.startswith("tangle_api/") for name in names)
     assert "tangle_cli/openapi/openapi.json" not in names
-    assert "Requires-Dist: tangle-api==0.0.1" not in requires_dist
-    assert "Requires-Dist: tangle-api==0.0.1 ; extra == 'native'" in requires_dist
+    assert "Requires-Dist: tangle-api==0.1.0" not in requires_dist
+    assert "Requires-Dist: tangle-api==0.1.0 ; extra == 'native'" in requires_dist
 
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(wheel), str(stubs)])}
     subprocess.run(

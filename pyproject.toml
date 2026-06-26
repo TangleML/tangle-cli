@@ -28,7 +28,7 @@ Repository = "https://github.com/TangleML/tangle-cli"
 Issues = "https://github.com/TangleML/tangle-cli/issues"
 
 [project.optional-dependencies]
-native = ["tangle-api==0.0.1"]
+native = ["tangle-api==0.1.0"]
 
 [project.scripts]
 tangle = "tangle_cli.cli:main"

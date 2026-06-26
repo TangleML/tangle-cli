@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-19T16:59:19.613339Z"
+exclude-newer = "2026-06-19T17:04:09.933107Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -1775,7 +1775,7 @@ wheels = [
 
 [[package]]
 name = "tangle-api"
-version = "0.0.1"
+version = "0.1.0"
 source = { editable = "packages/tangle-api" }
 dependencies = [
     { name = "pydantic" },
