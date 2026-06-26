@@ -105,7 +105,8 @@ def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
 
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
-        metadata = archive.read("tangle_cli-0.0.1.dist-info/METADATA").decode()
+        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+        metadata = archive.read(metadata_name).decode()
 
     requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
     assert not any(name.startswith("tangle_api/") for name in names)
