@@ -1,0 +1,121 @@
+name: Data Processor
+description: Processes and validates input data.
+metadata:
+  annotations:
+    cloud_pipelines.net: 'true'
+    components new regenerate python-function-component: 'true'
+    tangle_cli_generation_function_name: test_component
+    tangle_cli_generation_mode: inline
+    python_original_code_path: test_component.py
+    python_original_code: |
+      #!/usr/bin/env python3
+      """Module docstring."""
+
+      def test_component(input_data: str, threshold: float = 0.5) -> dict:
+          """
+          Processes and validates input data.
+
+          Args:
+              input_data: The data to process
+              threshold: Processing threshold
+
+          Returns:
+              Processing results as a dictionary
+
+          Metadata:
+              Name: Data Processor
+              Version: 2.1.0
+              updated_at: 2024-11-23T10:00:00Z
+          """
+          return {
+              "processed": input_data.upper(),
+              "threshold_met": len(input_data) > threshold
+          }
+
+      if __name__ == "__main__":
+          print(test_component("test", 0.3))
+    version: 2.1.0
+    updated_at: '2024-11-23T10:00:00Z'
+    component_yaml_path: test-component.yaml
+inputs:
+- name: input_data
+  type: String
+  description: The data to process
+- name: threshold
+  type: Float
+  description: Processing threshold
+  default: '0.5'
+  optional: true
+outputs:
+- name: Output
+  type: JsonObject
+implementation:
+  container:
+    image: test-image:latest
+    command:
+    - sh
+    - -ec
+    - |
+      program_path=$(mktemp)
+      printf "%s" "$0" > "$program_path"
+      python3 -u "$program_path" "$@"
+    - |
+      #!/usr/bin/env python3
+      """Module docstring."""
+
+      def test_component(input_data, threshold = 0.5):
+          """
+          Processes and validates input data.
+
+          Args:
+              input_data: The data to process
+              threshold: Processing threshold
+
+          Returns:
+              Processing results as a dictionary
+
+          Metadata:
+              Name: Data Processor
+              Version: 2.1.0
+              updated_at: 2024-11-23T10:00:00Z
+          """
+          return {
+              "processed": input_data.upper(),
+              "threshold_met": len(input_data) > threshold
+          }
+
+      import json
+      import argparse
+      _parser = argparse.ArgumentParser(prog='Data Processor', description='Processes and validates input data.')
+      _parser.add_argument("--input-data", dest="input_data", type=str, required=True, default=argparse.SUPPRESS)
+      _parser.add_argument("--threshold", dest="threshold", type=float, required=False, default=argparse.SUPPRESS)
+      _parser.add_argument("----output-paths", dest="_output_paths", type=str, nargs=1)
+      _parsed_args = vars(_parser.parse_args())
+      _output_files = _parsed_args.pop("_output_paths", [])
+
+      _outputs = test_component(**_parsed_args)
+      _outputs = [_outputs]
+
+      _output_serializers = [
+          json.dumps,
+      ]
+
+      import os
+      for idx, output_file in enumerate(_output_files):
+          try:
+              os.makedirs(os.path.dirname(output_file))
+          except OSError:
+              pass
+          with open(output_file, 'w') as f:
+              f.write(_output_serializers[idx](_outputs[idx]))
+    args:
+    - --input-data
+    - inputValue: input_data
+    - if:
+        cond:
+          isPresent: threshold
+        then:
+        - --threshold
+        - inputValue: threshold
+    - '----output-paths'
+    - outputPath: Output
