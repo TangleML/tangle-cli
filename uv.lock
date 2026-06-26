@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-19T16:44:11.311353Z"
+exclude-newer = "2026-06-19T16:59:19.613339Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -1790,7 +1790,7 @@ requires-dist = [
 
 [[package]]
 name = "tangle-cli"
-version = "0.0.1"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cloud-pipelines" },
