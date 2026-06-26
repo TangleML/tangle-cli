@@ -43,9 +43,9 @@ class SecretValueError(ValueError):
 class SecretsManager(TangleCliHandler):
     """Secret resource manager with injectable client construction.
 
-    Downstream packages can inject a Shopify-authenticated client directly or
-    provide a lazy ``client_factory``. Returned dictionaries intentionally omit
-    secret values and only include metadata.
+    Downstream packages can inject an authenticated client directly or provide a
+    lazy ``client_factory``. Returned dictionaries intentionally omit secret
+    values and only include metadata.
     """
 
     def __init__(

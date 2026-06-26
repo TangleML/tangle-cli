@@ -10,7 +10,6 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "cloud-pipelines>=0.26.3.12",
-    "cloud-pipelines-backend",
     "cyclopts>=4.16.1",
     "docstring-parser>=0.16",
     "httpx>=0.28.1",
@@ -60,6 +59,7 @@ dev = [
 codegen = [
     # Mirrors third_party/tangle backend import requirements used by
     # `python -m tangle_cli.openapi.codegen --backend-path third_party/tangle`.
+    "cloud-pipelines-backend",
     "alembic>=1.18.4",
     "bugsnag>=4.9.0,<5",
     "cloud-pipelines>=0.23.2.4",

@@ -1,8 +1,8 @@
 """Pipeline-run details and graph-state serialization helpers.
 
 These helpers are native-free and keep provider-specific log enrichment out of
-OSS.  Downstreams can call them with their authenticated API client and layer
-Observe/GCP/Slack output through ``PipelineRunHooks.fetch_logs`` or wrappers.
+OSS. Downstreams can call them with their authenticated API client and layer
+provider-specific log output through ``PipelineRunHooks.fetch_logs`` or wrappers.
 """
 
 from __future__ import annotations

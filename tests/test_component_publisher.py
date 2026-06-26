@@ -371,8 +371,8 @@ def test_publish_components_passes_structured_context_to_context_aware_hooks(tmp
         hooks=[hook, kwargs_hook],
         git_remote_sha="sha",
         git_remote_branch="main",
-        git_remote_url="https://github.com/Shopify/discovery",
-        git_repo="Shopify/discovery",
+        git_remote_url="https://github.com/TangleML/example-pipelines",
+        git_repo="TangleML/example-pipelines",
         git_root=tmp_path,
         published_by="alice@example.com",
     )
@@ -383,8 +383,8 @@ def test_publish_components_passes_structured_context_to_context_aware_hooks(tmp
     before_context, component_context, after_context = hook.contexts
     assert before_context.git_remote_sha == "sha"
     assert before_context.git_remote_branch == "main"
-    assert before_context.git_remote_url == "https://github.com/Shopify/discovery"
-    assert before_context.git_repo == "Shopify/discovery"
+    assert before_context.git_remote_url == "https://github.com/TangleML/example-pipelines"
+    assert before_context.git_repo == "TangleML/example-pipelines"
     assert before_context.git_root == str(tmp_path)
     assert before_context.published_by == "alice@example.com"
     assert before_context.batch_config == [{"component_path": component_path, "name": "Demo"}]

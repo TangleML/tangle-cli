@@ -938,7 +938,7 @@ def test_cache_schema_source_does_not_require_official_schema(monkeypatch, tmp_p
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
     api_cli.write_cached_schema(
-        _oasis_like_schema_with_published_component_extensions(),
+        _tangle_like_schema_with_published_component_extensions(),
         "http://api.test",
     )
     monkeypatch.setattr(api_cli, "load_bundled_openapi_schema", fail_load_schema)
@@ -1053,7 +1053,7 @@ def test_cold_cache_api_help_shows_static_resource_groups_and_refresh(
     assert "Unknown command" not in output
 
 
-def _oasis_like_schema_with_published_component_extensions() -> dict:
+def _tangle_like_schema_with_published_component_extensions() -> dict:
     schema = json.loads(json.dumps(SCHEMA))
     schema["paths"]["/api/published_components/"]["get"] = {
         "tags": ["components"],
@@ -1100,7 +1100,7 @@ def test_default_schema_source_merges_cached_backend_extensions(
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
     api_cli.write_cached_schema(
-        _oasis_like_schema_with_published_component_extensions(),
+        _tangle_like_schema_with_published_component_extensions(),
         "http://api.test",
     )
     monkeypatch.setattr(
@@ -1124,7 +1124,7 @@ def test_default_schema_source_preserves_official_operation_on_cache_collision(
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
     api_cli.write_cached_schema(
-        _oasis_like_schema_with_published_component_extensions(),
+        _tangle_like_schema_with_published_component_extensions(),
         "http://api.test",
     )
     monkeypatch.setattr(
@@ -1145,7 +1145,7 @@ def test_official_schema_source_hides_cached_extensions(monkeypatch, tmp_path, c
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
     api_cli.write_cached_schema(
-        _oasis_like_schema_with_published_component_extensions(),
+        _tangle_like_schema_with_published_component_extensions(),
         "http://api.test",
     )
     monkeypatch.setattr(
@@ -1167,7 +1167,7 @@ def test_cache_schema_source_uses_raw_cached_schema(monkeypatch, tmp_path, capsy
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
     api_cli.write_cached_schema(
-        _oasis_like_schema_with_published_component_extensions(),
+        _tangle_like_schema_with_published_component_extensions(),
         "http://api.test",
     )
     monkeypatch.setattr(
@@ -1363,7 +1363,7 @@ def test_config_can_select_cache_schema_at_build_time(monkeypatch, tmp_path, cap
         encoding="utf-8",
     )
     api_cli.write_cached_schema(
-        _oasis_like_schema_with_published_component_extensions(),
+        _tangle_like_schema_with_published_component_extensions(),
         "http://api.test",
     )
     monkeypatch.setattr(
@@ -1391,7 +1391,7 @@ def test_reset_cache_returns_auto_mode_to_official_only(monkeypatch, tmp_path, c
     monkeypatch.setenv("TANGLE_CLI_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("TANGLE_API_URL", "http://api.test")
     api_cli.write_cached_schema(
-        _oasis_like_schema_with_published_component_extensions(),
+        _tangle_like_schema_with_published_component_extensions(),
         "http://api.test",
     )
 

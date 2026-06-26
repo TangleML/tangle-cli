@@ -93,7 +93,7 @@ def validate_pipeline_spec(pipeline: Mapping[str, Any]) -> None:
     """Validate the OSS-compatible local pipeline shape.
 
     This is a pragmatic validator for local authoring workflows. It focuses on
-    the graph structure that the CLI commands consume rather than Shopify-only
+    the graph structure that the CLI commands consume rather than provider-specific
     deployment extensions or remote API fields.
     """
 

@@ -2,9 +2,9 @@
 
 This module ports the OSS-safe parts of tangle-deploy's runner/run details
 commands while keeping downstream-specific behavior behind hooks.  The default
-implementation uses only the public Tangle API and local files; Shopify/GCP,
-Slack, scheduler, mutex, run-as annotation defaults, and alternate log backends
-are intentionally extension points rather than OSS behavior.
+implementation uses only the public Tangle API and local files; cloud storage,
+notifications, scheduler, mutex, run-as annotation defaults, and alternate log
+backends are intentionally extension points rather than OSS behavior.
 """
 
 from __future__ import annotations
@@ -299,10 +299,10 @@ class PipelineWaitPoll:
 class PipelineRunHooks:
     """Overridable seams for downstream tangle-deploy behavior.
 
-    Subclasses can override these methods to add Shopify auth wrappers, gs://
-    loading, JOB_CONFIG time input, run-as annotations, mutex/schedule behavior,
-    graceful shutdown, Slack notifications, Observe/GCP logs, or from-container
-    runtime defaults without forking the generic pipeline-run manager.
+    Subclasses can override these methods to add provider-specific auth wrappers,
+    cloud-object loading, JOB_CONFIG time input, run-as annotations,
+    mutex/schedule behavior, graceful shutdown, notifications, hosted logs, or
+    from-container runtime defaults without forking the generic pipeline-run manager.
     """
 
     logger: Logger = field(default_factory=get_default_logger)

@@ -2,7 +2,7 @@
 
 This module intentionally mirrors the generic publisher behavior from
 ``tangle-deploy`` while depending only on OSS ``tangle_cli`` primitives and the
-checked-in/generated static API client. Shopify-specific auth wrappers, Slack
+checked-in/generated static API client. Provider-specific auth wrappers,
 notification plumbing, and a separate ``publish-all`` CLI are kept downstream.
 """
 
@@ -89,8 +89,8 @@ class ComponentPublishHook(Protocol):
     """Extension hook for downstream publishers.
 
     Downstream packages can implement one or more methods to observe publish
-    batches (for example, to send Slack summaries) without OSS importing or
-    knowing about those systems. Implementations that need richer metadata may
+    batches (for example, to send notification summaries) without OSS importing
+    or knowing about those systems. Implementations that need richer metadata may
     add ``context: ComponentPublishContext | None = None`` as a keyword
     parameter; hooks without that parameter continue to work.
     """
@@ -143,10 +143,10 @@ class ComponentPublisher(TangleCliHandler):
         """Initialize the ComponentPublisher.
 
         Args mirror the generic ``tangle-deploy`` publisher shape, with
-        Shopify/Slack-specific fields intentionally omitted. ``client_factory``
-        is a downstream seam for lazily constructing a custom authenticated
-        client; subclasses may also override :meth:`_get_client` for more
-        control.
+        provider-specific notification/auth fields intentionally omitted.
+        ``client_factory`` is a downstream seam for lazily constructing a custom
+        authenticated client; subclasses may also override :meth:`_get_client`
+        for more control.
         """
 
         super().__init__(

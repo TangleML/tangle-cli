@@ -187,7 +187,7 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     assert utils_module is not None
 
 
-def test_ci_var_globals_are_mutable_for_tangle_deploy_shopify_overrides() -> None:
+def test_ci_var_globals_are_mutable_for_downstream_provider_overrides() -> None:
     from tangle_cli import utils as u
 
     original_git_root = u._CI_GIT_ROOT_VARS
@@ -196,14 +196,14 @@ def test_ci_var_globals_are_mutable_for_tangle_deploy_shopify_overrides() -> Non
     original_repo = u._CI_REPO_URL_VARS
     try:
         u._CI_GIT_ROOT_VARS = ("APPLICATION_ROOT", *u._CI_GIT_ROOT_VARS)
-        u._CI_SHA_VARS = ("SHOPIFY_BUILD_COMMIT", *u._CI_SHA_VARS)
-        u._CI_BRANCH_VARS = ("SHOPIFY_BUILD_BRANCH", *u._CI_BRANCH_VARS)
-        u._CI_REPO_URL_VARS = ("SHOPIFY_BUILD_REPO", *u._CI_REPO_URL_VARS)
+        u._CI_SHA_VARS = ("PROVIDER_BUILD_COMMIT", *u._CI_SHA_VARS)
+        u._CI_BRANCH_VARS = ("PROVIDER_BUILD_BRANCH", *u._CI_BRANCH_VARS)
+        u._CI_REPO_URL_VARS = ("PROVIDER_BUILD_REPO", *u._CI_REPO_URL_VARS)
 
         assert u._CI_GIT_ROOT_VARS[0] == "APPLICATION_ROOT"
-        assert u._CI_SHA_VARS[0] == "SHOPIFY_BUILD_COMMIT"
-        assert u._CI_BRANCH_VARS[0] == "SHOPIFY_BUILD_BRANCH"
-        assert u._CI_REPO_URL_VARS[0] == "SHOPIFY_BUILD_REPO"
+        assert u._CI_SHA_VARS[0] == "PROVIDER_BUILD_COMMIT"
+        assert u._CI_BRANCH_VARS[0] == "PROVIDER_BUILD_BRANCH"
+        assert u._CI_REPO_URL_VARS[0] == "PROVIDER_BUILD_REPO"
     finally:
         u._CI_GIT_ROOT_VARS = original_git_root
         u._CI_SHA_VARS = original_sha

@@ -1,8 +1,8 @@
 # tangle-cli
 
-[WIP] Private experimental/lab CLI for Tangle, the open-source ML pipeline orchestration platform.
+CLI for Tangle, the open-source ML pipeline orchestration platform.
 
-This lab repo is used to iterate on the next CLI shape before promoting changes to the public OSS package. The CLI is built with [Cyclopts](https://cyclopts.readthedocs.io/) and is intentionally split into two command families:
+This repository contains the public Tangle CLI package. The CLI is built with [Cyclopts](https://cyclopts.readthedocs.io/) and is intentionally split into two command families:
 
 - `tangle api ...` — pure OpenAPI wrappers around Tangle backend endpoints.
 - `tangle sdk ...` — hand-written SDK, local, and compound commands that may call the API or may run entirely locally.
@@ -263,7 +263,7 @@ configs:
     name: Second component
 ```
 
-Batch `publish-all`, Slack notification flags, dbt generation, from-container generation, and backend-specific search-v2 workflows remain out of this OSS lab CLI slice.
+Batch `publish-all`, notification integrations, dbt generation, from-container generation, and backend-specific advanced search workflows remain out of this OSS CLI package.
 
 ### Pipelines and pipeline runs
 
@@ -360,7 +360,7 @@ At runtime, more `tangle api ...` commands become available in two ways:
 
 ## Generated model extension pattern
 
-Generated models use a private generated base plus a stable public subclass. For example, codegen emits this shape for a model with a handwritten extension:
+Generated models use a generated implementation base plus a stable public subclass. For example, codegen emits this shape for a model with a handwritten extension:
 
 ```python
 class _ComponentSpecGenerated(TangleGeneratedModel):

@@ -3,7 +3,7 @@
 This module is intentionally a close OSS port of
 ``tangle_deploy.pipeline_hydrator``.  The generic reference-resolution code and
 method names are preserved where possible so future upstream diffs are easy to
-compare.  Shopify/Oasis-only infrastructure integrations are omitted, and
+compare. Provider-specific infrastructure integrations are omitted, and
 Docker/from-container materialization paths raise explicit unsupported errors.
 """
 

@@ -1,9 +1,9 @@
 """Tests for ``ModuleBundler`` ordering and dependency analysis.
 
-Focused unit tests for the topological sort introduced to fix
-https://github.com/Shopify/discovery/issues/30197 (alphabetical bundle
-order can execute a dependent before its dependency, breaking
-module-level references like ``FOO = bbb.bar()``).
+Focused unit tests for the topological sort that ensures bundle modules
+execute dependency-first. Alphabetical bundle order can execute a dependent
+before its dependency, breaking module-level references like
+``FOO = bbb.bar()``.
 """
 
 from __future__ import annotations

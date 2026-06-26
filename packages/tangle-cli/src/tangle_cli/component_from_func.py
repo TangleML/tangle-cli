@@ -1616,8 +1616,7 @@ def build_component_dict(
     command = pip_install + ["sh", "-ec", shell_bootstrap, python_source]
 
     # Tangle's schema rejects ``description: null``, so fall back to a generic
-    # placeholder when the function has no docstring.  See
-    # https://github.com/Shopify/discovery/issues/28703.  Users can override by
+    # placeholder when the function has no docstring. Users can override by
     # adding a docstring to the function (its first paragraph becomes the
     # description — see ``extract_function_spec``).
     description = spec.description or f"{spec.component_name} component"
@@ -1848,7 +1847,7 @@ def generate_component_yaml(
         # TaskEnv authoring-violation (§3.5): fail LOUD with the actionable
         # guidance instead of swallowing it into a warning + False. A silent
         # False would only resurface later as a confusing missing/broken
-        # component at hydrate or the real-Oasis run, defeating the
+        # component at hydrate or backend run time, defeating the
         # "fail fast with a clear generator error" intent. Every OTHER failure
         # keeps the conservative warn + return False behaviour below.
         raise
