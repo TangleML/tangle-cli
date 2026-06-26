@@ -1,0 +1,113 @@
+name: My component
+description: Clean a name.
+metadata:
+  annotations:
+    cloud_pipelines.net: 'true'
+    components new regenerate python-function-component: 'true'
+    tangle_cli_generation_function_name: my_component
+    tangle_cli_generation_mode: bundle
+    python_original_code_path: my_component.py
+    python_original_code: |
+      from helpers.utils import clean
+
+      def my_component(name: str) -> str:
+          """Clean a name.
+
+          Metadata:
+              version: 1.0
+          """
+          return clean(name)
+    version: '1.0'
+    component_yaml_path: my-component.yaml
+    bundled_modules: '["helpers", "helpers.utils"]'
+inputs:
+- name: name
+  type: String
+outputs:
+- name: Output
+  type: String
+implementation:
+  container:
+    image: python:3.12
+    command:
+    - sh
+    - -ec
+    - |
+      program_path=$(mktemp)
+      printf "%s" "$0" > "$program_path"
+      python3 -u "$program_path" "$@"
+    - |
+      def _serialize_str(str_value) -> str:
+          if isinstance(str_value, str):
+              return str_value
+          else:
+              return str(str_value)
+
+      # --- Inject local dependency modules from embedded source ---
+      import sys
+      import types
+      import base64
+      import json
+      import zlib
+
+      _EMBEDDED_MODULES = json.loads(zlib.decompress(base64.b64decode('eNqrVspIzSlILSpWslJQUtJRgHH1Sksyc8CCMXkpqWkKyTmpiXkaJakVJZpWMXkKQFCUWlJalKcAEtIrLinKLNDQ1MvJL08t0tCMyVOqBQAjHx2s')))
+      # Pass 1: register all modules in sys.modules (without executing source)
+      # so transitive imports between bundled modules can resolve in any order.
+      _module_objs = {}
+      for _mod_name in _EMBEDDED_MODULES:
+          _parts = _mod_name.split('.')
+          for _i in range(1, len(_parts)):
+              _parent = '.'.join(_parts[:_i])
+              if _parent not in sys.modules:
+                  _pkg = types.ModuleType(_parent)
+                  _pkg.__path__ = []
+                  _pkg.__package__ = _parent
+                  sys.modules[_parent] = _pkg
+          _mod = types.ModuleType(_mod_name)
+          _mod.__package__ = '.'.join(_parts[:-1]) if len(_parts) > 1 else _mod_name
+          sys.modules[_mod_name] = _mod
+          if len(_parts) > 1:
+              setattr(sys.modules['.'.join(_parts[:-1])], _parts[-1], _mod)
+          _module_objs[_mod_name] = _mod
+      # Pass 2: execute source in all registered modules
+      for _mod_name, _mod_source in _EMBEDDED_MODULES.items():
+          _code = compile(_mod_source, _mod_name.replace('.', '/') + '.py', 'exec')
+          exec(_code, _module_objs[_mod_name].__dict__)
+
+      from helpers.utils import clean
+
+      def my_component(name):
+          """Clean a name.
+
+          Metadata:
+              version: 1.0
+          """
+          return clean(name)
+
+      import argparse
+      _parser = argparse.ArgumentParser(prog='My component', description='Clean a name.')
+      _parser.add_argument("--name", dest="name", type=str, required=True, default=argparse.SUPPRESS)
+      _parser.add_argument("----output-paths", dest="_output_paths", type=str, nargs=1)
+      _parsed_args = vars(_parser.parse_args())
+      _output_files = _parsed_args.pop("_output_paths", [])
+
+      _outputs = my_component(**_parsed_args)
+      _outputs = [_outputs]
+
+      _output_serializers = [
+          _serialize_str,
+      ]
+
+      import os
+      for idx, output_file in enumerate(_output_files):
+          try:
+              os.makedirs(os.path.dirname(output_file))
+          except OSError:
+              pass
+          with open(output_file, 'w') as f:
+              f.write(_output_serializers[idx](_outputs[idx]))
+    args:
+    - --name
+    - inputValue: name
+    - '----output-paths'
+    - outputPath: Output
