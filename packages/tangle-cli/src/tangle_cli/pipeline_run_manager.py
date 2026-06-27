@@ -1049,6 +1049,7 @@ class PipelineRunManager(TangleCliHandler):
         pipeline_path: str | Path | None = None,
         attempt: int = 1,
         context: PipelineRunContext | None = None,
+        notify_submit_error: bool = True,
     ) -> dict[str, Any]:
         self.normalize_submit_body_in_place(body)
         pipeline_spec = body["root_task"]["componentRef"]["spec"]
@@ -1068,7 +1069,8 @@ class PipelineRunManager(TangleCliHandler):
         try:
             response = self.to_plain(client.pipeline_runs_create(body=body))
         except Exception as exc:
-            self.hooks.on_submit_error(exc, context=submit_context)
+            if notify_submit_error:
+                self.hooks.on_submit_error(exc, context=submit_context)
             raise
         if not isinstance(response, dict):
             response = {}
@@ -1737,6 +1739,7 @@ class PipelineRunManager(TangleCliHandler):
                                     pipeline_path=pipeline_path,
                                     attempt=attempt,
                                     context=context,
+                                    notify_submit_error=False,
                                 )
                             except Exception as submit_exc:
                                 if context.run_id is not None:
@@ -1751,6 +1754,7 @@ class PipelineRunManager(TangleCliHandler):
                                     submission_id=submission_id_for_recovery,
                                 )
                                 if recovered_response is None:
+                                    self.hooks.on_submit_error(submit_exc, context=context)
                                     raise
                                 response = self._adopt_submitted_run(
                                     response=recovered_response,
