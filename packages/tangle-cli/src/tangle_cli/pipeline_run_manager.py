@@ -14,6 +14,7 @@ import inspect
 import json
 import re
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
@@ -35,6 +36,9 @@ _ACTIVE_STATUSES = ("RUNNING", "CANCELLING", "CANCELING", "PENDING", "QUEUED")
 _FAILURE_EARLY_EXIT_STATUSES = ("FAILED", "SYSTEM_ERROR")
 _EXECUTION_STATE_TIMINGS_METADATA_KEY = "execution_state_timings"
 _EXECUTION_STATE_TIMING_MONOTONIC_METADATA_KEY = "_execution_state_timing_monotonic"
+_SUBMISSION_ID_ANNOTATION_KEY = "tangle-cli/submission-id"
+_SUBMIT_RECOVERY_LOOKUP_ATTEMPTS = 2
+_SUBMIT_RECOVERY_LOOKUP_DELAY_SECONDS = 0.1
 
 
 class PipelineRunError(RuntimeError):
@@ -43,6 +47,10 @@ class PipelineRunError(RuntimeError):
 
 class UnsupportedPipelineRunFeatureError(PipelineRunError):
     """Raised for TD extension points intentionally unsupported in OSS defaults."""
+
+
+class AmbiguousPipelineRunRecoveryError(PipelineRunError):
+    """Raised when submit recovery finds multiple runs for one submission id."""
 
 
 @dataclass
@@ -1497,6 +1505,132 @@ class PipelineRunManager(TangleCliHandler):
             result["early_exit"] = True
         return result
 
+    @staticmethod
+    def _ensure_submission_id_annotation(body: dict[str, Any]) -> str:
+        annotations = body.setdefault("annotations", {})
+        if not isinstance(annotations, dict):
+            annotations = {}
+            body["annotations"] = annotations
+        submission_id = annotations.get(_SUBMISSION_ID_ANNOTATION_KEY)
+        if submission_id:
+            annotations[_SUBMISSION_ID_ANNOTATION_KEY] = str(submission_id)
+            return str(submission_id)
+        submission_id = uuid.uuid4().hex
+        annotations[_SUBMISSION_ID_ANNOTATION_KEY] = submission_id
+        return submission_id
+
+    @staticmethod
+    def _submission_id_from_body(body: Mapping[str, Any]) -> str | None:
+        annotations = body.get("annotations")
+        if not isinstance(annotations, Mapping):
+            return None
+        submission_id = annotations.get(_SUBMISSION_ID_ANNOTATION_KEY)
+        return str(submission_id) if submission_id else None
+
+    def _submitted_runs_for_submission_id(self, submission_id: str) -> list[dict[str, Any]]:
+        query = {
+            "and": [
+                PipelineRunSearch.build_value_equals(
+                    key=_SUBMISSION_ID_ANNOTATION_KEY,
+                    value=submission_id,
+                )
+            ]
+        }
+        response = self._require_client().pipeline_runs_list(
+            filter_query=json.dumps(query, separators=(",", ":")),
+            include_pipeline_names=True,
+        )
+        plain = self.to_plain(response)
+        if not isinstance(plain, Mapping):
+            return []
+        runs = plain.get("pipeline_runs")
+        if not isinstance(runs, list):
+            return []
+        return [dict(run) for run in runs if isinstance(run, Mapping)]
+
+    def _recover_submitted_run_after_submit_error(
+        self,
+        *,
+        submission_id: str | None,
+    ) -> dict[str, Any] | None:
+        if not submission_id:
+            return None
+        for lookup_attempt in range(1, _SUBMIT_RECOVERY_LOOKUP_ATTEMPTS + 1):
+            self.logger.info(
+                "Checking whether failed submit already created a pipeline run "
+                f"({_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}, "
+                f"lookup_attempt={lookup_attempt}/{_SUBMIT_RECOVERY_LOOKUP_ATTEMPTS})"
+            )
+            try:
+                matches = self._submitted_runs_for_submission_id(submission_id)
+            except Exception as exc:
+                self.logger.warn(
+                    "Submit recovery lookup failed "
+                    f"({_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}): {exc}. "
+                    "Falling back to resubmitting the same frozen body."
+                )
+                return None
+            self.logger.info(
+                "Submit recovery lookup matched "
+                f"{len(matches)} run(s) for {_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}"
+            )
+            if len(matches) == 1:
+                run = matches[0]
+                run_id = run.get("id")
+                root_execution_id = run.get("root_execution_id")
+                self.logger.info(
+                    "Recovered existing pipeline run "
+                    f"run_id={run_id}, root_execution_id={root_execution_id}, "
+                    f"{_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}; adopting instead of resubmitting."
+                )
+                return run
+            if len(matches) > 1:
+                run_ids = [str(run.get("id")) for run in matches if run.get("id") is not None]
+                self.logger.warn(
+                    "Submit recovery lookup was ambiguous "
+                    f"({_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}, matched_run_ids={run_ids}). "
+                    "Refusing to submit a duplicate."
+                )
+                raise AmbiguousPipelineRunRecoveryError(
+                    "Found multiple pipeline runs for failed submit recovery "
+                    f"{_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}: {', '.join(run_ids) or matches!r}. "
+                    "Refusing to submit a duplicate."
+                )
+            if lookup_attempt < _SUBMIT_RECOVERY_LOOKUP_ATTEMPTS:
+                time.sleep(_SUBMIT_RECOVERY_LOOKUP_DELAY_SECONDS)
+        self.logger.warn(
+            "No existing pipeline run found after submit failure "
+            f"({_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}); "
+            "resubmitting the same frozen body with preserved inputs."
+        )
+        return None
+
+    def _adopt_submitted_run(
+        self,
+        *,
+        response: Mapping[str, Any],
+        body: dict[str, Any],
+        pipeline_path: str | Path | None,
+        attempt: int,
+        context: PipelineRunContext,
+    ) -> dict[str, Any]:
+        response_dict = dict(response)
+        submitted_context = self.response_run_context(
+            response_dict,
+            submit_body=body,
+            pipeline_path=pipeline_path,
+            attempt=attempt,
+        )
+        context.run_id = submitted_context.run_id
+        context.run_name = submitted_context.run_name
+        context.root_execution_id = submitted_context.root_execution_id
+        context.submit_body = submitted_context.submit_body
+        context.pipeline_spec = submitted_context.pipeline_spec
+        context.response = response_dict
+        context.metadata["recovered_after_submit_error"] = True
+        self.hooks.after_submit_context(context)
+        return response_dict
+
     def _run_body_factory(
         self,
         body_factory: Callable[[int, PipelineRunContext | None, Exception | None], dict[str, Any]],
@@ -1535,8 +1669,34 @@ class PipelineRunManager(TangleCliHandler):
             success = False
             error: Exception | None = None
             retry_requested = False
-            body = body_factory(attempt, previous_context, last_error)
+            reused_after_submit_failure = (
+                previous_context is not None
+                and previous_context.run_id is None
+                and previous_context.submit_body is not None
+            )
+            if reused_after_submit_failure:
+                # The previous attempt failed while submitting, before the API
+                # returned a run id. Retry the exact same submit body instead
+                # of rebuilding it: body construction can intentionally inject
+                # dynamic inputs (for example a scheduler creation timestamp),
+                # and changing those inputs on an ambiguous submit timeout can
+                # defeat cache reuse or double-run the logical pipeline.
+                body = copy.deepcopy(previous_context.submit_body)
+                self.logger.info(
+                    "Retrying submit after submit exception with the same frozen body "
+                    f"({_SUBMISSION_ID_ANNOTATION_KEY}={self._submission_id_from_body(body)}); "
+                    "dynamic inputs are preserved."
+                )
+            else:
+                if previous_context is not None:
+                    self.logger.info(
+                        "Retrying after pipeline failure; rebuilding submit body so dynamic run arguments "
+                        "can follow hook policy (for example update-vs-fixed time input)."
+                    )
+                body = body_factory(attempt, previous_context, last_error)
             self.normalize_submit_body_in_place(body)
+            submission_id = self._ensure_submission_id_annotation(body)
+            context.metadata["submission_id"] = submission_id
             if metadata_factory is not None:
                 context.metadata.update(metadata_factory(attempt, previous_context, last_error))
             pipeline_spec = body.get("root_task", {}).get("componentRef", {}).get("spec")
@@ -1557,14 +1717,50 @@ class PipelineRunManager(TangleCliHandler):
             try:
                 with self.hooks.around_run(context):
                     try:
-                        response = self.submit_prepared_body(
-                            body,
-                            pipeline_path=pipeline_path,
-                            attempt=attempt,
-                            context=context,
-                        )
-                        if attempt > 1:
-                            self.hooks.after_retry_submit(context)
+                        recovered_response = None
+                        if reused_after_submit_failure:
+                            recovered_response = self._recover_submitted_run_after_submit_error(
+                                submission_id=self._submission_id_from_body(body),
+                            )
+                        if recovered_response is not None:
+                            response = self._adopt_submitted_run(
+                                response=recovered_response,
+                                body=body,
+                                pipeline_path=pipeline_path,
+                                attempt=attempt,
+                                context=context,
+                            )
+                        else:
+                            try:
+                                response = self.submit_prepared_body(
+                                    body,
+                                    pipeline_path=pipeline_path,
+                                    attempt=attempt,
+                                    context=context,
+                                )
+                            except Exception as submit_exc:
+                                if context.run_id is not None:
+                                    raise
+                                submission_id_for_recovery = self._submission_id_from_body(body)
+                                self.logger.warn(
+                                    "Submit failed before a run id was returned "
+                                    f"({_SUBMISSION_ID_ANNOTATION_KEY}={submission_id_for_recovery}): "
+                                    f"{submit_exc}. Checking whether the run was actually created."
+                                )
+                                recovered_response = self._recover_submitted_run_after_submit_error(
+                                    submission_id=submission_id_for_recovery,
+                                )
+                                if recovered_response is None:
+                                    raise
+                                response = self._adopt_submitted_run(
+                                    response=recovered_response,
+                                    body=body,
+                                    pipeline_path=pipeline_path,
+                                    attempt=attempt,
+                                    context=context,
+                                )
+                            if attempt > 1:
+                                self.hooks.after_retry_submit(context)
                         result: dict[str, Any]
                         if wait and context.run_id:
                             wait_result = self.wait_for_completion(
@@ -1587,6 +1783,9 @@ class PipelineRunManager(TangleCliHandler):
                     except Exception as exc:
                         error = exc
                         last_error = exc
+                        if isinstance(exc, AmbiguousPipelineRunRecoveryError):
+                            self.hooks.on_fail_fast_before_release(context, exc)
+                            raise
                         if (
                             context.run_id
                             and attempt < max_attempts
