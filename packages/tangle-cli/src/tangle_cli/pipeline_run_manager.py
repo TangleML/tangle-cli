@@ -1732,6 +1732,8 @@ class PipelineRunManager(TangleCliHandler):
                                 attempt=attempt,
                                 context=context,
                             )
+                            if attempt > 1:
+                                self.hooks.after_retry_submit(context)
                         else:
                             try:
                                 response = self.submit_prepared_body(
