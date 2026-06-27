@@ -1679,6 +1679,11 @@ def test_pipeline_runs_submit_failure_recovery_adopts_existing_run(tmp_path: Pat
         def __init__(self) -> None:
             super().__init__()
             self.prepare_run_arguments_calls = 0
+            self.submit_errors: list[str] = []
+
+        def on_submit_error(self, error, *, context):
+            del context
+            self.submit_errors.append(str(error))
 
         def read_pipeline_yaml(self, pipeline_path):
             return {
@@ -1720,6 +1725,7 @@ def test_pipeline_runs_submit_failure_recovery_adopts_existing_run(tmp_path: Pat
     assert result["context"].root_execution_id == "exec-created"
     assert result["context"].metadata["recovered_after_submit_error"] is True
     assert hooks.prepare_run_arguments_calls == 1
+    assert hooks.submit_errors == []
     assert len(client.created) == 1
     submission_id = client.created[0]["annotations"]["tangle-cli/submission-id"]
     assert submission_id
@@ -1739,6 +1745,11 @@ def test_pipeline_runs_submit_failure_reuses_frozen_body_when_recovery_finds_no_
         def __init__(self) -> None:
             super().__init__()
             self.prepare_run_arguments_calls = 0
+            self.submit_errors: list[str] = []
+
+        def on_submit_error(self, error, *, context):
+            del context
+            self.submit_errors.append(str(error))
 
         def read_pipeline_yaml(self, pipeline_path):
             return {
@@ -1779,6 +1790,7 @@ def test_pipeline_runs_submit_failure_reuses_frozen_body_when_recovery_finds_no_
 
     assert result["response"]["id"] == "run-2"
     assert hooks.prepare_run_arguments_calls == 1
+    assert hooks.submit_errors == ["submit timed out"]
     assert [body["root_task"]["arguments"]["exec_time"] for body in client.created] == ["time-1", "time-1"]
     assert [body["root_task"]["componentRef"]["spec"]["name"] for body in client.created] == [
         "run-time-1",
