@@ -1802,6 +1802,69 @@ def test_pipeline_runs_submit_failure_reuses_frozen_body_when_recovery_finds_no_
     assert len(client.list_calls) == 4
 
 
+
+def test_pipeline_runs_recovered_retry_runs_after_retry_submit_hook(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda _seconds: None)
+    pipeline_path = tmp_path / "pipeline.yaml"
+    events: list[tuple[str, int, str | None]] = []
+
+    class DynamicTimeHooks(PipelineRunnerHooks):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prepare_run_arguments_calls = 0
+
+        def read_pipeline_yaml(self, pipeline_path):
+            return {
+                "name": "template-source",
+                "inputs": [{"name": "exec_time", "type": "String"}],
+                "metadata": {"annotations": {"run-name-template": "run-${arguments.exec_time}"}},
+                "implementation": {"graph": {"tasks": {}}},
+            }
+
+        def prepare_run_arguments(self, pipeline_spec, run_args):
+            del pipeline_spec
+            self.prepare_run_arguments_calls += 1
+            updated = dict(run_args or {})
+            updated["exec_time"] = f"time-{self.prepare_run_arguments_calls}"
+            return updated
+
+        def before_retry(self, context, error, *, next_attempt):
+            del error
+            events.append(("before_retry", next_attempt, context.run_id))
+
+        def after_retry_submit(self, context):
+            events.append(("after_retry_submit", context.attempt, context.run_id))
+
+    class RecoverOnRetryClient(FakeClient):
+        def pipeline_runs_create(self, body: Any = None) -> dict[str, Any]:
+            self.created.append(copy.deepcopy(body))
+            raise TimeoutError("submit timed out")
+
+        def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
+            self.list_calls.append(kwargs)
+            if len(self.list_calls) <= 2:
+                return {"pipeline_runs": [], "next_page_token": None}
+            return {
+                "pipeline_runs": [
+                    {"id": "run-created", "root_execution_id": "exec-created", "pipeline_name": "run-time-1"}
+                ],
+                "next_page_token": None,
+            }
+
+    hooks = DynamicTimeHooks()
+    client = RecoverOnRetryClient()
+    manager = PipelineRunner(client=client, hooks=hooks)
+
+    result = manager.run_pipeline(pipeline_path, hydrate=False, max_attempts=2)
+
+    assert result["response"]["id"] == "run-created"
+    assert result["context"].attempt == 2
+    assert result["context"].metadata["recovered_after_submit_error"] is True
+    assert hooks.prepare_run_arguments_calls == 1
+    assert len(client.created) == 1
+    assert events == [("before_retry", 2, None), ("after_retry_submit", 2, "run-created")]
+
+
 def test_pipeline_runs_run_pipeline_spec_uses_in_memory_spec_lifecycle() -> None:
     events = []
     spec = {
