@@ -1670,6 +1670,126 @@ def test_pipeline_runs_path_retry_rebuilds_submit_body_each_attempt(tmp_path: Pa
     ]
 
 
+
+def test_pipeline_runs_submit_failure_recovery_adopts_existing_run(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda _seconds: None)
+    pipeline_path = tmp_path / "pipeline.yaml"
+
+    class DynamicTimeHooks(PipelineRunnerHooks):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prepare_run_arguments_calls = 0
+
+        def read_pipeline_yaml(self, pipeline_path):
+            return {
+                "name": "template-source",
+                "inputs": [{"name": "exec_time", "type": "String"}],
+                "metadata": {"annotations": {"run-name-template": "run-${arguments.exec_time}"}},
+                "implementation": {"graph": {"tasks": {}}},
+            }
+
+        def prepare_run_arguments(self, pipeline_spec, run_args):
+            del pipeline_spec
+            self.prepare_run_arguments_calls += 1
+            updated = dict(run_args or {})
+            updated["exec_time"] = f"time-{self.prepare_run_arguments_calls}"
+            return updated
+
+    class RecoveringClient(FakeClient):
+        def pipeline_runs_create(self, body: Any = None) -> dict[str, Any]:
+            self.created.append(copy.deepcopy(body))
+            raise TimeoutError("submit timed out")
+
+        def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
+            self.list_calls.append(kwargs)
+            return {
+                "pipeline_runs": [
+                    {"id": "run-created", "root_execution_id": "exec-created", "pipeline_name": "run-time-1"}
+                ],
+                "next_page_token": None,
+            }
+
+    hooks = DynamicTimeHooks()
+    client = RecoveringClient()
+    manager = PipelineRunner(client=client, hooks=hooks)
+
+    result = manager.run_pipeline(pipeline_path, hydrate=False)
+
+    assert result["response"]["id"] == "run-created"
+    assert result["context"].run_id == "run-created"
+    assert result["context"].root_execution_id == "exec-created"
+    assert result["context"].metadata["recovered_after_submit_error"] is True
+    assert hooks.prepare_run_arguments_calls == 1
+    assert len(client.created) == 1
+    submission_id = client.created[0]["annotations"]["tangle-cli/submission-id"]
+    assert submission_id
+    assert len(client.list_calls) == 1
+    assert "tangle-cli/submission-id" in client.list_calls[0]["filter_query"]
+    assert submission_id in client.list_calls[0]["filter_query"]
+
+
+def test_pipeline_runs_submit_failure_reuses_frozen_body_when_recovery_finds_no_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda _seconds: None)
+    pipeline_path = tmp_path / "pipeline.yaml"
+
+    class DynamicTimeHooks(PipelineRunnerHooks):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prepare_run_arguments_calls = 0
+
+        def read_pipeline_yaml(self, pipeline_path):
+            return {
+                "name": "template-source",
+                "inputs": [{"name": "exec_time", "type": "String"}],
+                "metadata": {"annotations": {"run-name-template": "run-${arguments.exec_time}"}},
+                "implementation": {"graph": {"tasks": {}}},
+            }
+
+        def prepare_run_arguments(self, pipeline_spec, run_args):
+            del pipeline_spec
+            self.prepare_run_arguments_calls += 1
+            updated = dict(run_args or {})
+            updated["exec_time"] = f"time-{self.prepare_run_arguments_calls}"
+            return updated
+
+    class RetryClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.create_calls = 0
+
+        def pipeline_runs_create(self, body: Any = None) -> dict[str, Any]:
+            self.create_calls += 1
+            self.created.append(copy.deepcopy(body))
+            if self.create_calls == 1:
+                raise TimeoutError("submit timed out")
+            return {"id": "run-2", "root_execution_id": "exec-2"}
+
+        def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
+            self.list_calls.append(kwargs)
+            return {"pipeline_runs": [], "next_page_token": None}
+
+    hooks = DynamicTimeHooks()
+    client = RetryClient()
+    manager = PipelineRunner(client=client, hooks=hooks)
+
+    result = manager.run_pipeline(pipeline_path, hydrate=False, max_attempts=2)
+
+    assert result["response"]["id"] == "run-2"
+    assert hooks.prepare_run_arguments_calls == 1
+    assert [body["root_task"]["arguments"]["exec_time"] for body in client.created] == ["time-1", "time-1"]
+    assert [body["root_task"]["componentRef"]["spec"]["name"] for body in client.created] == [
+        "run-time-1",
+        "run-time-1",
+    ]
+    assert client.created[0]["annotations"]["tangle-cli/submission-id"] == client.created[1]["annotations"][
+        "tangle-cli/submission-id"
+    ]
+    assert len(client.list_calls) == 4
+
+
 def test_pipeline_runs_run_pipeline_spec_uses_in_memory_spec_lifecycle() -> None:
     events = []
     spec = {
@@ -1703,7 +1823,8 @@ def test_pipeline_runs_run_pipeline_spec_uses_in_memory_spec_lifecycle() -> None
     assert result["response"]["id"] == "run-1"
     assert result["context"].run_id == "run-1"
     assert client.created[0]["root_task"]["componentRef"]["spec"]["name"] == "Prepared Spec"
-    assert client.created[0]["annotations"] == {"team": "oss"}
+    assert client.created[0]["annotations"]["team"] == "oss"
+    assert client.created[0]["annotations"]["tangle-cli/submission-id"]
     assert events == [
         ("around", "Prepared Spec", "already-prepared.yaml"),
         ("before_submit", "Prepared Spec", "Prepared Spec"),
@@ -1999,7 +2120,8 @@ def test_pipeline_runner_orchestrates_load_validate_submit_wait(tmp_path: Path) 
     assert result["pipeline_name"] == "Run value"
     assert result["run_id"] == "run-1"
     assert calls == ["validate:Demo Pipeline:False", "before_submit"]
-    assert client.created[0]["annotations"] == {"team": "oss"}
+    assert client.created[0]["annotations"]["team"] == "oss"
+    assert client.created[0]["annotations"]["tangle-cli/submission-id"]
     assert client.created[0]["root_task"]["componentRef"]["spec"]["name"] == "Run value"
 
 
@@ -2050,6 +2172,10 @@ def test_pipeline_runner_path_retry_prepares_each_attempt(tmp_path: Path) -> Non
                 raise PipelineRunError("transient submit failure")
             return {"id": "run-2", "root_execution_id": "exec-2"}
 
+        def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
+            self.list_calls.append(kwargs)
+            return {"pipeline_runs": [], "next_page_token": None}
+
     class Hooks(PipelineRunnerHooks):
         def before_submit_pipeline_spec(self, pipeline_spec, **kwargs):  # type: ignore[no-untyped-def]
             updated = copy.deepcopy(pipeline_spec)
@@ -2072,7 +2198,7 @@ def test_pipeline_runner_path_retry_prepares_each_attempt(tmp_path: Path) -> Non
     assert result["run_id"] == "run-2"
     assert [body["root_task"]["componentRef"]["spec"]["name"] for body in client.created] == [
         "attempt-1",
-        "attempt-2",
+        "attempt-1",
     ]
 
 

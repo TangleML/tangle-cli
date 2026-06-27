@@ -552,11 +552,30 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
 
         def metadata_factory(
             attempt: int,
-            _previous_context: PipelineRunContext | None,
+            previous_context: PipelineRunContext | None,
             _error: Exception | None,
         ) -> dict[str, Any]:
-            preparation = preparations[attempt]
+            preparation = preparations.get(attempt)
             submit_payload = submit_payloads.get(attempt)
+            if (
+                preparation is None
+                and previous_context is not None
+                and previous_context.run_id is None
+                and previous_context.submit_body is not None
+            ):
+                # ``PipelineRunManager`` reuses the previous submit body after
+                # submit-time exceptions. Mirror the previous preparation
+                # bookkeeping so metadata/result formatting still point at the
+                # logical pipeline being retried without re-running dynamic
+                # body preparation hooks.
+                preparation = preparations.get(previous_context.attempt)
+                if preparation is not None:
+                    preparations[attempt] = preparation
+                submit_payload = submit_payloads.get(previous_context.attempt)
+                if submit_payload is not None:
+                    submit_payloads[attempt] = submit_payload
+            if preparation is None:
+                raise PipelineRunError("Pipeline retry metadata requested before preparation")
             return hooks.metadata_for_run(
                 pipeline_name=(submit_payload.run_name if submit_payload else None) or preparation.pipeline_name,
                 pipeline_path=pipeline_path,
@@ -592,5 +611,10 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
             error = exc
             raise
         finally:
+            cleaned_preparation_ids: set[int] = set()
             for preparation in preparations.values():
+                preparation_id = id(preparation)
+                if preparation_id in cleaned_preparation_ids:
+                    continue
+                cleaned_preparation_ids.add(preparation_id)
                 hooks.cleanup_prepared_pipeline(preparation, error=error)
