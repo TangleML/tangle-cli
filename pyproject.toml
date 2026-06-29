@@ -1,6 +1,6 @@
 [project]
 name = "tangle-cli"
-version = "0.0.1"
+version = "0.1.0"
 description = "CLI for Tangle, the open-source ML pipeline orchestration platform"
 readme = "README.md"
 authors = [
@@ -10,8 +10,15 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "cloud-pipelines>=0.26.3.12",
-    "cloud-pipelines-backend",
-    "cyclopts>=3.0",
+    "cyclopts>=4.16.1",
+    "docstring-parser>=0.16",
+    "httpx>=0.28.1",
+    "jinja2>=3.1",
+    "platformdirs>=4.10.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "requests>=2.32.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.urls]
@@ -20,21 +27,48 @@ Documentation = "https://tangleml.com/docs/"
 Repository = "https://github.com/TangleML/tangle-cli"
 Issues = "https://github.com/TangleML/tangle-cli/issues"
 
+[project.optional-dependencies]
+native = ["tangle-api==0.1.0"]
+
 [project.scripts]
-tangle = "tangle_cli.cli:app"
+tangle = "tangle_cli.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.2,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-# Set the module-root to an empty string for a flat layout
-module-root = ""
+module-root = "packages/tangle-cli/src"
 
 [tool.uv.sources]
 cloud-pipelines-backend = { git = "https://github.com/TangleML/tangle", rev = "stable_cli" }
+tangle-api = { workspace = true }
+tangle-cli = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/tangle-api"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "tangle-api",
+]
+codegen = [
+    # Mirrors third_party/tangle backend import requirements used by
+    # `python -m tangle_cli.openapi.codegen --backend-path third_party/tangle`.
+    "cloud-pipelines-backend",
+    "alembic>=1.18.4",
+    "bugsnag>=4.9.0,<5",
+    "cloud-pipelines>=0.23.2.4",
+    "fastapi[standard]>=0.115.12",
+    "kubernetes>=33.1.0,<36",
+    "opentelemetry-api>=1.41.1",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.41.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.1",
+    "opentelemetry-instrumentation-fastapi>=0.60b1",
+    "opentelemetry-sdk>=1.39.1",
+    "sqlalchemy>=2.0.49",
 ]
