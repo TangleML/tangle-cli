@@ -1,3 +1,5 @@
+exclude-newer = "P7D"
+
 [[index]]
 url = "https://pypi.org/simple"
 default = true
