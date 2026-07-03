@@ -28,9 +28,9 @@ _CREATED_AT_WIDTH = 16
 class PageChunk:
     """Metadata for a single page of search results.
 
-    Defined locally to keep this module importable without the native
-    ``tangle-api`` extra; ``tangle_cli.models`` re-exports an equivalent
-    dataclass when native models are available.
+    Defined locally to keep this module importable without loading generated
+    ``tangle-api`` bindings; ``tangle_cli.models`` re-exports an equivalent
+    dataclass when generated models are imported.
     """
 
     rows: list[dict[str, Any]]

@@ -161,8 +161,9 @@ def test_sdk_artifacts_get_missing_native_api_uses_friendly_error(monkeypatch, t
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("expected missing native API to fail")
 
-    assert "Native generated Tangle API bindings are required for artifact commands" in message
-    assert "Install tangle-cli[native]" in message
+    assert "Generated Tangle API bindings are required for artifact commands" in message
+    assert "Install the default tangle-cli package with tangle-api" in message
+    assert "local src/tangle_api shadows site-packages" in message
 
 
 def test_sdk_artifacts_get_cli_requires_query(tmp_path) -> None:

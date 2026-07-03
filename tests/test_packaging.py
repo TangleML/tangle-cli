@@ -8,6 +8,9 @@ import sys
 import zipfile
 from pathlib import Path
 
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
+
 from tangle_cli.openapi import codegen
 
 
@@ -99,7 +102,7 @@ def _write_consumer_tangle_api(path: Path) -> Path:
     return source_root
 
 
-def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
+def test_tangle_cli_wheel_supports_expert_no_deps_import_path_without_tangle_api(tmp_path) -> None:
     wheel = _build_wheel(tmp_path)
     stubs = tmp_path / "stubs"
     _write_import_stubs(stubs)
@@ -115,8 +118,8 @@ def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
     assert not any(name.startswith("tangle_api/") for name in names)
     assert "tangle_cli/openapi/openapi.json" not in names
     assert "Version: 0.0.1a3" in metadata
-    assert "Requires-Dist: tangle-api==0.0.1a3" not in requires_dist
-    assert "Requires-Dist: tangle-api==0.0.1a3 ; extra == 'native'" in requires_dist
+    assert "Requires-Dist: tangle-api==0.0.1a3" in requires_dist
+    assert not any("extra == 'native'" in line for line in requires_dist)
     assert "Provides-Extra: native" in metadata
     assert "tangle = tangle_cli.cli:main" in entry_points
     assert "tangle-cli = tangle_cli.cli:main" in entry_points
@@ -142,7 +145,11 @@ def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
     )
 
 
-def test_tangle_cli_wheel_api_refresh_builds_without_native_tangle_api(tmp_path) -> None:
+def test_custom_tangle_api_local_version_can_satisfy_cli_pin() -> None:
+    assert Version("0.0.1a3+yourorg") in SpecifierSet("==0.0.1a3")
+
+
+def test_tangle_cli_wheel_api_refresh_builds_in_expert_no_deps_fallback(tmp_path) -> None:
     wheel = _build_wheel(tmp_path)
     stubs = tmp_path / "stubs"
     _write_import_stubs(stubs)
@@ -168,14 +175,15 @@ def test_tangle_cli_wheel_api_refresh_builds_without_native_tangle_api(tmp_path)
     )
 
 
-def test_tangle_cli_wheel_binds_to_consumer_local_tangle_api(tmp_path) -> None:
+def test_tangle_cli_wheel_binds_to_project_local_tangle_api_before_official_package(tmp_path) -> None:
     cli_wheel = _build_wheel(tmp_path / "cli")
+    api_wheel = _build_wheel(tmp_path / "api", "--package", "tangle-api")
     consumer_source = _write_consumer_tangle_api(tmp_path / "consumer")
     stubs = tmp_path / "stubs"
     _write_runtime_stubs(stubs)
     env = {
         **os.environ,
-        "PYTHONPATH": os.pathsep.join([str(consumer_source), str(cli_wheel), str(stubs)]),
+        "PYTHONPATH": os.pathsep.join([str(consumer_source), str(cli_wheel), str(api_wheel), str(stubs)]),
     }
 
     subprocess.run(
@@ -316,7 +324,7 @@ def test_tangle_api_wheel_metadata_and_import_are_leaf(tmp_path) -> None:
     )
 
 
-def test_native_wheels_provide_static_client_binding(tmp_path) -> None:
+def test_default_wheels_provide_static_client_binding(tmp_path) -> None:
     cli_wheel = _build_wheel(tmp_path / "cli")
     api_wheel = _build_wheel(tmp_path / "api", "--package", "tangle-api")
     with zipfile.ZipFile(api_wheel) as archive:

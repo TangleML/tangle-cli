@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-26T03:30:40.780335Z"
+exclude-newer = "2026-06-26T13:32:13.031764Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -1798,12 +1798,8 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "requests" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-]
-
-[package.optional-dependencies]
-native = [
     { name = "tangle-api" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.dev-dependencies]
@@ -1837,7 +1833,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32.0" },
-    { name = "tangle-api", marker = "extra == 'native'", editable = "packages/tangle-api" },
+    { name = "tangle-api", editable = "packages/tangle-api" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
 ]
 provides-extras = ["native"]

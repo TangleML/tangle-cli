@@ -385,8 +385,9 @@ def test_published_components_missing_native_api_uses_friendly_error(monkeypatch
         with pytest.raises(SystemExit) as exc_info:
             app(command)
         message = str(exc_info.value)
-        assert "Native generated Tangle API bindings are required for published-component commands" in message
-        assert "Install tangle-cli[native]" in message
+        assert "Generated Tangle API bindings are required for published-component commands" in message
+        assert "Install the default tangle-cli package with tangle-api" in message
+        assert "local src/tangle_api shadows site-packages" in message
 
 
 def test_published_components_publish_log_type_none_suppresses_progress(tmp_path: Path, capsys):

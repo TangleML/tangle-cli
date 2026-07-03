@@ -1,9 +1,9 @@
 """tangle-cli public API.
 
-The package import is intentionally lightweight: native static API bindings live
-in ``tangle_api.generated`` and may be supplied by the consumer environment.
-Import ``tangle_cli.client.TangleApiClient`` explicitly when those generated
-bindings are available.
+The package import is intentionally lightweight: static API bindings live in
+``tangle_api.generated`` (included by default in public installs, or supplied by
+source/downstream environments). Import ``tangle_cli.client.TangleApiClient``
+explicitly when generated bindings should be loaded.
 """
 
 from importlib.metadata import PackageNotFoundError

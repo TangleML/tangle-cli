@@ -176,7 +176,7 @@ class ComponentPublisher(TangleCliHandler):
             if exc.name == "tangle_api":
                 raise RuntimeError(
                     "Native generated Tangle API bindings are required for component publishing. "
-                    "Install tangle-cli[native] or provide a local tangle_api.generated package."
+                    "Install the default tangle-cli package with tangle-api, run from a project where local src/tangle_api shadows site-packages, or install a compatible custom tangle-api package."
                 ) from exc
             raise
         return ComponentSpec

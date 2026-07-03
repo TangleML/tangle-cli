@@ -503,7 +503,8 @@ def _schema_for_current_invocation() -> dict[str, Any] | None:
             raise SystemExit(
                 f"No cached OpenAPI schema for {_normalize_base_url(base_url)}. "
                 "Run `tangle api refresh` with the same --base-url/--auth-header/--header options, "
-                "or install tangle-cli[native] to use the official static schema."
+                "or use a tangle-cli environment with an official or custom tangle-api package "
+                "that provides tangle_api.schema."
             )
         return cached
 
@@ -571,9 +572,12 @@ def _api_tail_requests_help(api_tail: list[str]) -> bool:
 
 def _missing_official_schema_message() -> str:
     return (
-        "Official static Tangle API commands require the native tangle-api "
-        "package because the bundled OpenAPI snapshot lives in tangle_api.schema. "
-        "Install tangle-cli[native], or run `tangle api refresh` and use "
+        "Official static Tangle API commands require a tangle-api package "
+        "because the OpenAPI snapshot lives in tangle_api.schema. Normal "
+        "tangle-cli installs include the official package; custom generated "
+        "API projects should run with a local src/tangle_api package that "
+        "shadows site-packages or install a compatible private tangle-api "
+        "distribution. Otherwise run `tangle api refresh` and use "
         "`--schema-source cache` for cached backend operations."
     )
 
