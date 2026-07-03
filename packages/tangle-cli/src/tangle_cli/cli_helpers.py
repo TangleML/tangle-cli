@@ -66,8 +66,8 @@ def api_arg_specs(
 class LazyTangleApiClient:
     """Instantiate the generated API client only when a command uses it.
 
-    Importing CLI modules must stay native-free so local-only commands can run
-    without the generated ``tangle_api`` package. This proxy delays importing and
+    Importing CLI modules must not eagerly load generated bindings, so local-only
+    commands can run without importing ``tangle_api``. This proxy delays importing and
     constructing ``TangleApiClient`` until an API method is actually accessed,
     while keeping CLI-friendly error wording in the CLI helper layer.
     """
@@ -85,9 +85,10 @@ class LazyTangleApiClient:
             except ModuleNotFoundError as exc:
                 if exc.name == "tangle_api":
                     raise SystemExit(
-                        "Native generated Tangle API bindings are required for "
-                        f"{self.command_name}. Install tangle-cli[native] or provide "
-                        "a local tangle_api.generated package."
+                        "Generated Tangle API bindings are required for "
+                        f"{self.command_name}. Install the default tangle-cli package "
+                        "with tangle-api, run from a project where local src/tangle_api "
+                        "shadows site-packages, or install a compatible custom tangle-api package."
                     ) from exc
                 raise
 
@@ -97,7 +98,7 @@ class LazyTangleApiClient:
         return self._client
 
     def require_available(self) -> None:
-        """Materialize the client so CLI commands fail before native helper imports."""
+        """Materialize the client so CLI commands fail before helper imports."""
 
         self._get_client()
 

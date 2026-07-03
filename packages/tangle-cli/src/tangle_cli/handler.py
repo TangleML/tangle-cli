@@ -64,7 +64,7 @@ class TangleCliHandler:
             if exc.name == "tangle_api":
                 self.log.error(
                     "❌ Native generated Tangle API bindings are required for Tangle API operations. "
-                    "Install tangle-cli[native] or provide a local tangle_api.generated package."
+                    "Install the default tangle-cli package with tangle-api, run from a project where local src/tangle_api shadows site-packages, or install a compatible custom tangle-api package."
                 )
                 return None
             raise

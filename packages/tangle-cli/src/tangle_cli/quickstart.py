@@ -1,4 +1,4 @@
-"""Native-free quickstart text for the root ``tangle`` CLI."""
+"""Quickstart text for the root ``tangle`` CLI."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from textwrap import dedent
 from cyclopts import App
 
 
-app = App(name="quickstart", help="Print a concise native-free guide to the Tangle CLI.")
+app = App(name="quickstart", help="Print a concise guide to the Tangle CLI.")
 
 
 QUICKSTART_TEXT = dedent(
@@ -76,16 +76,15 @@ QUICKSTART_TEXT = dedent(
     dynamic schema discovery, codegen, logging, hydrator/resolver logic, and
     extension hooks.
 
-    tangle_api is the generated/native package: checked-in Pydantic models,
-    endpoint operation methods, and the official OpenAPI snapshot. Local-only
-    SDK commands and this quickstart do not need it. Static API-backed commands
-    need tangle-cli[native] or an equivalent local tangle_api.generated package.
+    tangle_api is the generated package: checked-in Pydantic models,
+    endpoint operation methods, and the official OpenAPI snapshot. Public
+    tangle-cli installs include the matching tangle-api package by default.
+    Codegen/custom API projects can still generate a local src/tangle_api
+    package that shadows site-packages, or provide a compatible private
+    distribution named tangle-api for their environment.
 
-    Generated model extensions use private generated bases plus stable public
-    subclasses, e.g. ComponentSpec(ComponentSpecExtensions,
-    _ComponentSpecGenerated). Extension bases are left of the generated base in
-    the MRO, and downstream --model-extension-module values can add/override
-    behavior while preserving generated fields and stable names.
+    Generated model extensions are composed at runtime in downstream namespaces
+    such as tangle_cli.models, leaving tangle_api generated models plain/leaf.
 
     Discover more
     -------------
@@ -105,6 +104,6 @@ QUICKSTART_TEXT = dedent(
 
 @app.default
 def quickstart() -> None:
-    """Print a concise native-free guide to the Tangle CLI."""
+    """Print a concise guide to the Tangle CLI."""
 
     print(QUICKSTART_TEXT)

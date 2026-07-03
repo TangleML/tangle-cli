@@ -11,9 +11,56 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from tangle_api.generated.models import ComponentSpec, GetExecutionInfoResponse
+from tangle_api.generated import models as _generated_models
 
 from .artifacts import ArtifactComponentQuery, ArtifactInfo
+from . import generated_model_extensions as _cli_model_extensions
+
+
+def extend_model(public_name: str, base: type[Any], *mixins: type[Any]) -> type[Any]:
+    """Compose a generated model with downstream mixins in this namespace."""
+
+    if not mixins:
+        return base
+    model = type(public_name, (*mixins, base), {"__module__": __name__})
+    model_rebuild = getattr(model, "model_rebuild", None)
+    if callable(model_rebuild):
+        model_rebuild()
+    return model
+
+
+def compose_models(generated_models_module: Any, *extension_modules: Any) -> dict[str, type[Any]]:
+    """Return generated models composed with MODEL_EXTENSIONS mappings.
+
+    Extension modules declare ``MODEL_EXTENSIONS = {"ModelName": "MixinName"}``.
+    Composition happens in this downstream namespace and never mutates
+    ``tangle_api.generated.models``.
+    """
+
+    composed: dict[str, type[Any]] = {}
+    public_names = getattr(generated_models_module, "__all__", None)
+    if public_names is None:
+        public_names = [
+            name
+            for name, value in vars(generated_models_module).items()
+            if not name.startswith("_") and isinstance(value, type)
+        ]
+    for public_name in public_names:
+        base = getattr(generated_models_module, public_name)
+        mixins: list[type[Any]] = []
+        for module in extension_modules:
+            mapping = getattr(module, "MODEL_EXTENSIONS", {})
+            if not isinstance(mapping, dict):
+                continue
+            mixin_name = mapping.get(public_name)
+            if mixin_name:
+                mixins.append(getattr(module, mixin_name))
+        composed[public_name] = extend_model(public_name, base, *mixins)
+    return composed
+
+
+_COMPOSED_MODELS = compose_models(_generated_models, _cli_model_extensions)
+globals().update(_COMPOSED_MODELS)
 
 
 # ---- Execution / Run dataclasses -------------------------------------------
@@ -296,10 +343,9 @@ class SecretInfo:
 # ---- Components ------------------------------------------------------------
 
 
-# ``ComponentSpec`` is generated from OpenAPI and extended in
-# ``tangle_cli.generated_model_extensions.ComponentSpecExtensions``. Re-export
-# it from this module for compatibility with callers that import domain models
-# from ``tangle_cli.models``.
+# ``ComponentSpec`` is generated from OpenAPI and extended at import time in
+# this module. Re-export it for compatibility with callers that import domain
+# models from ``tangle_cli.models``.
 
 
 @dataclass

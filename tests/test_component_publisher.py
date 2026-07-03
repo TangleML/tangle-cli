@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from tangle_api.generated.models import ComponentSpec
+from tangle_cli.models import ComponentSpec
 
 from tangle_cli.component_publisher import (
     ComponentPublishContext,

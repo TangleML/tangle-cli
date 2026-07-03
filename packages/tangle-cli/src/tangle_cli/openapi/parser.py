@@ -49,9 +49,10 @@ def _load_default_openapi_schema() -> dict[str, Any]:
             last_error = exc
     if schema_text is None:
         raise FileNotFoundError(
-            "Default OpenAPI snapshot not found. Install tangle-api, run from a "
-            "source checkout with packages/tangle-api/src/tangle_api/schema/openapi.json, "
-            "or pass --openapi PATH explicitly."
+            "Default OpenAPI snapshot not found. Install the default or a compatible "
+            "custom tangle-api package, run from a source checkout with "
+            "packages/tangle-api/src/tangle_api/schema/openapi.json, or pass "
+            "--openapi PATH explicitly."
         ) from last_error
 
     schema = json.loads(schema_text)

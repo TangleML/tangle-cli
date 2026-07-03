@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-19T17:04:09.933107Z"
+exclude-newer = "2026-06-26T13:32:13.031764Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -1775,22 +1775,18 @@ wheels = [
 
 [[package]]
 name = "tangle-api"
-version = "0.0.1a2"
+version = "0.0.1a3"
 source = { editable = "packages/tangle-api" }
 dependencies = [
     { name = "pydantic" },
-    { name = "tangle-cli" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "pydantic", specifier = ">=2.0" },
-    { name = "tangle-cli", editable = "." },
-]
+requires-dist = [{ name = "pydantic", specifier = ">=2.0" }]
 
 [[package]]
 name = "tangle-cli"
-version = "0.0.1a2"
+version = "0.0.1a3"
 source = { editable = "." }
 dependencies = [
     { name = "cloud-pipelines" },
@@ -1802,12 +1798,8 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "requests" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-]
-
-[package.optional-dependencies]
-native = [
     { name = "tangle-api" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.dev-dependencies]
@@ -1841,7 +1833,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32.0" },
-    { name = "tangle-api", marker = "extra == 'native'", editable = "packages/tangle-api" },
+    { name = "tangle-api", editable = "packages/tangle-api" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
 ]
 provides-extras = ["native"]

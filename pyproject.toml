@@ -1,6 +1,6 @@
 [project]
 name = "tangle-cli"
-version = "0.0.1a2"
+version = "0.0.1a3"
 description = "CLI for Tangle, the open-source ML pipeline orchestration platform"
 readme = "README.md"
 authors = [
@@ -18,6 +18,7 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "requests>=2.32.0",
+    "tangle-api==0.0.1a3",
     "tomli>=2.0; python_version < '3.11'",
 ]
 
@@ -28,7 +29,8 @@ Repository = "https://github.com/TangleML/tangle-cli"
 Issues = "https://github.com/TangleML/tangle-cli/issues"
 
 [project.optional-dependencies]
-native = ["tangle-api==0.0.1a2"]
+# Compatibility alias: tangle-api is now part of the default public install.
+native = []
 
 [project.scripts]
 tangle = "tangle_cli.cli:main"

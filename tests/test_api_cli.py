@@ -926,8 +926,10 @@ def test_official_static_command_without_schema_fails_with_actionable_error(monk
         api_cli.build_app()
 
     message = str(exc_info.value)
-    assert "Official static Tangle API commands require the native tangle-api package" in message
-    assert "Install tangle-cli[native]" in message
+    assert "Official static Tangle API commands require a tangle-api package" in message
+    assert "custom generated API projects" in message
+    assert "shadows site-packages" in message
+    assert "compatible private tangle-api distribution" in message
     assert "--schema-source cache" in message
 
 

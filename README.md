@@ -33,7 +33,7 @@ By default `tangle api` uses `--schema-source auto`, which means official static
 
 `tangle sdk` commands are hand-written workflows. They can be:
 
-- **local-only**: no generated/native API bindings required, e.g. pipeline validation/layout and component generation;
+- **local-only**: no generated API bindings required, e.g. pipeline validation/layout and component generation;
 - **API-backed**: use the generated client but add domain behavior, e.g. pipeline-run submit payload construction, hydration, artifact lookup, publishing/version checks, or config batching.
 
 Current SDK groups include:
@@ -86,22 +86,22 @@ Use `--log-type none` for quiet machine-readable runs, and `--log-type file` to 
 The repository contains two Python import packages with different responsibilities:
 
 - `tangle_cli` is hand-written. It contains CLI wiring, SDK/business helpers, local pipeline/component workflows, dynamic API discovery, codegen, shared runtime classes, logging, and extension classes.
-- `tangle_api` is generated/native. It contains checked-in generated Pydantic models, generated endpoint operation methods, and the official OpenAPI snapshot.
+- `tangle_api` is generated/static. It contains checked-in generated Pydantic models, generated endpoint operation methods, and the official OpenAPI snapshot.
 
-The default `tangle-cli` package keeps the top-level import and local-only SDK commands native-free. Install the native extra when you want static API-backed commands and the handwritten `TangleApiClient` wrapper to use the checked-in generated bindings:
+The default public `tangle-cli` package depends on the matching `tangle-api` package, so normal installs include the checked-in generated bindings used by static API-backed commands and the handwritten `TangleApiClient` wrapper:
 
 ```bash
-pip install 'tangle-cli[native]'
+pip install tangle-cli
 ```
 
-In this workspace, `uv` installs the workspace `tangle-api` package for development and tests:
+The `native` extra remains as a compatibility no-op alias for older install instructions. In this workspace, `uv` installs the workspace `tangle-api` package for development and tests:
 
 ```bash
 uv run tangle api --help
 uv run tangle sdk pipelines validate pipeline.yaml
 ```
 
-If you are embedding `tangle_cli` in a downstream project, you can provide your own local `tangle_api.generated` package produced from your backend schema instead of using this repo's official generated package.
+Custom API/codegen users can still run codegen from the fully capable install; generating bindings does not require removing the official `tangle-api` package. For project-local generated APIs, generate into a local source tree such as `src/tangle_api/generated` (and `src/tangle_api/schema/openapi.json` when you want `tangle api --schema-source official`) and run from that project so local `src/tangle_api` shadows site-packages. For packaged custom APIs, publish/provide a distribution named `tangle-api` with a version compatible with this `tangle-cli` release (for example `0.0.1a3+yourorg` for a `tangle-cli` dependency on `tangle-api==0.0.1a3`) via a private index, `--find-links`, or uv sources. As an expert escape hatch, `--no-deps` installs only `tangle-cli` and skips all dependencies, so that environment must manually provide every required runtime dependency plus its generated/custom `tangle_api`; this is acceptable for controlled codegen/custom scenarios but not normal UX.
 
 ## Quick command examples
 
@@ -204,9 +204,9 @@ uv run tangle api reset-cache --base-url https://api.example
 
 Schema source modes are:
 
-- `--schema-source auto` (default): official static operations plus cached-only backend extensions when a cache exists. Requires the native `tangle-api` package for official operations.
-- `--schema-source official`: only the checked-in official static schema. Requires the native `tangle-api` package.
-- `--schema-source cache`: only the schema previously written by `tangle api refresh` for the selected base URL. Does not require the native package.
+- `--schema-source auto` (default): official static operations plus cached-only backend extensions when a cache exists. Normal `tangle-cli` installs include the `tangle-api` package needed for official operations; custom API projects can shadow or replace that package as described in the codegen section.
+- `--schema-source official`: only the checked-in official static schema from `tangle-api` (or a compatible custom `tangle-api` package on your environment's import path).
+- `--schema-source cache`: only the schema previously written by `tangle api refresh` for the selected base URL. This is the custom/source-checkout fallback when a consumer environment does not provide an importable `tangle_api.schema` package.
 
 For resource help, put `--schema-source` on the resource group:
 
@@ -306,7 +306,7 @@ existing = client.find_existing_components(
 
 `TangleApiClient` is handwritten in `tangle_cli.client` and inherits generated endpoint methods from `tangle_api.generated.operations.GeneratedTangleApiOperations`. The generated endpoint methods call the handwritten transport/request logic. Handwritten semantic helpers such as `find_existing_components(...)` return domain models and normalize common compatibility cases.
 
-The top-level `import tangle_cli` is lightweight and does not import native static bindings. Install the native extra or otherwise provide a local `tangle_api.generated` package before importing `tangle_cli.client`.
+The top-level `import tangle_cli` is lightweight and does not import static bindings eagerly. Normal installs include `tangle-api`; source checkouts or downstream embeddings may instead provide a local `tangle_api.generated` package before importing `tangle_cli.client`.
 
 ## Codegen/autogen from OpenAPI
 
@@ -337,6 +337,17 @@ uv run python -m tangle_cli.openapi.codegen \
   --out src/tangle_api/generated
 ```
 
+For a project-local custom API package, write both the schema snapshot and generated modules under that project's source tree, then run tools/tests from the project environment so `src/tangle_api` is earlier on `sys.path` than the official site-packages package:
+
+```bash
+uv run python -m tangle_cli.openapi.codegen \
+  --openapi-url https://api.example/openapi.json \
+  --openapi src/tangle_api/schema/openapi.json \
+  --out src/tangle_api/generated
+```
+
+That project-local `tangle_api` package can be an editable/package source tree. If you ship the custom API bindings as a wheel or source distribution, use the distribution name `tangle-api` and a compatible version for the `tangle-cli` release you are using. A PEP 440 local version such as `0.0.1a3+yourorg` can satisfy a public `==0.0.1a3` dependency while distinguishing your private build. Provide that package through your private index, `--find-links`, or uv source configuration so the resolver chooses it instead of the public official package.
+
 Generate from a backend checkout explicitly:
 
 ```bash
@@ -347,48 +358,29 @@ uv run --group codegen python -m tangle_cli.openapi.codegen \
 
 Important codegen options:
 
-- `--out`: directory that receives `__init__.py`, `models.py`, and `operations.py`. Defaults to `packages/tangle-api/src/tangle_api/generated`.
+- `--out`: directory that receives `__init__.py`, `runtime.py`, `models.py`, and `operations.py`. Defaults to `packages/tangle-api/src/tangle_api/generated`.
 - `--operations-class-name`: generated operations mixin class name. Defaults to `GeneratedTangleApiOperations`.
-- `--model-extension-module`: importable module with `MODEL_EXTENSIONS`; repeat to compose modules.
 - `--model-alias`: expose a stable public model name from one or more source schema names, e.g. `ComponentSpec=ComponentSpecOutput,ComponentSpecInput`.
 - `--request-body-schema` / `--request-body-schema-file`: override a specific operation's JSON request-body schema without mutating the fetched OpenAPI document.
 
 At runtime, more `tangle api ...` commands become available in two ways:
 
-1. Static codegen: regenerate and install/provide a `tangle_api.generated` package for the schema.
+1. Static codegen: regenerate and install/provide a local or packaged `tangle_api` package containing `tangle_api.generated` and, for official-schema CLI discovery, `tangle_api.schema`.
 2. Dynamic cache: run `tangle api refresh --base-url ...` and use `--schema-source auto` or `--schema-source cache` to expose cached-only operations through the dynamic CLI.
 
-## Generated model extension pattern
+The supported workaround hierarchy for custom API consumers is: prefer a project-local `src/tangle_api` package that shadows site-packages for that project; if distributing bindings, prefer a compatible private `tangle-api` distribution; reserve `--no-deps` installs or manual uninstalls of the official package for controlled expert environments where you manually provide all dependencies and the generated/custom `tangle_api` package.
 
-Generated models use a generated implementation base plus a stable public subclass. For example, codegen emits this shape for a model with a handwritten extension:
+## Runtime generated model extension pattern
+
+`tangle_api.generated.models` is a leaf package and codegen emits plain generated Pydantic models directly:
 
 ```python
-class _ComponentSpecGenerated(TangleGeneratedModel):
+class ComponentSpec(TangleGeneratedModel):
     name: Any = None
     # generated OpenAPI fields...
-
-class ComponentSpec(ComponentSpecExtensions, _ComponentSpecGenerated):
-    pass
 ```
 
-The public class is a subclass rather than an alias because the public class name is the stable contract while the generated base can be regenerated. Subclassing lets the public class keep the OpenAPI/Pydantic fields from `_ComponentSpecGenerated` and add or override behavior through normal Python MRO.
-
-Extension bases are placed to the **left** of the generated base:
-
-```python
-class ComponentSpec(ComponentSpecExtensions, _ComponentSpecGenerated):
-    pass
-```
-
-That means extension methods/properties override generated-base behavior when names overlap, while generated fields and `TangleGeneratedModel` runtime helpers such as `to_dict()` remain available.
-
-The built-in default extension module is:
-
-```text
-tangle_cli.generated_model_extensions
-```
-
-It defines:
+Generated models do not import `tangle_cli` and codegen does not bake downstream extension modules into `tangle_api`. Downstream packages compose their own extended model namespace at runtime. In `tangle_cli.models`, the default CLI mixins are declared in `tangle_cli.generated_model_extensions`:
 
 ```python
 MODEL_EXTENSIONS = {
@@ -398,42 +390,11 @@ MODEL_EXTENSIONS = {
 }
 ```
 
-During codegen, `tangle_api.generated.models` imports those extension classes from `tangle_cli.generated_model_extensions`. This preserves the package boundary: `tangle_api` remains generated bindings, while `tangle_cli` owns handwritten runtime and extension behavior.
+`tangle_cli.models.compose_models(...)` reads those mappings and creates subclasses in the `tangle_cli.models` namespace, e.g. `ComponentSpec(ComponentSpecExtensions, tangle_api.generated.models.ComponentSpec)`, without mutating `tangle_api.generated.models`. The generated operations layer also calls `_response_model(model_name, default)` so `TangleApiClient` can deserialize responses into the CLI-composed classes while the base `GeneratedTangleApiOperations` remains downstream-agnostic.
 
-Downstream projects can layer their own extensions:
+Downstream projects can use the same pattern in their own namespace: import base classes from `tangle_api.generated.models`, define method/property-only mixins plus a `MODEL_EXTENSIONS` mapping, and compose subclasses locally. Avoid global monkey-patching of `tangle_api.generated.models`.
 
-```python
-# my_project/tangle_model_extensions.py
-class MyComponentSpecExtensions:
-    @property
-    def owning_team(self) -> str | None:
-        return (self.metadata or {}).get("annotations", {}).get("team")
-
-MODEL_EXTENSIONS = {
-    "ComponentSpec": "MyComponentSpecExtensions",
-}
-```
-
-```bash
-uv run python -m tangle_cli.openapi.codegen \
-  --openapi-url https://api.example/openapi.json \
-  --out src/tangle_api/generated \
-  --model-extension-module my_project.tangle_model_extensions
-```
-
-The default module is applied first. Repeated `--model-extension-module` values are applied in order, and later/downstream modules become leftmost in the generated public class MRO, so they override earlier/default extensions. If two modules export the same extension class name, codegen imports them with deterministic aliases.
-
-Pass an empty string to disable built-in default extensions:
-
-```bash
-uv run python -m tangle_cli.openapi.codegen \
-  --from-snapshot \
-  --model-extension-module ""
-```
-
-The same empty-string sentinel can disable built-in `--model-alias` defaults. Built-in aliases keep stable public model names such as `ComponentSpec` even when a backend schema uses names like `ComponentSpecOutput` or `ComponentSpecInput`.
-
-Extension classes should be importable from their modules and should not import generated model classes. They should be mixins over generated data, not replacements for generated schemas.
+Built-in `--model-alias` defaults still keep stable public model names such as `ComponentSpec` even when a backend schema uses names like `ComponentSpecOutput` or `ComponentSpecInput`.
 
 ## Extending SDK behavior
 

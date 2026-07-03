@@ -22,7 +22,7 @@ from .handler import TangleCliHandler
 from .logger import Logger
 
 if TYPE_CHECKING:
-    from tangle_api.generated.models import ComponentSpec
+    from tangle_cli.models import ComponentSpec
 
 
 class ProcessingOutcome(str, Enum):
@@ -171,12 +171,12 @@ class ComponentPublisher(TangleCliHandler):
         if self.component_spec_model is not None:
             return self.component_spec_model
         try:
-            from tangle_api.generated.models import ComponentSpec
+            from tangle_cli.models import ComponentSpec
         except ModuleNotFoundError as exc:
             if exc.name == "tangle_api":
                 raise RuntimeError(
                     "Native generated Tangle API bindings are required for component publishing. "
-                    "Install tangle-cli[native] or provide a local tangle_api.generated package."
+                    "Install the default tangle-cli package with tangle-api, run from a project where local src/tangle_api shadows site-packages, or install a compatible custom tangle-api package."
                 ) from exc
             raise
         return ComponentSpec

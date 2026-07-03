@@ -1,4 +1,4 @@
-"""Runtime helpers shared by generated Tangle API model packages."""
+"""Runtime helpers for generated Tangle API model packages."""
 
 from __future__ import annotations
 

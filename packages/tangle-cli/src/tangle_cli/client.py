@@ -26,11 +26,13 @@ from .api_transport import (
     log_http_exchange,
     tangle_verbose_enabled,
 )
-from tangle_api.generated.models import ComponentSpec, GetExecutionInfoResponse
 from tangle_api.generated.operations import GeneratedTangleApiOperations
+from . import models as _cli_models
 from .logger import Logger, _null_logger, get_default_logger
 from .models import (
     ComponentInfo,
+    ComponentSpec,
+    GetExecutionInfoResponse,
     GraphExecutionState,
     PipelineRun,
     RunDetails,
@@ -77,6 +79,11 @@ class TangleApiClient(GeneratedTangleApiOperations):
         self.timeout = timeout
         self.session = session or requests.Session()
         self.include_env_credentials = include_env_credentials
+
+    def _response_model(self, model_name: str, default: Any) -> Any:
+        """Use CLI-composed models for generated operation deserialization."""
+
+        return getattr(_cli_models, model_name, default)
 
     def set_verbose(self, enabled: bool) -> None:
         """Enable or disable request logging."""

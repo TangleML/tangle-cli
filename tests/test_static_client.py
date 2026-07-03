@@ -9,14 +9,14 @@ import requests
 from tangle_cli.client import TangleApiClient
 from tangle_cli.logger import CaptureLogger
 from tangle_api.generated.models import (
-    GetExecutionInfoResponse,
-    GetGraphExecutionStateResponse,
+    GetExecutionInfoResponse as BaseGetExecutionInfoResponse,
+    GetGraphExecutionStateResponse as BaseGetGraphExecutionStateResponse,
     ListPublishedComponentsResponse,
     PipelineRunResponse,
     PublishedComponentResponse,
     SecretInfoResponse,
 )
-from tangle_cli.models import ComponentSpec
+from tangle_cli.models import ComponentSpec, GetExecutionInfoResponse, GetGraphExecutionStateResponse
 
 
 def response(payload: Any = None, status_code: int = 200) -> requests.Response:
@@ -43,7 +43,8 @@ class FakeSession:
         return response({})
 
 
-def test_generated_graph_state_response_extensions_work_at_runtime() -> None:
+def test_cli_graph_state_response_extensions_work_at_runtime() -> None:
+    assert issubclass(GetGraphExecutionStateResponse, BaseGetGraphExecutionStateResponse)
     state = GetGraphExecutionStateResponse.from_dict({
         "child_execution_status_stats": {
             "exec-1": {"SUCCEEDED": 2, "FAILED": 1},
@@ -125,6 +126,26 @@ def test_public_static_client_import_and_generated_operation() -> None:
     assert run["id"] == "run-1"
     assert session.calls[0]["method"] == "GET"
     assert session.calls[0]["url"] == "https://api.test/api/pipeline_runs/run%2F1"
+
+
+def test_static_client_generated_operations_use_cli_model_lookup_override() -> None:
+    session = FakeSession([
+        response({
+            "id": "exec-1",
+            "task_spec": {"componentRef": {"spec": {"name": "task"}}},
+            "input_artifacts": {},
+            "output_artifacts": {},
+        })
+    ])
+    client = TangleApiClient("https://api.test", session=session)
+
+    details = client.executions_details("exec-1")
+
+    assert isinstance(details, GetExecutionInfoResponse)
+    assert isinstance(details, BaseGetExecutionInfoResponse)
+    assert details.__class__ is GetExecutionInfoResponse
+    assert details.tasks == {}
+    assert details.raw["id"] == "exec-1"
 
 
 def test_request_json_instantiates_list_response_models() -> None:

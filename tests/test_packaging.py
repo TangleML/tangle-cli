@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 from tangle_cli.openapi import codegen
 
@@ -98,7 +102,7 @@ def _write_consumer_tangle_api(path: Path) -> Path:
     return source_root
 
 
-def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
+def test_tangle_cli_wheel_supports_expert_no_deps_import_path_without_tangle_api(tmp_path) -> None:
     wheel = _build_wheel(tmp_path)
     stubs = tmp_path / "stubs"
     _write_import_stubs(stubs)
@@ -113,9 +117,9 @@ def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
     requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
     assert not any(name.startswith("tangle_api/") for name in names)
     assert "tangle_cli/openapi/openapi.json" not in names
-    assert "Version: 0.0.1a2" in metadata
-    assert "Requires-Dist: tangle-api==0.0.1a2" not in requires_dist
-    assert "Requires-Dist: tangle-api==0.0.1a2 ; extra == 'native'" in requires_dist
+    assert "Version: 0.0.1a3" in metadata
+    assert "Requires-Dist: tangle-api==0.0.1a3" in requires_dist
+    assert not any("extra == 'native'" in line for line in requires_dist)
     assert "Provides-Extra: native" in metadata
     assert "tangle = tangle_cli.cli:main" in entry_points
     assert "tangle-cli = tangle_cli.cli:main" in entry_points
@@ -141,7 +145,11 @@ def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
     )
 
 
-def test_tangle_cli_wheel_api_refresh_builds_without_native_tangle_api(tmp_path) -> None:
+def test_custom_tangle_api_local_version_can_satisfy_cli_pin() -> None:
+    assert Version("0.0.1a3+yourorg") in SpecifierSet("==0.0.1a3")
+
+
+def test_tangle_cli_wheel_api_refresh_builds_in_expert_no_deps_fallback(tmp_path) -> None:
     wheel = _build_wheel(tmp_path)
     stubs = tmp_path / "stubs"
     _write_import_stubs(stubs)
@@ -167,14 +175,15 @@ def test_tangle_cli_wheel_api_refresh_builds_without_native_tangle_api(tmp_path)
     )
 
 
-def test_tangle_cli_wheel_binds_to_consumer_local_tangle_api(tmp_path) -> None:
+def test_tangle_cli_wheel_binds_to_project_local_tangle_api_before_official_package(tmp_path) -> None:
     cli_wheel = _build_wheel(tmp_path / "cli")
+    api_wheel = _build_wheel(tmp_path / "api", "--package", "tangle-api")
     consumer_source = _write_consumer_tangle_api(tmp_path / "consumer")
     stubs = tmp_path / "stubs"
     _write_runtime_stubs(stubs)
     env = {
         **os.environ,
-        "PYTHONPATH": os.pathsep.join([str(consumer_source), str(cli_wheel), str(stubs)]),
+        "PYTHONPATH": os.pathsep.join([str(consumer_source), str(cli_wheel), str(api_wheel), str(stubs)]),
     }
 
     subprocess.run(
@@ -188,8 +197,9 @@ def test_tangle_cli_wheel_binds_to_consumer_local_tangle_api(tmp_path) -> None:
             "import tangle_cli.models as domain_models; "
             "client = TangleApiClient('https://api.test'); "
             "assert client.consumer_generated_marker() == 'consumer-local-operations'; "
-            "assert client_module.ComponentSpec is generated_models.ComponentSpec; "
-            "assert domain_models.ComponentSpec is generated_models.ComponentSpec; "
+            "assert client_module.ComponentSpec is domain_models.ComponentSpec; "
+            "assert issubclass(domain_models.ComponentSpec, generated_models.ComponentSpec); "
+            "assert domain_models.ComponentSpec.source == 'consumer-local'; "
             "assert generated_models.ComponentSpec.source == 'consumer-local'; "
             "assert generated_models.__file__.startswith(%r)" % str(consumer_source),
         ],
@@ -237,7 +247,7 @@ def test_codegen_output_imports_as_consumer_local_tangle_api(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    codegen.generate(openapi, generated_dir, model_extension_module="")
+    codegen.generate(openapi, generated_dir)
 
     env = {**os.environ, "PYTHONPATH": str(source_root)}
     subprocess.run(
@@ -262,7 +272,59 @@ def test_codegen_output_imports_as_consumer_local_tangle_api(tmp_path) -> None:
     )
 
 
-def test_native_wheels_provide_static_client_binding(tmp_path) -> None:
+def test_tangle_api_source_has_no_tangle_cli_imports() -> None:
+    source_root = _REPO_ROOT / "packages" / "tangle-api" / "src" / "tangle_api"
+    for source in source_root.rglob("*.py"):
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                imported = [node.module or ""]
+            else:
+                continue
+            assert not any(
+                name == "tangle_cli" or name.startswith("tangle_cli.")
+                for name in imported
+            ), f"{source} imports {imported}"
+
+
+def test_tangle_api_wheel_metadata_and_import_are_leaf(tmp_path) -> None:
+    api_wheel = _build_wheel(tmp_path / "api", "--package", "tangle-api")
+    with zipfile.ZipFile(api_wheel) as archive:
+        metadata_name = next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+        metadata = archive.read(metadata_name).decode()
+
+    requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
+    assert "Requires-Dist: pydantic>=2.0" in requires_dist
+    assert not any("tangle-cli" in line for line in requires_dist)
+
+    env = {**os.environ, "PYTHONPATH": str(api_wheel)}
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import importlib.abc\n"
+            "import sys\n"
+            "class BlockTangleCli(importlib.abc.MetaPathFinder):\n"
+            "    def find_spec(self, fullname, path=None, target=None):\n"
+            "        if fullname == 'tangle_cli' or fullname.startswith('tangle_cli.'):\n"
+            "            raise ModuleNotFoundError('blocked tangle_cli import')\n"
+            "        return None\n"
+            "sys.meta_path.insert(0, BlockTangleCli()); "
+            "import tangle_api.generated.models as models; "
+            "assert models.ComponentSpec.__name__ == 'ComponentSpec'; "
+            "assert not any(name == 'tangle_cli' or name.startswith('tangle_cli.') for name in sys.modules)",
+        ],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_default_wheels_provide_static_client_binding(tmp_path) -> None:
     cli_wheel = _build_wheel(tmp_path / "cli")
     api_wheel = _build_wheel(tmp_path / "api", "--package", "tangle-api")
     with zipfile.ZipFile(api_wheel) as archive:
@@ -273,8 +335,9 @@ def test_native_wheels_provide_static_client_binding(tmp_path) -> None:
         metadata = archive.read(metadata_name).decode()
 
     requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
-    assert "Version: 0.0.1a2" in metadata
-    assert "Requires-Dist: tangle-cli==0.0.1a2" in requires_dist
+    assert "Version: 0.0.1a3" in metadata
+    assert "Requires-Dist: pydantic>=2.0" in requires_dist
+    assert not any("tangle-cli" in line for line in requires_dist)
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(cli_wheel), str(api_wheel)])}
 
     subprocess.run(

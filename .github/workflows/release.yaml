@@ -30,12 +30,12 @@ jobs:
       # which distribution is installed for tangle-cli smoke tests.
       - name: Smoke test tangle-cli wheel
         run: |
-          uv run --isolated --no-project --with dist/tangle_cli-*.whl tangle version
-          uv run --isolated --no-project --with dist/tangle_cli-*.whl tangle-cli version
+          uv run --isolated --no-project --find-links dist --with dist/tangle_cli-*.whl tangle version
+          uv run --isolated --no-project --find-links dist --with dist/tangle_cli-*.whl tangle-cli version
       - name: Smoke test tangle-cli source distribution
         run: |
-          uv run --isolated --no-project --with dist/tangle_cli-*.tar.gz tangle version
-          uv run --isolated --no-project --with dist/tangle_cli-*.tar.gz tangle-cli version
+          uv run --isolated --no-project --find-links dist --with dist/tangle_cli-*.tar.gz tangle version
+          uv run --isolated --no-project --find-links dist --with dist/tangle_cli-*.tar.gz tangle-cli version
       - name: Smoke test tangle-api wheel
         run: |
           uv run --isolated --no-project \
@@ -48,7 +48,7 @@ jobs:
             --with dist/tangle_cli-*.tar.gz \
             --with dist/tangle_api-*.tar.gz \
             python -c "import importlib.metadata as m; import tangle_api.generated.models; import tangle_api.schema; assert m.version('tangle-api') == m.version('tangle-cli')"
-      - name: Smoke test native extra resolution from local dist
+      - name: Smoke test native extra compatibility alias from local dist
         run: |
           cli_wheel="$(echo dist/tangle_cli-*.whl)"
           uv run --isolated --no-project --find-links dist --with "${cli_wheel}[native]" tangle-cli version
