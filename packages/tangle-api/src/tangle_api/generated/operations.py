@@ -26,6 +26,11 @@ class GeneratedTangleApiOperations:
             response_model: Any = None,
         ) -> Any: ...
 
+    def _response_model(self, model_name: str, default: Any) -> Any:
+        """Return the model class used to deserialize a generated response."""
+
+        return default
+
     def admin_execution_node_status(self, id: Any, status: Any) -> None:
         return self._request_json(
             'PUT',
@@ -63,7 +68,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params=None,
             json_data=None,
-            response_model=GetArtifactInfoResponse,
+            response_model=self._response_model('GetArtifactInfoResponse', GetArtifactInfoResponse),
         )
 
     def artifacts_signed_artifact_url(self, id: Any) -> GetArtifactSignedUrlResponse:
@@ -73,7 +78,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params=None,
             json_data=None,
-            response_model=GetArtifactSignedUrlResponse,
+            response_model=self._response_model('GetArtifactSignedUrlResponse', GetArtifactSignedUrlResponse),
         )
 
     def component_libraries_list(self, name_substring: Any = None) -> ListComponentLibrariesResponse:
@@ -83,7 +88,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params={'name_substring': name_substring},
             json_data=None,
-            response_model=ListComponentLibrariesResponse,
+            response_model=self._response_model('ListComponentLibrariesResponse', ListComponentLibrariesResponse),
         )
 
     def component_libraries_create(self, name: Any, hide_from_search: Any = None) -> ComponentLibraryResponse:
@@ -93,7 +98,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params={'hide_from_search': hide_from_search},
             json_data={'name': name},
-            response_model=ComponentLibraryResponse,
+            response_model=self._response_model('ComponentLibraryResponse', ComponentLibraryResponse),
         )
 
     def component_libraries_get(self, id: Any, include_component_texts: Any = None) -> ComponentLibraryResponse:
@@ -103,7 +108,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params={'include_component_texts': include_component_texts},
             json_data=None,
-            response_model=ComponentLibraryResponse,
+            response_model=self._response_model('ComponentLibraryResponse', ComponentLibraryResponse),
         )
 
     def component_libraries_update(self, id: Any, name: Any, hide_from_search: Any = None) -> ComponentLibraryResponse:
@@ -113,7 +118,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params={'hide_from_search': hide_from_search},
             json_data={'name': name},
-            response_model=ComponentLibraryResponse,
+            response_model=self._response_model('ComponentLibraryResponse', ComponentLibraryResponse),
         )
 
     def component_library_pins_me(self) -> UserComponentLibraryPinsResponse:
@@ -123,7 +128,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params=None,
             json_data=None,
-            response_model=UserComponentLibraryPinsResponse,
+            response_model=self._response_model('UserComponentLibraryPinsResponse', UserComponentLibraryPinsResponse),
         )
 
     def component_library_pins_put_me(self, body: Any = None) -> None:
@@ -143,7 +148,7 @@ class GeneratedTangleApiOperations:
             path_params={'digest': digest},
             params=None,
             json_data=None,
-            response_model=ComponentResponse,
+            response_model=self._response_model('ComponentResponse', ComponentResponse),
         )
 
     def executions_artifacts(self, id: Any) -> GetExecutionArtifactsResponse:
@@ -153,7 +158,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params=None,
             json_data=None,
-            response_model=GetExecutionArtifactsResponse,
+            response_model=self._response_model('GetExecutionArtifactsResponse', GetExecutionArtifactsResponse),
         )
 
     def executions_container_log(self, id: Any) -> GetContainerExecutionLogResponse:
@@ -163,7 +168,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params=None,
             json_data=None,
-            response_model=GetContainerExecutionLogResponse,
+            response_model=self._response_model('GetContainerExecutionLogResponse', GetContainerExecutionLogResponse),
         )
 
     def executions_container_state(self, id: Any, include_execution_nodes_linked_to_same_container_execution: Any = None) -> GetContainerExecutionStateResponse:
@@ -173,7 +178,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params={'include_execution_nodes_linked_to_same_container_execution': include_execution_nodes_linked_to_same_container_execution},
             json_data=None,
-            response_model=GetContainerExecutionStateResponse,
+            response_model=self._response_model('GetContainerExecutionStateResponse', GetContainerExecutionStateResponse),
         )
 
     def executions_details(self, id: Any) -> GetExecutionInfoResponse:
@@ -183,7 +188,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params=None,
             json_data=None,
-            response_model=GetExecutionInfoResponse,
+            response_model=self._response_model('GetExecutionInfoResponse', GetExecutionInfoResponse),
         )
 
     def executions_graph_execution_state(self, id: Any) -> GetGraphExecutionStateResponse:
@@ -193,7 +198,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params=None,
             json_data=None,
-            response_model=GetGraphExecutionStateResponse,
+            response_model=self._response_model('GetGraphExecutionStateResponse', GetGraphExecutionStateResponse),
         )
 
     def executions_state(self, id: Any) -> GetGraphExecutionStateResponse:
@@ -203,7 +208,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params=None,
             json_data=None,
-            response_model=GetGraphExecutionStateResponse,
+            response_model=self._response_model('GetGraphExecutionStateResponse', GetGraphExecutionStateResponse),
         )
 
     def pipeline_runs_list(self, page_token: Any = None, filter: Any = None, filter_query: Any = None, include_pipeline_names: Any = None, include_execution_stats: Any = None) -> ListPipelineJobsResponse:
@@ -213,7 +218,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params={'page_token': page_token, 'filter': filter, 'filter_query': filter_query, 'include_pipeline_names': include_pipeline_names, 'include_execution_stats': include_execution_stats},
             json_data=None,
-            response_model=ListPipelineJobsResponse,
+            response_model=self._response_model('ListPipelineJobsResponse', ListPipelineJobsResponse),
         )
 
     def pipeline_runs_create(self, body: Any = None) -> PipelineRunResponse:
@@ -223,7 +228,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params=None,
             json_data=body,
-            response_model=PipelineRunResponse,
+            response_model=self._response_model('PipelineRunResponse', PipelineRunResponse),
         )
 
     def pipeline_runs_get(self, id: Any, include_execution_stats: Any = None) -> PipelineRunResponse:
@@ -233,7 +238,7 @@ class GeneratedTangleApiOperations:
             path_params={'id': id},
             params={'include_execution_stats': include_execution_stats},
             json_data=None,
-            response_model=PipelineRunResponse,
+            response_model=self._response_model('PipelineRunResponse', PipelineRunResponse),
         )
 
     def pipeline_runs_annotations(self, id: Any) -> dict[str, Any]:
@@ -283,7 +288,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params={'include_deprecated': include_deprecated, 'name_substring': name_substring, 'published_by_substring': published_by_substring, 'digest': digest},
             json_data=None,
-            response_model=ListPublishedComponentsResponse,
+            response_model=self._response_model('ListPublishedComponentsResponse', ListPublishedComponentsResponse),
         )
 
     def published_components_create(self, digest: Any = None, name: Any = None, tag: Any = None, text: Any = None, url: Any = None) -> PublishedComponentResponse:
@@ -293,7 +298,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params=None,
             json_data={key: value for key, value in {'digest': digest, 'name': name, 'tag': tag, 'text': text, 'url': url}.items() if value is not None},
-            response_model=PublishedComponentResponse,
+            response_model=self._response_model('PublishedComponentResponse', PublishedComponentResponse),
         )
 
     def published_components_update(self, digest: Any, deprecated: Any = None, superseded_by: Any = None) -> PublishedComponentResponse:
@@ -303,7 +308,7 @@ class GeneratedTangleApiOperations:
             path_params={'digest': digest},
             params={'deprecated': deprecated, 'superseded_by': superseded_by},
             json_data=None,
-            response_model=PublishedComponentResponse,
+            response_model=self._response_model('PublishedComponentResponse', PublishedComponentResponse),
         )
 
     def secrets_list(self) -> ListSecretsResponse:
@@ -313,7 +318,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params=None,
             json_data=None,
-            response_model=ListSecretsResponse,
+            response_model=self._response_model('ListSecretsResponse', ListSecretsResponse),
         )
 
     def secrets_create(self, secret_name: Any, secret_value: Any, description: Any = None, expires_at: Any = None) -> SecretInfoResponse:
@@ -323,7 +328,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params={'secret_name': secret_name, 'description': description, 'expires_at': expires_at},
             json_data={'secret_value': secret_value},
-            response_model=SecretInfoResponse,
+            response_model=self._response_model('SecretInfoResponse', SecretInfoResponse),
         )
 
     def secrets_update(self, secret_name: Any, secret_value: Any, description: Any = None, expires_at: Any = None) -> SecretInfoResponse:
@@ -333,7 +338,7 @@ class GeneratedTangleApiOperations:
             path_params={'secret_name': secret_name},
             params={'description': description, 'expires_at': expires_at},
             json_data={'secret_value': secret_value},
-            response_model=SecretInfoResponse,
+            response_model=self._response_model('SecretInfoResponse', SecretInfoResponse),
         )
 
     def secrets_delete(self, secret_name: Any) -> None:
@@ -353,7 +358,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params=None,
             json_data=None,
-            response_model=GetUserResponse,
+            response_model=self._response_model('GetUserResponse', GetUserResponse),
         )
 
     def users_me_settings(self, setting_names: Any = None) -> UserSettingsResponse:
@@ -363,7 +368,7 @@ class GeneratedTangleApiOperations:
             path_params=None,
             params={'setting_names': setting_names},
             json_data=None,
-            response_model=UserSettingsResponse,
+            response_model=self._response_model('UserSettingsResponse', UserSettingsResponse),
         )
 
     def users_patch_me_settings(self, body: Any = None) -> None:

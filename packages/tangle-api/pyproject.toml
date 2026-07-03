@@ -1,6 +1,6 @@
 [project]
 name = "tangle-api"
-version = "0.0.1a2"
+version = "0.0.1a3"
 description = "Checked-in generated Tangle API models and operation proxies"
 readme = "README.md"
 authors = [
@@ -10,7 +10,6 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
-    "tangle-cli==0.0.1a2",
 ]
 
 [build-system]

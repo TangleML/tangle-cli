@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from tangle_api.generated import models as generated_models
 from tangle_api.generated.models import (
     ArtifactData,
     ComponentSpec as GeneratedComponentSpec,
     GetArtifactInfoResponse,
-    GetExecutionInfoResponse,
+    GetExecutionInfoResponse as GeneratedGetExecutionInfoResponse,
 )
+import tangle_cli.models as model_module
 from tangle_cli.models import (
     ArtifactInfo,
     ComponentInfo,
     ComponentSpec,
     ContainerState,
+    GetExecutionInfoResponse,
     GraphExecutionState,
     PipelineRun,
     SecretInfo,
@@ -61,8 +66,27 @@ class TestGraphExecutionState:
 
 class TestComponentSpec:
     def test_component_spec_is_generated_model_with_extensions(self):
-        assert ComponentSpec is GeneratedComponentSpec
+        assert ComponentSpec is not GeneratedComponentSpec
+        assert issubclass(ComponentSpec, GeneratedComponentSpec)
         assert ComponentSpec.__mro__[1].__name__ == "ComponentSpecExtensions"
+
+    def test_compose_models_uses_model_extensions_mapping_without_mutating_generated_models(self):
+        class DemoComponentSpecMixin:
+            @property
+            def demo_marker(self):
+                return "runtime-extension"
+
+        extension_module = SimpleNamespace(
+            MODEL_EXTENSIONS={"ComponentSpec": "DemoComponentSpecMixin"},
+            DemoComponentSpecMixin=DemoComponentSpecMixin,
+        )
+
+        composed = model_module.compose_models(generated_models, extension_module)
+
+        assert composed["ComponentSpec"] is not GeneratedComponentSpec
+        assert issubclass(composed["ComponentSpec"], GeneratedComponentSpec)
+        assert composed["ComponentSpec"](name="demo").demo_marker == "runtime-extension"
+        assert not hasattr(GeneratedComponentSpec(name="base"), "demo_marker")
 
     def test_from_yaml_basic(self):
         yaml_text = """\
@@ -294,6 +318,8 @@ class TestHelpers:
 
 class TestGetExecutionInfoResponse:
     def test_execution_details_generated_model_has_extensions(self):
+        assert GetExecutionInfoResponse is not GeneratedGetExecutionInfoResponse
+        assert issubclass(GetExecutionInfoResponse, GeneratedGetExecutionInfoResponse)
         assert GetExecutionInfoResponse.__mro__[1].__name__ == "GetExecutionInfoResponseExtensions"
 
     def test_from_dict_parses_artifacts(self):

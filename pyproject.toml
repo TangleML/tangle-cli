@@ -1,6 +1,6 @@
 [project]
 name = "tangle-cli"
-version = "0.0.1a2"
+version = "0.0.1a3"
 description = "CLI for Tangle, the open-source ML pipeline orchestration platform"
 readme = "README.md"
 authors = [
@@ -28,7 +28,7 @@ Repository = "https://github.com/TangleML/tangle-cli"
 Issues = "https://github.com/TangleML/tangle-cli/issues"
 
 [project.optional-dependencies]
-native = ["tangle-api==0.0.1a2"]
+native = ["tangle-api==0.0.1a3"]
 
 [project.scripts]
 tangle = "tangle_cli.cli:main"

@@ -22,9 +22,7 @@ import sys
 import tempfile
 import urllib.parse
 import urllib.request
-from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +38,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[5]
 _GENERATED_DIR = _REPO_ROOT / "packages" / "tangle-api" / "src" / "tangle_api" / "generated"
 DEFAULT_BACKEND_PATH = _REPO_ROOT / "third_party" / "tangle"
 DEFAULT_OPERATIONS_CLASS_NAME = "GeneratedTangleApiOperations"
-DEFAULT_MODEL_EXTENSION_MODULE = "tangle_cli.generated_model_extensions"
 DEFAULT_MODEL_ALIASES: dict[str, tuple[str, ...]] = {
     "ComponentSpec": (
         "ComponentSpec-Output",
@@ -373,171 +370,63 @@ def _apply_request_body_schema_overrides(
     return output
 
 
-@dataclass(frozen=True)
-class _ModelExtensionRef:
-    """Import reference for one generated model extension class."""
+def generate_runtime() -> str:
+    """Generate the small runtime module used by generated Pydantic models."""
 
-    module_name: str
-    class_name: str
-    alias: str
+    return '''"""Runtime helpers for generated Tangle API model packages."""
 
+from __future__ import annotations
 
-def _model_extension_modules(
-    model_extension_module: str | Sequence[str] | None,
-) -> list[str]:
-    """Return ordered model extension modules, applying defaults first.
+from typing import Any
 
-    ``None`` means the built-in default module. A string or sequence appends
-    downstream modules after the built-in default. The empty-string sentinel
-    disables the default module and is otherwise ignored.
-    """
+from pydantic import BaseModel
 
-    if model_extension_module is None:
-        modules: list[str] = []
-    elif isinstance(model_extension_module, str):
-        modules = [model_extension_module]
-    else:
-        modules = list(model_extension_module)
-
-    include_default = True
-    if "" in modules:
-        include_default = False
-        modules = [module for module in modules if module != ""]
-
-    ordered = ([DEFAULT_MODEL_EXTENSION_MODULE] if include_default else []) + modules
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for module in ordered:
-        if not module or module in seen:
-            continue
-        seen.add(module)
-        deduped.append(module)
-    return deduped
+try:
+    from pydantic import ConfigDict
+except ImportError:  # pragma: no cover - pydantic v1 fallback
+    ConfigDict = None  # type: ignore[assignment]
 
 
-def _validate_module_name(module_name: str) -> str:
-    parts = module_name.split(".")
-    if not parts or any(not re.fullmatch(r"[A-Za-z_]\w*", part) or keyword.iskeyword(part) for part in parts):
-        raise ValueError(f"Invalid model extension module name: {module_name!r}")
-    return module_name
+class TangleGeneratedModel(BaseModel):
+    """Base for generated response models with dict-like conveniences."""
+
+    if ConfigDict is not None:
+        model_config = ConfigDict(extra="allow", populate_by_name=True)
+    else:  # pragma: no cover - pydantic v1 fallback
+        class Config:
+            extra = "allow"
+            allow_population_by_field_name = True
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.to_dict().get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_dict()[key]
+
+    def to_dict(self) -> dict[str, Any]:
+        if hasattr(self, "model_dump"):
+            return self.model_dump(by_alias=True)
+        return self.dict(by_alias=True)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Any:
+        if hasattr(cls, "model_validate"):
+            return cls.model_validate(data)
+        return cls.parse_obj(data)
 
 
-def _model_extension_mapping(module_name: str) -> dict[str, str]:
-    """Load and validate a MODEL_EXTENSIONS mapping from an extension module."""
-
-    module_name = _validate_module_name(module_name)
-    try:
-        module = importlib.import_module(module_name)
-    except Exception as exc:  # pragma: no cover - importlib preserves details
-        raise ValueError(f"Could not import model extension module {module_name!r}: {exc}") from exc
-
-    mapping = getattr(module, "MODEL_EXTENSIONS", None)
-    if not isinstance(mapping, dict):
-        raise ValueError(
-            f"Model extension module {module_name!r} must define a MODEL_EXTENSIONS dict"
-        )
-
-    extensions: dict[str, str] = {}
-    for model_name, extension_name in mapping.items():
-        if not isinstance(model_name, str) or not isinstance(extension_name, str):
-            raise ValueError("MODEL_EXTENSIONS keys and values must be strings")
-        _validate_class_name(model_name)
-        _validate_class_name(extension_name)
-        if not hasattr(module, extension_name):
-            raise ValueError(
-                f"Model extension module {module_name!r} does not define {extension_name!r}"
-            )
-        extensions[model_name] = extension_name
-    return extensions
-
-
-def _model_extension_refs(
-    model_extension_module: str | Sequence[str] | None,
-) -> dict[str, list[_ModelExtensionRef]]:
-    """Resolve model extension refs by generated class in configured order."""
-
-    refs_by_model: dict[str, list[_ModelExtensionRef]] = {}
-    raw_refs: list[_ModelExtensionRef] = []
-    for module_name in _model_extension_modules(model_extension_module):
-        for model_name, extension_name in _model_extension_mapping(module_name).items():
-            ref = _ModelExtensionRef(
-                module_name=module_name,
-                class_name=extension_name,
-                alias=extension_name,
-            )
-            refs_by_model.setdefault(model_name, []).append(ref)
-            raw_refs.append(ref)
-
-    unique_ref_keys: list[tuple[str, str]] = []
-    seen_ref_keys: set[tuple[str, str]] = set()
-    for ref in raw_refs:
-        key = (ref.module_name, ref.class_name)
-        if key in seen_ref_keys:
-            continue
-        seen_ref_keys.add(key)
-        unique_ref_keys.append(key)
-
-    class_name_counts = Counter(class_name for _, class_name in unique_ref_keys)
-    alias_counts: Counter[str] = Counter()
-    aliases_by_ref: dict[tuple[str, str], str] = {}
-    for module_name, class_name in unique_ref_keys:
-        if class_name_counts[class_name] == 1:
-            alias = class_name
-        else:
-            alias_base = f"_{_safe_identifier(module_name)}_{class_name}"
-            alias_counts[alias_base] += 1
-            alias = alias_base if alias_counts[alias_base] == 1 else f"{alias_base}_{alias_counts[alias_base]}"
-        aliases_by_ref[(module_name, class_name)] = alias
-
-    aliased: dict[str, list[_ModelExtensionRef]] = {}
-    for model_name, refs in refs_by_model.items():
-        aliased[model_name] = []
-        for ref in refs:
-            aliased[model_name].append(
-                _ModelExtensionRef(
-                    module_name=ref.module_name,
-                    class_name=ref.class_name,
-                    alias=aliases_by_ref[(ref.module_name, ref.class_name)],
-                )
-            )
-    return aliased
-
-
-def _model_extension_import_lines(refs_by_model: dict[str, list[_ModelExtensionRef]]) -> list[str]:
-    """Render deterministic import lines for configured model extensions."""
-
-    refs_by_module: dict[str, list[_ModelExtensionRef]] = {}
-    for refs in refs_by_model.values():
-        for ref in refs:
-            refs_by_module.setdefault(ref.module_name, []).append(ref)
-
-    lines: list[str] = []
-    for module_name, refs in sorted(refs_by_module.items()):
-        imports: list[str] = []
-        seen: set[tuple[str, str]] = set()
-        for ref in sorted(refs, key=lambda item: (item.class_name, item.alias)):
-            key = (ref.class_name, ref.alias)
-            if key in seen:
-                continue
-            seen.add(key)
-            if ref.alias == ref.class_name:
-                imports.append(ref.class_name)
-            else:
-                imports.append(f"{ref.class_name} as {ref.alias}")
-        lines.append(f"from {module_name} import {', '.join(imports)}")
-    return lines
+__all__ = ["TangleGeneratedModel"]
+'''
 
 
 def generate_models(
     schema: dict[str, Any],
-    model_extension_module: str | Sequence[str] | None = None,
     model_aliases: dict[str, Sequence[str] | str] | Sequence[str] | str | None = None,
 ) -> str:
-    """Generate Pydantic model classes and apply configured model extensions."""
+    """Generate plain/base Pydantic model classes."""
 
     raw_schemas = schema.get("components", {}).get("schemas", {}) or {}
     schemas, _ = _apply_model_aliases(raw_schemas, model_aliases)
-    extension_refs = _model_extension_refs(model_extension_module)
     lines: list[str] = [
         '"""Generated Pydantic models for the checked-in Tangle OpenAPI schema.\n\nDo not edit by hand; run ``uv run python -m tangle_cli.openapi.codegen``.\n"""',
         "",
@@ -547,25 +436,9 @@ def generate_models(
         "",
         "from pydantic import Field",
         "",
-        "from tangle_cli.generated_runtime import TangleGeneratedModel",
+        "from tangle_api.generated.runtime import TangleGeneratedModel",
         "",
     ]
-
-    generated_class_names = {
-        _class_name(schema_name)
-        for schema_name, schema_def in schemas.items()
-        if isinstance(schema_def, dict)
-        and (schema_def.get("type") in {"object", None} or "properties" in schema_def)
-    }
-    used_extensions = {
-        class_name: extension_refs[class_name]
-        for class_name in sorted(generated_class_names)
-        if class_name in extension_refs
-    }
-    imports = _model_extension_import_lines(used_extensions)
-    if imports:
-        lines.extend(imports)
-        lines.append("")
 
     exports: list[str] = []
     for schema_name, schema_def in sorted(schemas.items(), key=lambda item: _class_name(item[0])):
@@ -575,9 +448,7 @@ def generate_models(
             lines.extend([f"{class_name} = Any", ""])
             continue
         properties = schema_def.get("properties") or {}
-        extension_refs_for_class = used_extensions.get(class_name, [])
-        generated_base_name = f"_{class_name}Generated"
-        lines.extend([f"class {generated_base_name}(TangleGeneratedModel):"])
+        lines.append(f"class {class_name}(TangleGeneratedModel):")
         if not properties:
             lines.append("    pass")
         else:
@@ -588,13 +459,6 @@ def generate_models(
                 else:
                     lines.append(f"    {field_name}: Any = None")
         lines.append("")
-        extension_bases = [ref.alias for ref in reversed(extension_refs_for_class)]
-        bases = extension_bases + [generated_base_name]
-        lines.extend([
-            f"class {class_name}({', '.join(bases)}):",
-            "    pass",
-            "",
-        ])
 
     lines.append(f"__all__ = {exports!r}")
     lines.append("")
@@ -727,6 +591,11 @@ def generate_operations(
         "            response_model: Any = None,",
         "        ) -> Any: ...",
         "",
+        "    def _response_model(self, model_name: str, default: Any) -> Any:",
+        "        \"\"\"Return the model class used to deserialize a generated response.\"\"\"",
+        "",
+        "        return default",
+        "",
     ])
 
     used_methods: set[str] = set()
@@ -742,7 +611,7 @@ def generate_operations(
             raw_body_override=bool(operation.operation.get("x-tangle-cli-request-body-schema-override")),
         )
         response_model = _response_model_name(operation.operation, model_ref_aliases)
-        response_arg = response_model if response_model else "None"
+        response_arg = f"self._response_model({response_model!r}, {response_model})" if response_model else "None"
         response_annotation = _response_return_annotation(operation.operation, model_ref_aliases)
         if signature:
             def_line = f"    def {method_name}(self, {signature}) -> {response_annotation}:"
@@ -871,7 +740,6 @@ def generate(
     generated_dir: str | Path = _GENERATED_DIR,
     *,
     operations_class_name: str = DEFAULT_OPERATIONS_CLASS_NAME,
-    model_extension_module: str | Sequence[str] | None = None,
     model_aliases: dict[str, Sequence[str] | str] | Sequence[str] | str | None = None,
     request_body_schemas: dict[str, dict[str, Any]] | Sequence[str] | str | None = None,
 ) -> tuple[dict[str, Any], list[Path]]:
@@ -880,6 +748,7 @@ def generate(
     output_dir.mkdir(parents=True, exist_ok=True)
     generated_files = [
         output_dir / "__init__.py",
+        output_dir / "runtime.py",
         output_dir / "models.py",
         output_dir / "operations.py",
     ]
@@ -887,15 +756,15 @@ def generate(
         '"""Generated OpenAPI support modules."""\n',
         encoding="utf-8",
     )
-    generated_files[1].write_text(
+    generated_files[1].write_text(generate_runtime(), encoding="utf-8")
+    generated_files[2].write_text(
         generate_models(
             schema,
-            model_extension_module=model_extension_module,
             model_aliases=model_aliases,
         ),
         encoding="utf-8",
     )
-    generated_files[2].write_text(
+    generated_files[3].write_text(
         generate_operations(
             schema,
             operations_class_name=operations_class_name,
@@ -962,19 +831,6 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
-        "--model-extension-module",
-        action="append",
-        default=None,
-        help=(
-            "Importable module containing a MODEL_EXTENSIONS mapping from "
-            "generated model class names to extension class names. Repeat to "
-            "compose modules in order; later modules override earlier ones. "
-            "The built-in default module is applied first unless an empty string "
-            "is passed to disable it. "
-            f"(default first: {DEFAULT_MODEL_EXTENSION_MODULE})."
-        ),
-    )
-    parser.add_argument(
         "--model-alias",
         action="append",
         default=None,
@@ -1031,7 +887,6 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         _validate_class_name(args.operations_class_name)
-        _model_extension_refs(args.model_extension_module)
         _model_alias_mapping(args.model_alias)
         request_body_schema_overrides = _request_body_schema_mapping(args.request_body_schema)
         request_body_schema_overrides.update(_request_body_schema_file_mapping(args.request_body_schema_file))
@@ -1073,7 +928,6 @@ def main(argv: list[str] | None = None) -> None:
         openapi_path,
         args.out,
         operations_class_name=args.operations_class_name,
-        model_extension_module=args.model_extension_module,
         model_aliases=args.model_alias,
         request_body_schemas=request_body_schema_overrides,
     )
