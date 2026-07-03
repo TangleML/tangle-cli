@@ -1775,7 +1775,7 @@ wheels = [
 
 [[package]]
 name = "tangle-api"
-version = "0.1.0"
+version = "0.0.1a2"
 source = { editable = "packages/tangle-api" }
 dependencies = [
     { name = "pydantic" },
@@ -1790,7 +1790,7 @@ requires-dist = [
 
 [[package]]
 name = "tangle-cli"
-version = "0.0.1a1"
+version = "0.0.1a2"
 source = { editable = "." }
 dependencies = [
     { name = "cloud-pipelines" },

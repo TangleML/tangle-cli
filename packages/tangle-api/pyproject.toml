@@ -1,8 +1,8 @@
 [project]
 name = "tangle-api"
-version = "0.1.0"
+version = "0.0.1a2"
 description = "Checked-in generated Tangle API models and operation proxies"
-readme = "../../README.md"
+readme = "README.md"
 authors = [
     { name = "Alexey Volkov", email = "alexey.volkov@ark-kun.com" },
     { name = "Tangle authors" },
@@ -10,7 +10,7 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
-    "tangle-cli==0.1.0",
+    "tangle-cli==0.0.1a2",
 ]
 
 [build-system]
