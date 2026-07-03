@@ -3,7 +3,7 @@ name: "Publish release to PyPI"
 on:
   push:
     tags:
-      # Publish on any tag starting with a `v`, e.g., v0.1.0
+      # Publish on any tag starting with a `v`, e.g., v0.0.1a2
       - v*
 
 jobs:
@@ -21,12 +21,36 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Install Python 3.13
         run: uv python install 3.13
-      - name: Build
+      - name: Build tangle-cli
         run: uv build
-      # Check that basic features work and we didn't miss to include crucial files
-      - name: Smoke test (wheel)
-        run: uv run --isolated --no-project --with dist/*.whl tangle version
-      - name: Smoke test (source distribution)
-        run: uv run --isolated --no-project --with dist/*.tar.gz tangle version
+      - name: Build tangle-api
+        run: uv build --package tangle-api
+      # Check that basic features work and we didn't miss to include crucial files.
+      # Use package-specific globs so adding tangle-api artifacts does not change
+      # which distribution is installed for tangle-cli smoke tests.
+      - name: Smoke test tangle-cli wheel
+        run: |
+          uv run --isolated --no-project --with dist/tangle_cli-*.whl tangle version
+          uv run --isolated --no-project --with dist/tangle_cli-*.whl tangle-cli version
+      - name: Smoke test tangle-cli source distribution
+        run: |
+          uv run --isolated --no-project --with dist/tangle_cli-*.tar.gz tangle version
+          uv run --isolated --no-project --with dist/tangle_cli-*.tar.gz tangle-cli version
+      - name: Smoke test tangle-api wheel
+        run: |
+          uv run --isolated --no-project \
+            --with dist/tangle_cli-*.whl \
+            --with dist/tangle_api-*.whl \
+            python -c "import importlib.metadata as m; import tangle_api.generated.models; import tangle_api.schema; assert m.version('tangle-api') == m.version('tangle-cli')"
+      - name: Smoke test tangle-api source distribution
+        run: |
+          uv run --isolated --no-project \
+            --with dist/tangle_cli-*.tar.gz \
+            --with dist/tangle_api-*.tar.gz \
+            python -c "import importlib.metadata as m; import tangle_api.generated.models; import tangle_api.schema; assert m.version('tangle-api') == m.version('tangle-cli')"
+      - name: Smoke test native extra resolution from local dist
+        run: |
+          cli_wheel="$(echo dist/tangle_cli-*.whl)"
+          uv run --isolated --no-project --find-links dist --with "${cli_wheel}[native]" tangle-cli version
       - name: Publish
         run: uv publish

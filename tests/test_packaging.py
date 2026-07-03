@@ -107,12 +107,18 @@ def test_tangle_cli_wheel_imports_without_native_tangle_api(tmp_path) -> None:
         names = archive.namelist()
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
         metadata = archive.read(metadata_name).decode()
+        entry_points_name = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
+        entry_points = archive.read(entry_points_name).decode()
 
     requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
     assert not any(name.startswith("tangle_api/") for name in names)
     assert "tangle_cli/openapi/openapi.json" not in names
-    assert "Requires-Dist: tangle-api==0.1.0" not in requires_dist
-    assert "Requires-Dist: tangle-api==0.1.0 ; extra == 'native'" in requires_dist
+    assert "Version: 0.0.1a2" in metadata
+    assert "Requires-Dist: tangle-api==0.0.1a2" not in requires_dist
+    assert "Requires-Dist: tangle-api==0.0.1a2 ; extra == 'native'" in requires_dist
+    assert "Provides-Extra: native" in metadata
+    assert "tangle = tangle_cli.cli:main" in entry_points
+    assert "tangle-cli = tangle_cli.cli:main" in entry_points
 
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(wheel), str(stubs)])}
     subprocess.run(
@@ -260,8 +266,15 @@ def test_native_wheels_provide_static_client_binding(tmp_path) -> None:
     cli_wheel = _build_wheel(tmp_path / "cli")
     api_wheel = _build_wheel(tmp_path / "api", "--package", "tangle-api")
     with zipfile.ZipFile(api_wheel) as archive:
-        assert "tangle_api/schema/__init__.py" in archive.namelist()
-        assert "tangle_api/schema/openapi.json" in archive.namelist()
+        names = archive.namelist()
+        assert "tangle_api/schema/__init__.py" in names
+        assert "tangle_api/schema/openapi.json" in names
+        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+        metadata = archive.read(metadata_name).decode()
+
+    requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
+    assert "Version: 0.0.1a2" in metadata
+    assert "Requires-Dist: tangle-cli==0.0.1a2" in requires_dist
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(cli_wheel), str(api_wheel)])}
 
     subprocess.run(
