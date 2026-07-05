@@ -103,6 +103,10 @@ uv run tangle sdk pipelines validate pipeline.yaml
 
 Custom API/codegen users can still run codegen from the fully capable install; generating bindings does not require removing the official `tangle-api` package. For project-local generated APIs, generate into a local source tree such as `src/tangle_api/generated` (and `src/tangle_api/schema/openapi.json` when you want `tangle api --schema-source official`) and run from that project so local `src/tangle_api` shadows site-packages. For packaged custom APIs, publish/provide a distribution named `tangle-api` with a version compatible with this `tangle-cli` release (for example `0.0.1a3+yourorg` for a `tangle-cli` dependency on `tangle-api==0.0.1a3`) via a private index, `--find-links`, or uv sources. As an expert escape hatch, `--no-deps` installs only `tangle-cli` and skips all dependencies, so that environment must manually provide every required runtime dependency plus its generated/custom `tangle_api`; this is acceptable for controlled codegen/custom scenarios but not normal UX.
 
+## Agent skills
+
+This repo includes the Tangent agent-skill bundle under `skills/tangent/`. The bundle was ported from `tangle-cli-lab` and now treats this repository as the canonical source. It drives the public `tangle` / `tangle-cli` command surface, assumes the default `tangle-cli` install includes `tangle-api`, and keeps relative references (`agents/*.md`, `references/*.md`) self-contained for Pi-style skill loaders. The source distribution includes `skills/**` so downstream source-based consumers can inspect or vendor the skill docs with the release.
+
 ## Quick command examples
 
 Local-only SDK commands:

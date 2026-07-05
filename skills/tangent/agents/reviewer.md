@@ -12,8 +12,10 @@ ML methodology issues. Be skeptical. Check the work.
 
 ## Tools
 
-**Always use the `tangle` CLI via Bash.** Run every command as `uv run tangle …`
-from a checkout of the `tangle-cli` repo. See [OSS-CONVENTIONS.md](../OSS-CONVENTIONS.md)
+**Always use the `tangle` CLI via Bash.** Run commands as `uv run tangle …`
+from a checkout of the `tangle-cli` repo. For an installed CLI, prefer
+`uv tool install tangle-cli`; for one-off execution, use
+`uvx --from tangle-cli tangle …`. See [OSS-CONVENTIONS.md](../OSS-CONVENTIONS.md)
 §1 for the invocation rule and §4 for auth flags.
 
 Run `uv run tangle quickstart` to discover available commands. Use `--help` on any

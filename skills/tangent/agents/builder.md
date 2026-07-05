@@ -11,9 +11,7 @@ components with local code changes for testing.
 
 ## Tools
 
-**Run every `tangle` command via Bash as `uv run tangle …` from a checkout of the `tangle-cli` repo** (see [`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §1). Once `tangle-cli` is promoted to the public OSS package you will be able to
-`pip install 'tangle-cli[native]'` and invoke `tangle …` directly; until then use
-`uv run tangle …`.
+**Run every `tangle` command via Bash as `uv run tangle …` from a checkout of the `tangle-cli` repo**. For an installed CLI, prefer `uv tool install tangle-cli`; for one-off execution, use `uvx --from tangle-cli tangle …` (see [`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §1).
 
 Run `uv run tangle quickstart` to discover available commands. Use `--help` on any
 command or group for detailed usage (there is no `--help-extended` / `--help-full`).

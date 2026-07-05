@@ -19,7 +19,9 @@ and `api`) and **never** any internal wrapper/hook layer.
 
 ## 1. Invocation rule
 
-**Run every command as `uv run tangle …` from a checkout of the `tangle-cli` repo.**
+**Keep checkout/dev invocation separate from installed-tool invocation.**
+
+From a checkout of the `tangle-cli` repo, run commands through the workspace:
 
 ```bash
 uv run tangle quickstart
@@ -28,20 +30,31 @@ uv run tangle sdk --help
 uv run tangle api --help
 ```
 
+For a persistent user-level CLI install, prefer uv tools:
+
+```bash
+uv tool install tangle-cli
+tangle quickstart
+tangle-cli --help
+```
+
+For one-off execution without a persistent install, use `uvx`:
+
+```bash
+uvx --from tangle-cli tangle --help
+```
+
+Generic Python environments may also use `pip install tangle-cli`; use
+`uv pip install tangle-cli` only inside an explicitly managed virtualenv.
+
 - **Never** prefix a command with an internal env-shim exec wrapper. That internal
   dev-env tooling must not appear in any ported file.
-- As of 2026-06-12 `tangle-cli` is **not yet a public PyPI package** (it is
-  consumed internally as a vendored git submodule). So install text must say
-  `uv run tangle …` **from a checkout**. Present the public install path only as a
-  future state:
-
-  > *Once `tangle-cli` is promoted to the public OSS package, you will be able to
-  > `pip install 'tangle-cli[native]'` and invoke `tangle …` directly. Until then,
-  > use `uv run tangle …` from a checkout of the repo.*
-
-- The `[native]` extra is what enables the static API-backed commands and the
-  handwritten `TangleApiClient` wrapper (see §3). In the `tangle-cli` workspace, `uv`
-  installs the workspace `tangle-api` package automatically for dev/tests.
+- `tangle-cli` is a public PyPI package. The default install includes the
+  matching `tangle-api` package and supports static API-backed commands plus the
+  handwritten `TangleApiClient` wrapper (see §3). The old `[native]` extra is
+  only a compatibility/no-op alias.
+- In the `tangle-cli` workspace, `uv` installs the workspace `tangle-api` package
+  automatically for dev/tests.
 - Help is standard cyclopts `--help`. **There is no `--help-extended` / `--help-full`.**
 - Skills live **in-repo** (checked into the `tangle-cli` repo). There is **no internal
   bundle-refresh step**; relative cross-references (`agents/*.md`, `references/*.md`)
@@ -61,7 +74,7 @@ OSS replacement. **Verbs/flags below were verified against the `tangle-cli` sour
 
 | Internal | OSS |
 |---|---|
-| `<env-shim> -- <deploy-cli> …` | `uv run tangle …` (or installed `tangle …` once promoted) |
+| `<env-shim> -- <deploy-cli> …` | `uv run tangle …` from a checkout, or installed `tangle …` / `tangle-cli …` |
 | `<deploy-cli> quickstart` | `tangle quickstart` (real; static onboarding text) |
 | `--help-extended` / `--help-full` | `--help` |
 | `from <deploy_pkg> import TangleApiClient` | `from tangle_cli.client import TangleApiClient` (see §3) |
@@ -161,9 +174,10 @@ existing = client.find_existing_components(
   A bare `TangleApiClient()` only works against the default localhost backend.
 - `TangleApiClient` lives in `tangle_cli.client` and inherits generated endpoint
   methods from `tangle_api.generated.operations.GeneratedTangleApiOperations`.
-  **Importing it requires the native bindings** — install the `[native]` extra (or
-  provide a local `tangle_api.generated` package) before `from tangle_cli.client import …`.
-  The top-level `import tangle_cli` is intentionally native-free.
+  **Importing it requires generated bindings**. The default `tangle-cli` install
+  includes `tangle-api`; custom API projects may provide a local or packaged
+  compatible `tangle_api.generated` package before `from tangle_cli.client import …`.
+  The top-level `import tangle_cli` intentionally does not eagerly import generated bindings.
 - **Prefer the CLI over Python snippets for status/polling.** Any internal snippet
   that calls unverified methods like `get_pipeline_run`, `get_execution_graph_state`,
   `set_verbose`, `.status_totals`, or `.root_execution_id` must be replaced. The
@@ -200,7 +214,9 @@ internal backend's auth verification, and the internal package index **entirely*
 - **Run links:** replace internal run-URL links (`https://<internal-backend-host>/runs/<id>`) with
   `<base-url>/runs/<id>` **or** "inspect via `tangle sdk pipeline-runs details RUN_ID`".
 - **No internal package index.** Resolve dependencies against public PyPI
-  (`uv sync` / `tangle-cli[native]`).
+  (`uv sync` from a checkout, `uv tool install tangle-cli` for a persistent CLI,
+  or `uvx --from tangle-cli tangle …` for one-off execution). Generic Python
+  environments may also use `pip install tangle-cli`.
 - Example for a protected backend:
 
   ```bash

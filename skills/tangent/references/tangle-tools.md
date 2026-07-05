@@ -14,7 +14,7 @@ with new commands and flags — discover the current surface with `--help` and
 
 ## Install / Invoke
 
-Run every command as `uv run tangle …` from a checkout of the `tangle-cli` repo:
+From a checkout, run commands as `uv run tangle …`:
 
 ```bash
 uv run tangle quickstart
@@ -23,13 +23,24 @@ uv run tangle sdk --help
 uv run tangle api --help
 ```
 
-The `[native]` extra enables the static API-backed commands and the handwritten
-`TangleApiClient` (see [Programmatic client](#programmatic-client-python)). In the `tangle-cli` workspace `uv` installs the workspace `tangle-api` package automatically for
-dev/tests.
+For a persistent user-level CLI install, prefer uv tools:
 
-> Once `tangle-cli` is promoted to the public OSS package, you will be able to
-> `pip install 'tangle-cli[native]'` and invoke `tangle …` directly. Until then,
-> use `uv run tangle …` from a checkout of the repo.
+```bash
+uv tool install tangle-cli
+tangle quickstart
+tangle-cli --help
+```
+
+For one-off execution without a persistent install, use `uvx`:
+
+```bash
+uvx --from tangle-cli tangle --help
+```
+
+Generic Python environments may also use `pip install tangle-cli`; use
+`uv pip install tangle-cli` only inside an explicitly managed virtualenv.
+
+The default `tangle-cli` install includes `tangle-api` and enables static API-backed commands plus the handwritten `TangleApiClient` (see [Programmatic client](#programmatic-client-python)). In the `tangle-cli` workspace, `uv` installs the workspace `tangle-api` package automatically for dev/tests. The old `native` extra is a compatibility/no-op alias.
 
 ## Discover Available Commands
 
@@ -361,10 +372,10 @@ existing = client.find_existing_components(
 
 - Constructor: `TangleApiClient(base_url, *, token=, auth_header=, header=, headers=, …)`.
   A bare `TangleApiClient()` only works against the default localhost backend.
-- Importing it requires the native bindings — install the `[native]` extra (or
-  provide a local `tangle_api.generated` package) before
-  `from tangle_cli.client import …`. The top-level `import tangle_cli` is
-  intentionally native-free.
+- Importing it requires generated bindings. The default `tangle-cli` install
+  includes `tangle-api`; custom API projects can provide a compatible local or
+  packaged `tangle_api.generated` package before `from tangle_cli.client import …`.
+  The top-level `import tangle_cli` intentionally does not eagerly import generated bindings.
 - The verified surface is `client.pipeline_runs_get(run_id)` and the
   `find_existing_components(...)` helper. For status/graph state, prefer the CLI:
   `tangle sdk pipeline-runs status RUN_ID` and

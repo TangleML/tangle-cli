@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -24,6 +25,15 @@ def _build_wheel(tmp_path: Path, *args: str) -> Path:
     wheels = sorted(out_dir.glob("*.whl"))
     assert wheels, f"no wheel built by {' '.join(command)}"
     return wheels[-1]
+
+
+def _build_sdist(tmp_path: Path, *args: str) -> Path:
+    out_dir = tmp_path / "dist"
+    command = ["uv", "build", "--sdist", "--out-dir", str(out_dir), *args]
+    subprocess.run(command, cwd=_REPO_ROOT, check=True, text=True, capture_output=True)
+    sdists = sorted(out_dir.glob("*.tar.gz"))
+    assert sdists, f"no sdist built by {' '.join(command)}"
+    return sdists[-1]
 
 
 def _write_import_stubs(path: Path) -> None:
@@ -100,6 +110,55 @@ def _write_consumer_tangle_api(path: Path) -> Path:
         encoding="utf-8",
     )
     return source_root
+
+
+def test_tangent_skill_bundle_is_in_repo_and_current() -> None:
+    skill_root = _REPO_ROOT / "skills" / "tangent"
+    expected = [
+        "SKILL.md",
+        "OSS-CONVENTIONS.md",
+        "PORT-README.md",
+        "agents/auth-wizard.md",
+        "agents/builder.md",
+        "agents/debugger.md",
+        "agents/reporter.md",
+        "agents/researcher.md",
+        "agents/reviewer.md",
+        "agents/scenario-builder.md",
+        "references/tangle-tools.md",
+        "references/setup.md",
+        "references/step-0-initialize.md",
+        "references/step-1-analyze.md",
+        "references/step-2-hypothesize.md",
+        "references/step-3-submit.md",
+        "references/step-4-monitor.md",
+        "references/step-5-evaluate.md",
+        "references/step-6-synthesize.md",
+        "references/step-7-decide.md",
+    ]
+    for relative in expected:
+        assert (skill_root / relative).is_file(), relative
+
+    markdown = "\n".join(path.read_text(encoding="utf-8") for path in skill_root.rglob("*.md"))
+    assert "tangle-cli-lab" not in markdown
+    assert "not yet a public PyPI package" not in markdown
+    assert "pip install 'tangle-cli[native]'" not in markdown
+    assert "uv install" not in markdown
+    assert "uv tool install tangle-cli" in markdown
+    assert "uvx --from tangle-cli tangle" in markdown
+    assert "uv pip install tangle-cli` only inside an explicitly managed virtualenv" in markdown
+    assert "pip install tangle-cli" in markdown
+    assert "compatibility/no-op" in markdown
+
+
+def test_tangle_cli_sdist_includes_tangent_skill_bundle(tmp_path) -> None:
+    sdist = _build_sdist(tmp_path)
+    with tarfile.open(sdist) as archive:
+        names = archive.getnames()
+
+    assert any(name.endswith("/skills/tangent/SKILL.md") for name in names)
+    assert any(name.endswith("/skills/tangent/OSS-CONVENTIONS.md") for name in names)
+    assert any(name.endswith("/skills/tangent/references/tangle-tools.md") for name in names)
 
 
 def test_tangle_cli_wheel_supports_expert_no_deps_import_path_without_tangle_api(tmp_path) -> None:
