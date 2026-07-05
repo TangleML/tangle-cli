@@ -1,6 +1,6 @@
 ---
 name: tangent
-description: ML experiment toolkit and autonomous agent. Say "tangent" for help, "tangent <subagent>" for a specific tool, or "tangent auto" for the full autonomous experiment loop. Requires the Tangle CLI (the `tangle-cli` checkout) and a reachable Tangle backend.
+description: ML experiment toolkit and autonomous agent. Say "tangent" for help, "tangent <subagent>" for a specific tool, or "tangent auto" for the full autonomous experiment loop. Requires the published Tangle CLI (`uv tool install tangle-cli` or `uvx --from tangle-cli tangle ...`) and a reachable Tangle backend.
 allowed-tools: [Bash, Read, Write, Glob, Grep, Agent, dispatch]
 ---
 
@@ -22,7 +22,7 @@ bundle-refresh step. Relative cross-references in this skill (`agents/*.md`,
 `references/*.md`) resolve directly on disk. Read
 [`references/setup.md`](references/setup.md) to set up the CLI and auth.
 
-Run commands as `uv run tangle …` from a checkout of the `tangle-cli` repo. For an installed CLI, prefer `uv tool install tangle-cli`; for one-off execution, use `uvx --from tangle-cli tangle …`. See [`OSS-CONVENTIONS.md`](OSS-CONVENTIONS.md) §1.
+Normal usage runs the published CLI: install persistently with `uv tool install tangle-cli` and use `tangle …`, or run one-off commands with `uvx --from tangle-cli tangle …`. If intentionally validating a local `tangle-cli` checkout, prefix examples with `uv run`. See [`OSS-CONVENTIONS.md`](OSS-CONVENTIONS.md) §1.
 
 ## Commands
 
@@ -61,10 +61,10 @@ Automation:
 ## Tools
 
 Always use the `tangle` CLI via Bash. Do **not** use any `tangle` MCP tools.
-Run `uv run tangle quickstart` to discover commands. See
+Run `tangle quickstart` to discover commands. See
 [`references/tangle-tools.md`](references/tangle-tools.md).
 
-Cancel a run: `uv run tangle sdk pipeline-runs cancel RUN_ID`
+Cancel a run: `tangle sdk pipeline-runs cancel RUN_ID`
 
 Background execution: `dispatch`. Subagents: `agents/*.md`.
 

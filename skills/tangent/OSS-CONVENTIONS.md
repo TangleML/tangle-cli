@@ -19,33 +19,31 @@ and `api`) and **never** any internal wrapper/hook layer.
 
 ## 1. Invocation rule
 
-**Keep checkout/dev invocation separate from installed-tool invocation.**
-
-From a checkout of the `tangle-cli` repo, run commands through the workspace:
-
-```bash
-uv run tangle quickstart
-uv run tangle --help
-uv run tangle sdk --help
-uv run tangle api --help
-```
+**Published-package usage is the default; checkout usage is for local `tangle-cli` development/validation.**
 
 For a persistent user-level CLI install, prefer uv tools:
 
 ```bash
 uv tool install tangle-cli
 tangle quickstart
-tangle-cli --help
+tangle --help
+tangle sdk --help
+tangle api --help
 ```
 
 For one-off execution without a persistent install, use `uvx`:
 
 ```bash
 uvx --from tangle-cli tangle --help
+uvx --from tangle-cli tangle quickstart
 ```
 
 Generic Python environments may also use `pip install tangle-cli`; use
 `uv pip install tangle-cli` only inside an explicitly managed virtualenv.
+
+When intentionally validating a local checkout of the `tangle-cli` repo, prefix
+examples with `uv run` (for example, `uv run tangle quickstart`). Skill examples
+otherwise use the installed-tool form (`tangle …` / `tangle-cli …`).
 
 - **Never** prefix a command with an internal env-shim exec wrapper. That internal
   dev-env tooling must not appear in any ported file.
@@ -74,7 +72,7 @@ OSS replacement. **Verbs/flags below were verified against the `tangle-cli` sour
 
 | Internal | OSS |
 |---|---|
-| `<env-shim> -- <deploy-cli> …` | `uv run tangle …` from a checkout, or installed `tangle …` / `tangle-cli …` |
+| `<env-shim> -- <deploy-cli> …` | `tangle …` / `tangle-cli …` (or `uv run tangle …` only when validating a local checkout) |
 | `<deploy-cli> quickstart` | `tangle quickstart` (real; static onboarding text) |
 | `--help-extended` / `--help-full` | `--help` |
 | `from <deploy_pkg> import TangleApiClient` | `from tangle_cli.client import TangleApiClient` (see §3) |
@@ -142,9 +140,9 @@ OSS replacement. **Verbs/flags below were verified against the `tangle-cli` sour
 | `--run-as IDENTITY` | `--run-as` exists on `submit` but the **OSS default hooks do not support it** (downstream extension seam only). Drop run-as examples (§10, D9). |
 
 **Invocation rule for the whole table:** every left-column command, however it was
-written internally, becomes the right-column form prefixed with `uv run` (e.g.
-`uv run tangle sdk pipeline-runs submit …`). Auth flags from §4 attach to any
-API-backed command.
+written internally, becomes the bare right-column form (for example,
+`tangle sdk pipeline-runs submit …`). Only prefix with `uv run` when intentionally
+validating a local checkout. Auth flags from §4 attach to any API-backed command.
 
 ---
 
@@ -214,13 +212,14 @@ internal backend's auth verification, and the internal package index **entirely*
 - **Run links:** replace internal run-URL links (`https://<internal-backend-host>/runs/<id>`) with
   `<base-url>/runs/<id>` **or** "inspect via `tangle sdk pipeline-runs details RUN_ID`".
 - **No internal package index.** Resolve dependencies against public PyPI
-  (`uv sync` from a checkout, `uv tool install tangle-cli` for a persistent CLI,
-  or `uvx --from tangle-cli tangle …` for one-off execution). Generic Python
-  environments may also use `pip install tangle-cli`.
+  (`uv tool install tangle-cli` for a persistent CLI, or
+  `uvx --from tangle-cli tangle …` for one-off execution). Generic Python
+  environments may also use `pip install tangle-cli`; local checkout validation
+  uses `uv sync` / `uv run` inside the repo.
 - Example for a protected backend:
 
   ```bash
-  uv run tangle sdk pipeline-runs submit pipeline.yaml \
+  tangle sdk pipeline-runs submit pipeline.yaml \
     --base-url https://api.example \
     --auth-header 'Bearer …' \
     -H 'X-Gateway-Auth: …' \
@@ -257,11 +256,11 @@ records of the form `{id, uri, size, hash}` (and a `count`); the `uri` is
 
   1. Get metadata and read the `uri`:
      ```bash
-     uv run tangle sdk artifacts get RUN_ID -q '{"artifact_ids":["<artifact-id>"]}'
+     tangle sdk artifacts get RUN_ID -q '{"artifact_ids":["<artifact-id>"]}'
      ```
   2. Ask the backend for a signed URL:
      ```bash
-     uv run tangle api artifacts signed-artifact-url --id <artifact-id>
+     tangle api artifacts signed-artifact-url --id <artifact-id>
      ```
   3. Fetch with a generic client — `curl -L "<signed-url>" -o ./out`, or for
      `hf://` URIs `huggingface_hub` (`hf_hub_download` / `snapshot_download`).
@@ -317,7 +316,7 @@ selectors, and auth env vars) entirely. The OSS log surface is split by what sto
   log surface:
 
   ```bash
-  uv run tangle sdk pipeline-runs logs EXECUTION_ID
+  tangle sdk pipeline-runs logs EXECUTION_ID
   ```
 
   (Note: this is keyed by **EXECUTION_ID**, not run id.)

@@ -14,7 +14,7 @@ environment variables (see [OSS-CONVENTIONS.md §4](../OSS-CONVENTIONS.md)).
 
 ## Tools
 
-**From a checkout, run commands as `uv run tangle …`. For an installed CLI, prefer `uv tool install tangle-cli`; for one-off execution, use `uvx --from tangle-cli tangle …`.**
+**Use the published `tangle` CLI via Bash.** Install persistently with `uv tool install tangle-cli`, or run one-off commands with `uvx --from tangle-cli tangle …`. Examples below use bare `tangle …`; if intentionally validating a local `tangle-cli` checkout, prefix examples with `uv run`.
 Help is standard `--help` (there is no `--help-extended` / `--help-full`).
 
 Resolution precedence: explicit CLI option > `--config` file value > environment
@@ -80,7 +80,7 @@ chosen in Step 2):
 **a) Inline flag** — explicit, per-command, highest precedence:
 
 ```bash
-uv run tangle sdk pipeline-runs search --limit 1 \
+tangle sdk pipeline-runs search --limit 1 \
   --base-url https://api.example \
   --token '<token>'
 ```
@@ -90,7 +90,7 @@ uv run tangle sdk pipeline-runs search --limit 1 \
 ```bash
 export TANGLE_API_URL='https://api.example'
 export TANGLE_API_TOKEN='<token>'
-uv run tangle sdk pipeline-runs search --limit 1
+tangle sdk pipeline-runs search --limit 1
 ```
 
 For `--auth-header` set `TANGLE_API_AUTH_HEADER`; for `-H` set
@@ -105,7 +105,7 @@ token: "<token>"
 ```
 
 ```bash
-uv run tangle sdk pipeline-runs search --limit 1 --config tangle.config.yaml
+tangle sdk pipeline-runs search --limit 1 --config tangle.config.yaml
 ```
 
 **Advise against committing secrets.** Prefer the env var, or keep the
@@ -116,7 +116,7 @@ uv run tangle sdk pipeline-runs search --limit 1 --config tangle.config.yaml
 Run a cheap, read-only call to confirm the credential works:
 
 ```bash
-uv run tangle sdk pipeline-runs search --limit 1
+tangle sdk pipeline-runs search --limit 1
 ```
 
 (attach the auth flags from Step 3 if not using env/`--config`). A clean exit —

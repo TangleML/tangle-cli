@@ -4,17 +4,16 @@ Pure setup — load everything before the experiment loop. No analysis, no decis
 
 ## Set up the `tangle` CLI
 
-Before anything else, make sure you can invoke the CLI. The skills drive the OSS
-core, run from a checkout of the `tangle-cli` repo:
+Before anything else, make sure you can invoke the published CLI:
 
 ```bash
-uv run tangle --help
+tangle --help
 ```
 
-If that fails, work through `references/setup.md` first (checkout, `uv tool install tangle-cli`, or `uvx --from tangle-cli tangle …`; base-url/auth). Once `uv run tangle --help` or installed `tangle --help` works, discover the available commands:
+If that fails, work through `references/setup.md` first (`uv tool install tangle-cli`, `uvx --from tangle-cli tangle …`, or local checkout validation with `uv run`; base-url/auth). Once `tangle --help` works, discover the available commands:
 
 ```bash
-uv run tangle quickstart
+tangle quickstart
 ```
 
 > For an installed CLI, prefer `uv tool install tangle-cli` and invoke `tangle …` or `tangle-cli …`; for one-off execution, use `uvx --from tangle-cli tangle …`.
@@ -27,10 +26,10 @@ All experiment state lives in the scenario directory. Set the absolute path:
 SCENARIO_DIR=<path_to_scenario_directory>
 ```
 
-From a checkout, all `tangle` commands run via `uv run tangle …`. From an
-installed CLI, use `tangle …` / `tangle-cli …`; for one-off execution, use
-`uvx --from tangle-cli tangle …`. All file reads/writes use absolute
-`SCENARIO_DIR` paths. These are different locations — don't confuse them.
+All normal commands use the published CLI (`tangle …` / `tangle-cli …`) or
+one-off `uvx --from tangle-cli tangle …`. When intentionally validating a local
+`tangle-cli` checkout, prefix examples with `uv run`. All file reads/writes use
+absolute `SCENARIO_DIR` paths. These are different locations — don't confuse them.
 
 ## No Scenario Yet? Build One
 
@@ -58,8 +57,8 @@ below.
 ### Resume: Check Active Runs
 
 If MEMORY.md "Active Runs" lists runs from a prior session, light-poll each with
-the CLI: `uv run tangle sdk pipeline-runs status RUN_ID` (run + derived status
-summary), and `uv run tangle sdk pipeline-runs graph-state EXECUTION_ID` for the
+the CLI: `tangle sdk pipeline-runs status RUN_ID` (run + derived status
+summary), and `tangle sdk pipeline-runs graph-state EXECUTION_ID` for the
 per-task graph state. Classify: all tasks terminal → Step 5, any RUNNING →
 Step 4, any FAILED → Step 4 (debugger). This replaces Step 1-3 when resuming.
 
@@ -79,7 +78,7 @@ the latest published component versions when the refs are `name:`/`digest:` only
 **Option B: Export from baseline run**
 If no source pipeline exists, export the root spec from the baseline run:
 ```bash
-uv run tangle sdk pipeline-runs export BASELINE_RUN_ID --output $SCENARIO_DIR/pipeline.yaml
+tangle sdk pipeline-runs export BASELINE_RUN_ID --output $SCENARIO_DIR/pipeline.yaml
 ```
 `export` writes the root spec as-is. There is no `--dehydrate` flag: if the
 exported YAML carries full inline `spec:` blocks, `--hydrate` on submit is a no-op
@@ -94,8 +93,8 @@ submitting.
 3. Initialize `$SCENARIO_DIR/logs/events.jsonl` (create if it doesn't exist)
 
 ## Gate — do NOT proceed to Step 1 until all pass:
-- [ ] `uv run tangle --help` works (CLI reachable; see `references/setup.md` if not)
-- [ ] `uv run tangle quickstart` ran successfully
+- [ ] `tangle --help` works via the published CLI (or `uvx --from tangle-cli tangle --help` for one-off execution)
+- [ ] `tangle quickstart` ran successfully
 - [ ] `SCENARIO_DIR` set to absolute path
 - [ ] `scenario.yaml` read and understood
 - [ ] `MEMORY.md` read

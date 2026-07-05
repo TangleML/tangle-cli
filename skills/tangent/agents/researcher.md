@@ -12,22 +12,22 @@ Think like an MLE who reads papers and asks "what if we tried this?"
 
 ## Tools
 
-**Always use the `tangle` CLI via Bash. Do NOT use any MCP tool layer.**
-Run commands as `uv run tangle …` from a checkout of the `tangle-cli` repo. For an installed CLI, prefer `uv tool install tangle-cli`; for one-off execution, use `uvx --from tangle-cli tangle …`. See [`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §1.
+**Always use the published `tangle` CLI via Bash. Do NOT use any MCP tool layer.**
+Install persistently with `uv tool install tangle-cli`, or run one-off commands with `uvx --from tangle-cli tangle …`. Examples below use bare `tangle …`; if intentionally validating a local `tangle-cli` checkout, prefix examples with `uv run`. See [`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §1.
 
-Run `uv run tangle quickstart` to discover available commands. Use `--help` on any
-command for detailed usage. For broader docs, see `uv run tangle sdk
+Run `tangle quickstart` to discover available commands. Use `--help` on any
+command for detailed usage. For broader docs, see `tangle sdk
 published-components library` and the public OSS docs at
 `github.com/TangleML/website/tree/master/docs`.
 
 | What you need | Command |
 |---|---|
-| Export run as YAML | `uv run tangle sdk pipeline-runs export RUN_ID --output output.yaml` |
-| Inspect component | `uv run tangle sdk published-components inspect --name "Name" --full-spec` |
-| Search components (optional, may be empty) | `uv run tangle sdk published-components search "keyword"` |
-| Run details | `uv run tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
-| Run status | `uv run tangle sdk pipeline-runs status RUN_ID` |
-| Artifact metadata (URIs/size/hash) | `uv run tangle sdk artifacts get RUN_ID -q '{"tasks": {...}}'` |
+| Export run as YAML | `tangle sdk pipeline-runs export RUN_ID --output output.yaml` |
+| Inspect component | `tangle sdk published-components inspect --name "Name" --full-spec` |
+| Search components (optional, may be empty) | `tangle sdk published-components search "keyword"` |
+| Run details | `tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
+| Run status | `tangle sdk pipeline-runs status RUN_ID` |
+| Artifact metadata (URIs/size/hash) | `tangle sdk artifacts get RUN_ID -q '{"tasks": {...}}'` |
 | Fetch artifact bytes | metadata-only `get` → signed-URL recipe ([`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §5) |
 | Recent commits | `git log --oneline --since="Nd" -- <paths>` |
 | PRs/Issues | `gh pr list`/`gh issue list --repo <repo> --search "<term>"` |
@@ -111,7 +111,7 @@ Use `image_roots` to resolve modules to local files.
 
 To find source code for a published component, inspect it:
 ```bash
-uv run tangle sdk published-components inspect --name "Component Name" --full-spec
+tangle sdk published-components inspect --name "Component Name" --full-spec
 ```
 The `annotations` section includes `component_yaml_path`, `git_relative_dir`, and
 `git_remote_url`. Use these to locate the YAML and source code in the repo.
@@ -124,8 +124,8 @@ Use `--follow-deprecated` if the component is deprecated to find its successor.
 Tangle pipelines are nested subgraphs. Inputs flow through the hierarchy via
 `graphInput` wiring: top-level task output → subgraph input → nested subgraph
 input → leaf task argument. Trace the wiring at each level before modifying.
-For pipeline and component schema details, use `uv run tangle sdk pipelines --help`,
-`uv run tangle sdk published-components --help`, `uv run tangle sdk
+For pipeline and component schema details, use `tangle sdk pipelines --help`,
+`tangle sdk published-components --help`, `tangle sdk
 published-components library`, and the public OSS docs at
 `github.com/TangleML/website/tree/master/docs`.
 

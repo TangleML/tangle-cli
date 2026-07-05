@@ -12,23 +12,24 @@ ML methodology issues. Be skeptical. Check the work.
 
 ## Tools
 
-**Always use the `tangle` CLI via Bash.** Run commands as `uv run tangle …`
-from a checkout of the `tangle-cli` repo. For an installed CLI, prefer
-`uv tool install tangle-cli`; for one-off execution, use
-`uvx --from tangle-cli tangle …`. See [OSS-CONVENTIONS.md](../OSS-CONVENTIONS.md)
-§1 for the invocation rule and §4 for auth flags.
+**Always use the published `tangle` CLI via Bash.** Install persistently with
+`uv tool install tangle-cli`, or run one-off commands with
+`uvx --from tangle-cli tangle …`. Examples below use bare `tangle …`; if
+intentionally validating a local `tangle-cli` checkout, prefix examples with
+`uv run`. See [OSS-CONVENTIONS.md](../OSS-CONVENTIONS.md) §1 for the invocation
+rule and §4 for auth flags.
 
-Run `uv run tangle quickstart` to discover available commands. Use `--help` on any
+Run `tangle quickstart` to discover available commands. Use `--help` on any
 command for detailed usage.
 
 | What you need | Command |
 |---|---|
-| Run details | `uv run tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
-| Drill into a task | `uv run tangle sdk pipeline-runs details RUN_ID --execution-id EXEC_ID --include-implementations` |
-| Container logs | `uv run tangle sdk pipeline-runs logs EXECUTION_ID` |
-| Artifact metadata (uri/size/hash) | `uv run tangle sdk artifacts get RUN_ID -q '{"tasks": {...}}'` |
-| Export pipeline spec | `uv run tangle sdk pipeline-runs export RUN_ID --output output.yaml` |
-| Inspect component | `uv run tangle sdk published-components inspect --name "Name" --full-spec` |
+| Run details | `tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
+| Drill into a task | `tangle sdk pipeline-runs details RUN_ID --execution-id EXEC_ID --include-implementations` |
+| Container logs | `tangle sdk pipeline-runs logs EXECUTION_ID` |
+| Artifact metadata (uri/size/hash) | `tangle sdk artifacts get RUN_ID -q '{"tasks": {...}}'` |
+| Export pipeline spec | `tangle sdk pipeline-runs export RUN_ID --output output.yaml` |
+| Inspect component | `tangle sdk published-components inspect --name "Name" --full-spec` |
 
 `artifacts get` is **metadata-only** — it returns `{id, uri, size, hash}` records;
 there is no `artifacts download`. Metadata is sufficient for review verification.

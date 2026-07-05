@@ -18,8 +18,8 @@ it into a pipeline — that hides the dependency from the graph.
 > **Backend-dependent.** The OSS `tangle` core does **not** ship a built-in ingest
 > component. Whether one is available — and what its name, inputs, and outputs are
 > — depends on what components your backend has published. Discover what's
-> available with `uv run tangle sdk published-components library` and
-> `uv run tangle sdk published-components search <NAME>` (search is **optional** and
+> available with `tangle sdk published-components library` and
+> `tangle sdk published-components search <NAME>` (search is **optional** and
 > may return empty on a fresh OSS install — see
 > [`OSS-CONVENTIONS.md` §10 D11](../OSS-CONVENTIONS.md)). If your backend provides
 > no ingest component at all, fall back to a Python component that reads the URI
@@ -38,9 +38,9 @@ A typical ingest component looks like this:
 Inspect whatever your backend provides before wiring it in:
 
 ```bash
-uv run tangle sdk published-components inspect --name "<ingest component>" --full-spec
+tangle sdk published-components inspect --name "<ingest component>" --full-spec
 # or, if you already have the digest:
-uv run tangle sdk published-components inspect --digest <DIGEST> --full-spec
+tangle sdk published-components inspect --digest <DIGEST> --full-spec
 ```
 
 ## Recipe A — Add a new ingest task to an existing pipeline
@@ -51,7 +51,7 @@ external evaluation set.
 
 1. **Export the pipeline's root spec** so you can edit it locally:
    ```bash
-   uv run tangle sdk pipeline-runs export <RUN_ID> --output /tmp/pipeline.yaml
+   tangle sdk pipeline-runs export <RUN_ID> --output /tmp/pipeline.yaml
    ```
    `export` writes the root spec as-is (there is no `--dehydrate`; omit `--output` to
    print to stdout). To iterate on the run, hand-edit this file and `submit` it —
@@ -87,10 +87,10 @@ external evaluation set.
 4. **Validate, then submit** (hydrate is the default; `submit` never waits — block
    afterward with `pipeline-runs wait` if you need to):
    ```bash
-   uv run tangle sdk pipelines validate /tmp/pipeline.yaml
-   uv run tangle sdk pipeline-runs submit /tmp/pipeline.yaml \
+   tangle sdk pipelines validate /tmp/pipeline.yaml
+   tangle sdk pipeline-runs submit /tmp/pipeline.yaml \
      --arg input_artifact_uri="<scheme>://path/to/artifact/"
-   uv run tangle sdk pipeline-runs wait <RUN_ID> --max-wait 600
+   tangle sdk pipeline-runs wait <RUN_ID> --max-wait 600
    ```
 
    (Pass `--arg` only if you wired the URI as a `graphInput` in step 2; for a
@@ -141,10 +141,10 @@ staged variants.
 3. Supply the URI per run with `--arg` (or `--args-json`). **Run arguments bind to
    the pipeline's top-level `inputs:`** — they are distinct from task-level
    `arguments:` wiring inside the pipeline YAML (as shown in step 2 above). See
-   `uv run tangle sdk pipeline-runs submit --help` for the full surface, and
+   `tangle sdk pipeline-runs submit --help` for the full surface, and
    [`references/tangle-tools.md`](tangle-tools.md) for the canonical submit form.
    ```bash
-   uv run tangle sdk pipeline-runs submit pipeline.yaml \
+   tangle sdk pipeline-runs submit pipeline.yaml \
      --arg input_artifact_uri="<scheme>://path/to/artifact/"
    ```
 
@@ -215,7 +215,7 @@ hard-coded into the YAML.
 - **No ingest component? Read the URI in a Python component.** If your backend
   registers no ingest component, generate a small one from a Python source file
   that fetches the URI and writes a `Data` output:
-  `uv run tangle sdk components generate from-python fetch.py --image <registry/img:tag>`
+  `tangle sdk components generate from-python fetch.py --image <registry/img:tag>`
   (build/push the image yourself; `set-container-image` is a stub — do not use
   it). See [`agents/builder.md`](../agents/builder.md).
 - **Don't hand-roll throwaway ingest.** If you find yourself shelling out to copy

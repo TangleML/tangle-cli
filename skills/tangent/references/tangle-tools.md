@@ -14,38 +14,36 @@ with new commands and flags — discover the current surface with `--help` and
 
 ## Install / Invoke
 
-From a checkout, run commands as `uv run tangle …`:
-
-```bash
-uv run tangle quickstart
-uv run tangle --help
-uv run tangle sdk --help
-uv run tangle api --help
-```
-
-For a persistent user-level CLI install, prefer uv tools:
+For normal Tangent usage, install the published CLI as a persistent uv tool:
 
 ```bash
 uv tool install tangle-cli
 tangle quickstart
-tangle-cli --help
+tangle --help
+tangle sdk --help
+tangle api --help
 ```
 
 For one-off execution without a persistent install, use `uvx`:
 
 ```bash
 uvx --from tangle-cli tangle --help
+uvx --from tangle-cli tangle quickstart
 ```
 
 Generic Python environments may also use `pip install tangle-cli`; use
 `uv pip install tangle-cli` only inside an explicitly managed virtualenv.
+
+When intentionally validating a local checkout of the `tangle-cli` repo, prefix
+examples with `uv run` (for example, `uv run tangle quickstart`). Skill examples
+otherwise use the installed-tool form (`tangle …` / `tangle-cli …`).
 
 The default `tangle-cli` install includes `tangle-api` and enables static API-backed commands plus the handwritten `TangleApiClient` (see [Programmatic client](#programmatic-client-python)). In the `tangle-cli` workspace, `uv` installs the workspace `tangle-api` package automatically for dev/tests. The old `native` extra is a compatibility/no-op alias.
 
 ## Discover Available Commands
 
 ```bash
-uv run tangle quickstart
+tangle quickstart
 ```
 
 This prints static onboarding text. Use it at the start of every session to learn
@@ -57,12 +55,12 @@ Help is standard cyclopts `--help` — there is no `--help-extended` /
 `--help-full`:
 
 ```bash
-uv run tangle sdk <group> <command> --help
-uv run tangle api <group> <command> --help
+tangle sdk <group> <command> --help
+tangle api <group> <command> --help
 ```
 
 For broader docs, point at `tangle sdk <group> --help`, the curated standard
-library (`uv run tangle sdk published-components library`), and the public OSS
+library (`tangle sdk published-components library`), and the public OSS
 docs at `github.com/TangleML/website/tree/master/docs`.
 
 ## Running Commands
@@ -72,8 +70,8 @@ wrappers) and `tangle sdk …` (hand-written SDK / local / compound commands).
 Most workflow commands live under `tangle sdk`:
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml --arg shop=acme --annotation session=2026-06-23-ranking
-uv run tangle sdk pipeline-runs details RUN_ID --include-execution-state
+tangle sdk pipeline-runs submit pipeline.yaml --arg shop=acme --annotation session=2026-06-23-ranking
+tangle sdk pipeline-runs details RUN_ID --include-execution-state
 ```
 
 Auth flags (see [Auth & environment](#auth--environment)) attach to any
@@ -104,10 +102,10 @@ There is **no** `-f config.yaml`. Pass pipeline run arguments with repeatable
 file is preferred):
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --arg model=baseline --arg epochs=3
 
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --args-json '{"model": "baseline", "epochs": 3}'
 ```
 
@@ -128,7 +126,7 @@ searchable; all are optional:
 | `source` | `tangle-cli` | Optional provenance marker (only if you want it) |
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --arg model=baseline \
   --annotation session=2026-06-23-ranking \
   --annotation round=1 \
@@ -139,15 +137,15 @@ uv run tangle sdk pipeline-runs submit pipeline.yaml \
 Or set after submission:
 
 ```bash
-uv run tangle sdk pipeline-runs annotations set RUN_ID session 2026-06-23-ranking
-uv run tangle sdk pipeline-runs annotations list RUN_ID
-uv run tangle sdk pipeline-runs annotations delete RUN_ID round
+tangle sdk pipeline-runs annotations set RUN_ID session 2026-06-23-ranking
+tangle sdk pipeline-runs annotations list RUN_ID
+tangle sdk pipeline-runs annotations delete RUN_ID round
 ```
 
 ### Preview without submitting
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml --dry-run
+tangle sdk pipeline-runs submit pipeline.yaml --dry-run
 ```
 
 `--dry-run` prints the submit body and creates no run.
@@ -155,7 +153,7 @@ uv run tangle sdk pipeline-runs submit pipeline.yaml --dry-run
 ### Canonical submit command
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --arg K=V --annotation session=YYYY-MM-DD-scenario
 ```
 
@@ -164,10 +162,10 @@ uv run tangle sdk pipeline-runs submit pipeline.yaml \
 Local pipeline operations live under `pipelines` (NOT `pipeline-runs`):
 
 ```bash
-uv run tangle sdk pipelines validate pipeline.yaml
-uv run tangle sdk pipelines layout pipeline.yaml [--recursive] [-o out.yaml]
-uv run tangle sdk pipelines hydrate template.yaml -o out.yaml [--var K=V]
-uv run tangle sdk pipelines diagram pipeline.yaml   # Mermaid (no GUI viewer)
+tangle sdk pipelines validate pipeline.yaml
+tangle sdk pipelines layout pipeline.yaml [--recursive] [-o out.yaml]
+tangle sdk pipelines hydrate template.yaml -o out.yaml [--var K=V]
+tangle sdk pipelines diagram pipeline.yaml   # Mermaid (no GUI viewer)
 ```
 
 There is no `dehydrate` command or `--dehydrate` flag in OSS. To iterate on an
@@ -180,18 +178,18 @@ the default) — see [`references/iterating-on-runs.md`](iterating-on-runs.md).
 hand-rolled Python loop:
 
 ```bash
-uv run tangle sdk pipeline-runs status RUN_ID            # run + derived status summary
-uv run tangle sdk pipeline-runs graph-state EXECUTION_ID  # graph execution state
+tangle sdk pipeline-runs status RUN_ID            # run + derived status summary
+tangle sdk pipeline-runs graph-state EXECUTION_ID  # graph execution state
 ```
 
 **Heavy** — use only after completion, for debugging or extracting
 `execution_id`s:
 
 ```bash
-uv run tangle sdk pipeline-runs details RUN_ID --include-execution-state
-uv run tangle sdk pipeline-runs details RUN_ID --include-implementations
-uv run tangle sdk pipeline-runs details RUN_ID --include-annotations
-uv run tangle sdk pipeline-runs details RUN_ID --execution-id EXEC_ID
+tangle sdk pipeline-runs details RUN_ID --include-execution-state
+tangle sdk pipeline-runs details RUN_ID --include-implementations
+tangle sdk pipeline-runs details RUN_ID --include-annotations
+tangle sdk pipeline-runs details RUN_ID --execution-id EXEC_ID
 ```
 
 ## Waiting / Polling
@@ -199,7 +197,7 @@ uv run tangle sdk pipeline-runs details RUN_ID --execution-id EXEC_ID
 To block until a run completes (bounded):
 
 ```bash
-uv run tangle sdk pipeline-runs wait RUN_ID \
+tangle sdk pipeline-runs wait RUN_ID \
   --max-wait 600 --poll-interval 10 [--exit-on-first-failure]
 ```
 
@@ -208,7 +206,7 @@ Defaults: `--max-wait` 600s, `--poll-interval` 10s.
 ## Searching Runs
 
 ```bash
-uv run tangle sdk pipeline-runs search --name NAME \
+tangle sdk pipeline-runs search --name NAME \
   [--created-by USER] [--annotation K=V] \
   [--start-date DATE] [--end-date DATE] [--limit N] [--query JSON] [QUERY]
 ```
@@ -216,7 +214,7 @@ uv run tangle sdk pipeline-runs search --name NAME \
 ## Exporting a Run
 
 ```bash
-uv run tangle sdk pipeline-runs export RUN_ID --output out.yaml   # omit --output to print to stdout
+tangle sdk pipeline-runs export RUN_ID --output out.yaml   # omit --output to print to stdout
 ```
 
 Exports the root spec as-is; there is no `--dehydrate`.
@@ -226,7 +224,7 @@ Exports the root spec as-is; there is no `--dehydrate`.
 For application logs (stack traces, code errors), keyed by **EXECUTION_ID**:
 
 ```bash
-uv run tangle sdk pipeline-runs logs EXECUTION_ID
+tangle sdk pipeline-runs logs EXECUTION_ID
 ```
 
 This backend-native container log surface is the **only** log surface the Tangle
@@ -259,7 +257,7 @@ diagnosis, lean on container logs plus your launcher's native events — see
 `hf://datasets/<user>/<repo>@<branch>/<path>`.
 
 ```bash
-uv run tangle sdk artifacts get RUN_ID -q '{"artifact_ids":["<artifact-id>"]}'
+tangle sdk artifacts get RUN_ID -q '{"artifact_ids":["<artifact-id>"]}'
 ```
 
 `-q`/`--query` is a JSON string with optional keys `tasks`, `components`,
@@ -271,7 +269,7 @@ standard recipe — see [`OSS-CONVENTIONS.md` §5](../OSS-CONVENTIONS.md)):
 1. Get metadata and read the `uri` (above).
 2. Ask the backend for a signed URL:
    ```bash
-   uv run tangle api artifacts signed-artifact-url --id <artifact-id>
+   tangle api artifacts signed-artifact-url --id <artifact-id>
    ```
 3. Fetch with a generic client — `curl -L "<signed-url>" -o ./out`, or for
    `hf://` URIs `huggingface_hub` (`hf_hub_download` / `snapshot_download`).
@@ -286,12 +284,12 @@ Local authoring lives under `components`; the registry lives under
 
 ```bash
 # Generate a component from a Python source file (user-built image)
-uv run tangle sdk components generate from-python source.py \
+tangle sdk components generate from-python source.py \
   [--function NAME] [--image REG/IMG:TAG] [--output OUT] [--name NAME] \
   [--mode inline|bundle] [--dependencies-from REQ] [--strip-code] [--resolve-root DIR]
 
 # Bump a local component's version
-uv run tangle sdk components bump-version component.yaml [--set-version V] [--update-timestamp]
+tangle sdk components bump-version component.yaml [--set-version V] [--update-timestamp]
 ```
 
 There is no image build/push in the CLI. Build and push the image yourself (your
@@ -301,22 +299,22 @@ own docker/podman), then pass `--image <registry/img:tag>` to
 
 ```bash
 # Publish to the registry
-uv run tangle sdk published-components publish component.yaml \
+tangle sdk published-components publish component.yaml \
   [--image …] [--name …] [--description …] [--annotations JSON] [--dry-run] [--published-by …]
 
 # Inspect (exactly one of NAME or --digest)
-uv run tangle sdk published-components inspect --name NAME --full-spec
-uv run tangle sdk published-components inspect --digest DIGEST
+tangle sdk published-components inspect --name NAME --full-spec
+tangle sdk published-components inspect --digest DIGEST
 
 # Search — keyword/name/digest only
-uv run tangle sdk published-components search NAME \
+tangle sdk published-components search NAME \
   [--digest D] [--published-by U] [--include-deprecated]
 
 # Deprecate
-uv run tangle sdk published-components deprecate DIGEST [--superseded-by DIGEST]
+tangle sdk published-components deprecate DIGEST [--superseded-by DIGEST]
 
 # Curated standard library
-uv run tangle sdk published-components library
+tangle sdk published-components library
 ```
 
 To publish many components at once, pass a `--config` YAML/JSON list (or
@@ -331,10 +329,10 @@ fresh install — never a hard prerequisite of a workflow step.
 ## Secrets
 
 ```bash
-uv run tangle sdk secrets list
-uv run tangle sdk secrets create NAME --from-env ENVVAR [-d DESCRIPTION] [--expires-at WHEN]
-uv run tangle sdk secrets update NAME --from-env ENVVAR
-uv run tangle sdk secrets delete NAME [--force]
+tangle sdk secrets list
+tangle sdk secrets create NAME --from-env ENVVAR [-d DESCRIPTION] [--expires-at WHEN]
+tangle sdk secrets update NAME --from-env ENVVAR
+tangle sdk secrets delete NAME [--force]
 ```
 
 Prefer `--from-env`/`-e ENVVAR` over `--value`/`-v` to avoid leaking the value
@@ -344,7 +342,7 @@ authenticating identity — see [`references/secrets.md`](secrets.md).
 ## Cancelling a Run
 
 ```bash
-uv run tangle sdk pipeline-runs cancel RUN_ID
+tangle sdk pipeline-runs cancel RUN_ID
 ```
 
 ## Programmatic client (Python)
@@ -396,12 +394,12 @@ environment default. There is no `auth` command group.
 | — | `TANGLE_VERBOSE=1` | Redacted HTTP request/response diagnostics. |
 
 Run links: there is no hosted dashboard URL to assume — use `<base-url>/runs/<id>`
-or inspect via `uv run tangle sdk pipeline-runs details RUN_ID`.
+or inspect via `tangle sdk pipeline-runs details RUN_ID`.
 
 Example for a protected backend:
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --base-url https://api.example \
   --auth-header 'Bearer …' \
   -H 'X-Gateway-Auth: …' \

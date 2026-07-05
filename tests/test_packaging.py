@@ -144,8 +144,11 @@ def test_tangent_skill_bundle_is_in_repo_and_current() -> None:
     assert "not yet a public PyPI package" not in markdown
     assert "pip install 'tangle-cli[native]'" not in markdown
     assert "uv install" not in markdown
+    assert "Run commands as `tangle …` from a checkout" not in markdown
+    assert "Published-package usage is the default" in markdown
     assert "uv tool install tangle-cli" in markdown
     assert "uvx --from tangle-cli tangle" in markdown
+    assert "installed-tool form" in markdown
     assert "uv pip install tangle-cli` only inside an explicitly managed virtualenv" in markdown
     assert "pip install tangle-cli" in markdown
     assert "compatibility/no-op" in markdown

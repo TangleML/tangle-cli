@@ -3,7 +3,7 @@
 A second self-contained, public-data worked example — same loop, a different model family. It
 shows the situation → hypothesis → config-delta → signals → outcome rhythm applied to a
 transformer fine-tuning task instead of a gradient-boosted ranker. Every command is the
-generic `uv run tangle …` surface (`references/tangle-tools.md`).
+published `tangle …` surface (`references/tangle-tools.md`).
 
 ## Dataset (public)
 
@@ -52,7 +52,7 @@ and move on.
 The baseline fine-tune finished but underwhelms, and the run was expensive:
 
 - macro-F1 = **0.918**, accuracy = **0.919**.
-- Container logs (`uv run tangle sdk pipeline-runs logs <execution_id>`) show validation loss
+- Container logs (`tangle sdk pipeline-runs logs <execution_id>`) show validation loss
   bottoming out around epoch 2 of 5 and creeping up after — the last 2–3 epochs are wasted
   compute and mild overfitting.
 - `max_seq_length=256`, but AG News items are short; most sequences are heavily padded.
@@ -77,7 +77,7 @@ Args go inline at submit — no `-f config.yaml` (`OSS-CONVENTIONS.md` §10, D12
 Run A — fewer epochs + early stopping:
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --arg num_train_epochs=3 \
   --arg early_stopping_patience=1 \
   --arg metric_for_best_model=macro_f1 \
@@ -90,7 +90,7 @@ uv run tangle sdk pipeline-runs submit pipeline.yaml \
 Run B — right-size sequence length + warmup schedule:
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --arg max_seq_length=128 \
   --arg lr_scheduler_type=linear \
   --arg warmup_ratio=0.06 \
@@ -109,8 +109,8 @@ record it, then watch the run.
 Use the CLI for status, not a Python poll loop (`OSS-CONVENTIONS.md` §10, D14):
 
 ```bash
-uv run tangle sdk pipeline-runs status <run_id>
-uv run tangle sdk pipeline-runs wait <run_id> --max-wait 600 --poll-interval 10
+tangle sdk pipeline-runs status <run_id>
+tangle sdk pipeline-runs wait <run_id> --max-wait 600 --poll-interval 10
 ```
 
 Application progress (loss curves, early-stop trigger, steps/sec) is in container logs; a

@@ -10,31 +10,29 @@ cross-references resolve directly on disk.
 
 ## 1. Install / run the CLI
 
-From a checkout, run commands through `uv run`:
-
-```bash
-uv run tangle quickstart
-uv run tangle --help
-uv run tangle sdk --help
-uv run tangle api --help
-```
-
-For a persistent user-level CLI install, prefer uv tools:
+For normal Tangent usage, install the published CLI as a persistent uv tool:
 
 ```bash
 uv tool install tangle-cli
 tangle quickstart
-tangle-cli --help
+tangle --help
+tangle sdk --help
+tangle api --help
 ```
 
 For one-off execution without a persistent install, use `uvx`:
 
 ```bash
 uvx --from tangle-cli tangle --help
+uvx --from tangle-cli tangle quickstart
 ```
 
 Generic Python environments may also use `pip install tangle-cli`; use
 `uv pip install tangle-cli` only inside an explicitly managed virtualenv.
+
+When intentionally validating a local checkout of the `tangle-cli` repo, prefix
+examples with `uv run` (for example, `uv run tangle quickstart`). Skill examples
+otherwise use the installed-tool form (`tangle …` / `tangle-cli …`).
 
 `uv` resolves dependencies against public PyPI. In the `tangle-cli` workspace, `uv`
 installs the workspace `tangle-api` package automatically for dev/tests. The
@@ -44,7 +42,7 @@ API-backed commands and the handwritten `TangleApiClient` wrapper. The old
 
 Then discover available commands:
 ```bash
-uv run tangle quickstart
+tangle quickstart
 ```
 
 Help is standard `--help` (there is no `--help-extended` / `--help-full`).
@@ -81,7 +79,7 @@ export TANGLE_API_HEADERS='X-Gateway-Auth: …'
 Or pass them per-command:
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --base-url https://api.example \
   --auth-header 'Bearer …' \
   -H 'X-Gateway-Auth: …' \
@@ -99,7 +97,7 @@ Run a cheap, read-only call. If it returns (even with zero results), your backen
 URL and credentials are wired correctly:
 
 ```bash
-uv run tangle sdk pipeline-runs search --limit 1
+tangle sdk pipeline-runs search --limit 1
 ```
 
 Interpreting failures:
@@ -117,11 +115,11 @@ The unified CLI is `tangle`, split into `tangle sdk …` (hand-written
 SDK/local/compound commands) and `tangle api …` (auto-generated API wrappers):
 
 ```bash
-uv run tangle quickstart
-uv run tangle sdk pipeline-runs submit pipeline.yaml --arg key=value
-uv run tangle sdk pipeline-runs details RUN_ID --include-execution-state
-uv run tangle sdk pipeline-runs logs EXECUTION_ID
-uv run tangle sdk artifacts get RUN_ID -q '{"tasks": {"TaskName": ["output"]}}'
+tangle quickstart
+tangle sdk pipeline-runs submit pipeline.yaml --arg key=value
+tangle sdk pipeline-runs details RUN_ID --include-execution-state
+tangle sdk pipeline-runs logs EXECUTION_ID
+tangle sdk artifacts get RUN_ID -q '{"tasks": {"TaskName": ["output"]}}'
 ```
 
 For checking run status, see [`tangle-tools.md`](tangle-tools.md) — prefer the
@@ -129,8 +127,8 @@ light status summary (`tangle sdk pipeline-runs status RUN_ID`) and graph-state
 (`tangle sdk pipeline-runs graph-state EXECUTION_ID`) for polling over the heavy
 `details … --include-execution-state` payload.
 
-**Do not memorize a static command list.** Run `uv run tangle quickstart` to
-discover commands, and `uv run tangle sdk <group> --help` for detailed usage.
+**Do not memorize a static command list.** Run `tangle quickstart` to
+discover commands, and `tangle sdk <group> --help` for detailed usage.
 
 ## 5. Artifacts
 
@@ -140,7 +138,7 @@ backend it is a HuggingFace `hf://…` URI), so read the `uri` field rather than
 assuming a scheme:
 
 ```bash
-uv run tangle sdk artifacts get RUN_ID -q '{"tasks": {"TaskName": ["output"]}}'
+tangle sdk artifacts get RUN_ID -q '{"tasks": {"TaskName": ["output"]}}'
 ```
 
 `artifacts get` is **metadata-only** — there is no download-to-disk command. To

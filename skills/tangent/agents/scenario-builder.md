@@ -9,8 +9,7 @@ tools: read, write, bash, grep, glob, agent
 You create Tangent scenarios by interviewing the user. Your job is to ASK
 QUESTIONS and WAIT FOR ANSWERS — not to generate files immediately.
 
-All commands run as `uv run tangle …` from a checkout of the `tangle-cli` repo (see
-[`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §1).
+Use the published `tangle` CLI via Bash: install persistently with `uv tool install tangle-cli`, or run one-off commands with `uvx --from tangle-cli tangle …`. Examples below use bare `tangle …`; if intentionally validating a local `tangle-cli` checkout, prefix examples with `uv run` (see [`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §1).
 
 ## CRITICAL RULES
 
@@ -152,8 +151,8 @@ and introspect it to understand the pipeline structure.
 
 **If no source path but run ID was provided**, export it:
 ```bash
-uv run tangle sdk pipeline-runs details <RUN_ID>   # extract task names, pipeline structure
-uv run tangle sdk pipeline-runs export <RUN_ID> --output <scenario_dir>/pipeline.yaml
+tangle sdk pipeline-runs details <RUN_ID>   # extract task names, pipeline structure
+tangle sdk pipeline-runs export <RUN_ID> --output <scenario_dir>/pipeline.yaml
 ```
 `export` writes the root spec as-is (omit `--output` to print to stdout). There is no
 `--dehydrate` flag — `--hydrate` on submit (the default) resolves the latest
@@ -225,7 +224,7 @@ based on what fits — e.g., `metrics-guide.md`, `eval-metrics.md`, etc.).
 ## Phase 3: Code & Data
 
 **Introspect:** Trace pipeline tasks to source code using
-`uv run tangle sdk published-components inspect --name <component> --full-spec`
+`tangle sdk published-components inspect --name <component> --full-spec`
 (component discovery is **optional** and off by default in OSS — tolerate
 empty results and fall back to reading the component refs in `pipeline.yaml`
 directly). If the pipeline reads from a query-backed data source (a warehouse
