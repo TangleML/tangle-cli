@@ -133,7 +133,7 @@ run's TTL or share with other scenarios.
 
    - **Read the promote task's logs.** The component prints `PROMOTED.
      data_source_id = <id>` near the end of its own task log — fetch
-     with `uv run tangle sdk pipeline-runs logs <execution_id>`. Simplest
+     with `tangle sdk pipeline-runs logs <execution_id>`. Simplest
      and works without modifying the pipeline.
    - **Wire it into a downstream task.** Connect the promote task's
      `data_source_id` output (a `String`) into another task that prints
@@ -141,7 +141,7 @@ run's TTL or share with other scenarios.
      pipeline graph (e.g. a follow-up `Load data source` in the same
      run) rather than be recovered out-of-band.
 
-   Don't try to recover the value with `uv run tangle sdk artifacts get` —
+   Don't try to recover the value with `tangle sdk artifacts get` —
    that returns artifact *metadata* (`uri`/`size`/`hash`), not the contents
    of scalar `String` outputs.
 
@@ -304,7 +304,7 @@ tasks:
 ```
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --arg eval_set_id="<opaque data_source_id string>"
 ```
 
@@ -313,7 +313,7 @@ uv run tangle sdk pipeline-runs submit pipeline.yaml \
 - **No data-source components? Use the lightweight pattern.** If your
   backend doesn't register these components, you can still reuse a prior
   run's output: record the producer's `run_id` and the artifact `uri`
-  (read it scheme-agnostically from `uv run tangle sdk artifacts get RUN_ID`)
+  (read it scheme-agnostically from `tangle sdk artifacts get RUN_ID`)
   in `MEMORY.md`, and re-reference that `uri` directly. URIs are
   backend-agnostic and may look like `hf://datasets/<org>/<repo>@main/<path>`
   — read the `uri` field; do not assume a scheme.

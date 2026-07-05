@@ -23,7 +23,7 @@ token, etc.):
    via `dynamicData.secret.name` in the pipeline YAML; Tangle resolves the
    value at task-launch time, inside the container, with no plaintext on the
    pipeline spec.
-3. **The human creates / rotates the secret value**, via `uv run tangle sdk
+3. **The human creates / rotates the secret value**, via `tangle sdk
    secrets create ... --from-env VAR_NAME` (preferred — agent never touches
    the value). The agent's job is to identify *that a secret is needed*, *what
    to name it*, and *how to wire it through the pipeline*. Not to source the
@@ -124,7 +124,7 @@ If an input/argument is described as, named like, or behaves like any of:
 ### 1. Discover what secrets exist
 
 ```bash
-uv run tangle sdk secrets list
+tangle sdk secrets list
 ```
 
 Output lists `secret_name`, `updated_at`, optional `expires_at`, optional
@@ -150,7 +150,7 @@ never stored in history):
 # enters shell history (only `read -rs MY_API_KEY` is recorded, not the value).
 read -rs MY_API_KEY              # paste the value, press Enter (no echo)
 export MY_API_KEY
-uv run tangle sdk secrets create MY_API_KEY \
+tangle sdk secrets create MY_API_KEY \
   --from-env MY_API_KEY \
   --description 'Used by <pipeline> for <purpose>'
 unset MY_API_KEY                  # clear it from the current shell
@@ -177,10 +177,10 @@ configs:
 ```
 
 ```bash
-uv run tangle sdk secrets create --config secrets_config.yaml
+tangle sdk secrets create --config secrets_config.yaml
 ```
 
-**Do NOT** propose `uv run tangle sdk secrets create NAME --value 'sk-…'` with
+**Do NOT** propose `tangle sdk secrets create NAME --value 'sk-…'` with
 a value you pulled from somewhere. The `--value` / `-v` flag exists for humans
 typing at a prompt, not for agents shuffling credentials between systems.
 Prefer `--from-env` / `-e` everywhere.
@@ -192,7 +192,7 @@ credential — or how it expects to receive it — inspect the component's schem
 first rather than guessing:
 
 ```bash
-uv run tangle sdk published-components inspect "<component name>"
+tangle sdk published-components inspect "<component name>"
 ```
 
 That shows each input and its type, so you can tell which argument is
@@ -222,7 +222,7 @@ tasks:
 
 Things to verify after wiring:
 
-- `uv run tangle sdk pipelines validate <pipeline.yaml>` passes.
+- `tangle sdk pipelines validate <pipeline.yaml>` passes.
 - Run the **complete 4-stage pre-submit gate** from
   [`step-3-submit.md`](step-3-submit.md) § "Pre-submit checks". The gate
   uses `grep -lEi` (filenames only, never echoes matching lines) plus a
@@ -307,15 +307,15 @@ A minimal end-to-end demo against a public bearer-token echo endpoint
 #    Use --from-env so the value never lands in shell history.
 read -rs DEMO_BEARER_TOKEN
 export DEMO_BEARER_TOKEN
-uv run tangle sdk secrets create DEMO_BEARER_TOKEN \
+tangle sdk secrets create DEMO_BEARER_TOKEN \
   --from-env DEMO_BEARER_TOKEN --description 'demo'
 unset DEMO_BEARER_TOKEN
 
 # 2. Submit — the pipeline references DEMO_BEARER_TOKEN via dynamicData.secret
-uv run tangle sdk pipeline-runs submit secrets_demo_pipeline.yaml --hydrate
+tangle sdk pipeline-runs submit secrets_demo_pipeline.yaml --hydrate
 
 # 3. Cleanup
-uv run tangle sdk secrets delete DEMO_BEARER_TOKEN
+tangle sdk secrets delete DEMO_BEARER_TOKEN
 ```
 
 The pipeline injects the secret as `Authorization: Bearer <value>` to
@@ -326,12 +326,12 @@ shape.
 ## CLI reference
 
 ```bash
-uv run tangle sdk secrets list
-uv run tangle sdk secrets create NAME --from-env ENV_VAR \
+tangle sdk secrets list
+tangle sdk secrets create NAME --from-env ENV_VAR \
     [--description '…'] [--expires-at 2026-12-31T00:00:00Z]
-uv run tangle sdk secrets update NAME --from-env ENV_VAR
-uv run tangle sdk secrets delete NAME [--force]
-uv run tangle sdk secrets --help
+tangle sdk secrets update NAME --from-env ENV_VAR
+tangle sdk secrets delete NAME [--force]
+tangle sdk secrets --help
 ```
 
 `create` / `update` take `--value` / `-v` or (preferred) `--from-env` / `-e`,
@@ -342,6 +342,6 @@ files (see the `_defaults` / `configs` block above).
 ## When in doubt
 
 Stop and ask the human. "This pipeline needs an `X_API_KEY` — please create
-a Tangle secret named `<NAME>` (`uv run tangle sdk secrets create <NAME>
+a Tangle secret named `<NAME>` (`tangle sdk secrets create <NAME>
 --from-env <NAME>`) and confirm before I wire it through" is always the
 right move. Never the wrong move.

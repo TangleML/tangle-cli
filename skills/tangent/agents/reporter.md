@@ -10,17 +10,17 @@ Generate an ML experiment report. Regenerate from scratch each round.
 
 ## Tools
 
-**Always use the `tangle` CLI via Bash. Do NOT use any MCP tools.**
-Run commands as `uv run tangle …` from a checkout of the `tangle-cli` repo. For an installed CLI, prefer `uv tool install tangle-cli`; for one-off execution, use `uvx --from tangle-cli tangle …` (see [OSS-CONVENTIONS.md §1](../OSS-CONVENTIONS.md)).
+**Always use the published `tangle` CLI via Bash. Do NOT use any MCP tools.**
+Install persistently with `uv tool install tangle-cli`, or run one-off commands with `uvx --from tangle-cli tangle …`. Examples below use bare `tangle …`; if intentionally validating a local `tangle-cli` checkout, prefix examples with `uv run` (see [OSS-CONVENTIONS.md §1](../OSS-CONVENTIONS.md)).
 
-Run `uv run tangle quickstart` to discover available commands. Use `--help` on any
+Run `tangle quickstart` to discover available commands. Use `--help` on any
 command for detailed usage.
 
 | What you need | Command |
 |---|---|
-| Artifact metadata (id, `uri`, size, hash) | `uv run tangle sdk artifacts get RUN_ID -q '{"tasks": {...}}'` |
+| Artifact metadata (id, `uri`, size, hash) | `tangle sdk artifacts get RUN_ID -q '{"tasks": {...}}'` |
 | Fetch artifact bytes | metadata-only; resolve a signed URL and fetch — see [OSS-CONVENTIONS.md §5](../OSS-CONVENTIONS.md) |
-| Run details | `uv run tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
+| Run details | `tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
 
 ## Inputs
 

@@ -5,7 +5,7 @@ Two parts: collect metrics, then analyze.
 ## Part 1: Collect Metrics
 
 For each completed run:
-1. Get artifact metadata for the eval task with `uv run tangle sdk artifacts get RUN_ID -q '{"tasks": {"<EvalTask>": ["<metric_output>"]}}'`. This returns metadata records (`{id, uri, size, hash}`) — it does **not** download bytes. Read the `uri` scheme-agnostically (under the OSS backend it is typically `hf://…`); never assume a particular storage scheme. To read the metric JSON contents, follow the signed-URL fetch recipe in [`OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §5: `artifacts get` → `tangle api artifacts signed-artifact-url` → fetch with `curl -L` (or `huggingface_hub` for `hf://` URIs).
+1. Get artifact metadata for the eval task with `tangle sdk artifacts get RUN_ID -q '{"tasks": {"<EvalTask>": ["<metric_output>"]}}'`. This returns metadata records (`{id, uri, size, hash}`) — it does **not** download bytes. Read the `uri` scheme-agnostically (under the OSS backend it is typically `hf://…`); never assume a particular storage scheme. To read the metric JSON contents, follow the signed-URL fetch recipe in [`OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §5: `artifacts get` → `tangle api artifacts signed-artifact-url` → fetch with `curl -L` (or `huggingface_hub` for `hf://` URIs).
 2. Extract target metric (`scenario.metrics.target.path`) and common metrics
 3. Check guard metrics (`scenario.metrics.guards`)
 4. Remove from MEMORY.md "Active Runs"
@@ -19,7 +19,7 @@ Present results sorted by target metric. Include all common metrics.
 
 For the best run and any anomalous results, fetch container logs from the training component:
 ```bash
-uv run tangle sdk pipeline-runs logs EXECUTION_ID
+tangle sdk pipeline-runs logs EXECUTION_ID
 ```
 Use the execution_id recorded in Step 4 (logs are keyed by EXECUTION_ID, not run id). Look for:
 - Training convergence (loss progression)

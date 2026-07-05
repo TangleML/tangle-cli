@@ -11,29 +11,30 @@ return a one-line diagnosis.
 
 ## Tools
 
-**Always use the `tangle` CLI via Bash.** Run commands as `uv run tangle …`
-from a checkout of the `tangle-cli` repo. For an installed CLI, prefer
-`uv tool install tangle-cli`; for one-off execution, use
-`uvx --from tangle-cli tangle …` (see `OSS-CONVENTIONS.md` §1).
+**Always use the published `tangle` CLI via Bash.** Install persistently with
+`uv tool install tangle-cli`, or run one-off commands with
+`uvx --from tangle-cli tangle …`. Examples below use bare `tangle …`; if
+intentionally validating a local `tangle-cli` checkout, prefix examples with
+`uv run` (see `OSS-CONVENTIONS.md` §1).
 
-Run `uv run tangle quickstart` to discover available commands. Use `--help` on any
-command (or group, e.g. `uv run tangle sdk pipeline-runs --help`) for detailed usage.
+Run `tangle quickstart` to discover available commands. Use `--help` on any
+command (or group, e.g. `tangle sdk pipeline-runs --help`) for detailed usage.
 There is no `--help-extended` / `--help-full` and no `docs` command — for
-debugging guidance, lean on `--help`, `uv run tangle sdk published-components library`,
+debugging guidance, lean on `--help`, `tangle sdk published-components library`,
 and the public OSS docs at
 [github.com/TangleML/website/tree/master/docs](https://github.com/TangleML/website/tree/master/docs).
 
 | What you need | Command |
 |---|---|
-| Run state & derived status summary | `uv run tangle sdk pipeline-runs status RUN_ID` |
-| Execution tree & task states | `uv run tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
-| Graph execution state (per execution) | `uv run tangle sdk pipeline-runs graph-state EXECUTION_ID` |
-| Container logs (application stack traces, code errors) | `uv run tangle sdk pipeline-runs logs EXECUTION_ID` |
+| Run state & derived status summary | `tangle sdk pipeline-runs status RUN_ID` |
+| Execution tree & task states | `tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
+| Graph execution state (per execution) | `tangle sdk pipeline-runs graph-state EXECUTION_ID` |
+| Container logs (application stack traces, code errors) | `tangle sdk pipeline-runs logs EXECUTION_ID` |
 | System events (eviction reasons, OOM kills, scheduling failures) | Launcher-native — NOT a Tangle command (see §7 and "Fetching System Events" below) |
-| Search for runs | `uv run tangle sdk pipeline-runs search --name <name>` |
-| Component spec (per-task) | `uv run tangle sdk pipeline-runs details RUN_ID --execution-id EXEC_ID --include-implementations` |
-| Artifact metadata (URIs, size, hash) | `uv run tangle sdk artifacts get RUN_ID -q '{"tasks": {...}}'` |
-| Export pipeline spec | `uv run tangle sdk pipeline-runs export RUN_ID --output output.yaml` |
+| Search for runs | `tangle sdk pipeline-runs search --name <name>` |
+| Component spec (per-task) | `tangle sdk pipeline-runs details RUN_ID --execution-id EXEC_ID --include-implementations` |
+| Artifact metadata (URIs, size, hash) | `tangle sdk artifacts get RUN_ID -q '{"tasks": {...}}'` |
+| Export pipeline spec | `tangle sdk pipeline-runs export RUN_ID --output output.yaml` |
 
 Artifact retrieval is **metadata-only** (`artifacts get` returns `{id, uri, size,
 hash}`); the `uri` is backend-agnostic — read the scheme, don't assume one. There
@@ -42,16 +43,16 @@ in `OSS-CONVENTIONS.md` §5.
 
 ## Debugging Workflow
 
-1. **Get failure details**: `uv run tangle sdk pipeline-runs status RUN_ID` for a quick
-   run + derived status summary, then `uv run tangle sdk pipeline-runs details RUN_ID
+1. **Get failure details**: `tangle sdk pipeline-runs status RUN_ID` for a quick
+   run + derived status summary, then `tangle sdk pipeline-runs details RUN_ID
    --include-execution-state` — shows the execution tree with per-task status. Get
    execution IDs for failed tasks. For a single failed execution's graph state,
-   `uv run tangle sdk pipeline-runs graph-state EXECUTION_ID`.
-2. **Inspect the failed task**: `uv run tangle sdk pipeline-runs details RUN_ID
+   `tangle sdk pipeline-runs graph-state EXECUTION_ID`.
+2. **Inspect the failed task**: `tangle sdk pipeline-runs details RUN_ID
    --execution-id EXEC_ID --include-implementations` — drill into the specific
    failed execution to see the component spec as actually used.
 3. **Fetch logs and system events** (see "Fetching Container Logs" in
-   `references/tangle-tools.md`): `uv run tangle sdk pipeline-runs logs EXECUTION_ID`
+   `references/tangle-tools.md`): `tangle sdk pipeline-runs logs EXECUTION_ID`
    for application logs (stack traces, code errors). Container logs are keyed by
    **EXECUTION_ID**, not run id. For system events (eviction, OOM, scheduling,
    `pods "task-…" not found` mysteries), the Tangle backend does **not** store
@@ -62,12 +63,12 @@ in `OSS-CONVENTIONS.md` §5.
    auth wizard (`agents/auth-wizard.md`) should be used to diagnose and fix the
    base-url / token / header credential setup.
 5. **Check upstream artifacts**: If logs mention missing data/inputs, check upstream
-   task outputs via `uv run tangle sdk artifacts get RUN_ID -q '{"tasks": {...}}'` — an
+   task outputs via `tangle sdk artifacts get RUN_ID -q '{"tasks": {...}}'` — an
    upstream task may have produced empty or wrong output. The result is
    metadata-only; existence/size/hash is often enough to spot an empty or truncated
    artifact. Only fetch bytes (signed-URL recipe, `OSS-CONVENTIONS.md` §5) when you
    genuinely need to inspect content.
-6. **Export the pipeline**: `uv run tangle sdk pipeline-runs export RUN_ID --output
+6. **Export the pipeline**: `tangle sdk pipeline-runs export RUN_ID --output
    /tmp/pipeline.yaml` to get the exact pipeline spec used. Adjacent run arguments
    were supplied at submit time via `--arg K=V` / `--args-json` / `--config` (there
    is no `-f config.yaml`).
@@ -75,14 +76,14 @@ in `OSS-CONVENTIONS.md` §5.
    Modify the exported YAML, then resubmit. Hydration is the default; there is no
    `--dehydrate` step to run first and no `--no-wait` flag (submit never waits):
    ```bash
-   uv run tangle sdk pipeline-runs submit /tmp/pipeline.yaml \
+   tangle sdk pipeline-runs submit /tmp/pipeline.yaml \
      --arg <key>=<value>
    ```
    Submit returns immediately; to block on the result, use
-   `uv run tangle sdk pipeline-runs wait RUN_ID --max-wait N`. After submission, you may
+   `tangle sdk pipeline-runs wait RUN_ID --max-wait N`. After submission, you may
    annotate the run with generic provenance:
    ```bash
-   uv run tangle sdk pipeline-runs annotations set <RUN_ID> source tangle-cli
+   tangle sdk pipeline-runs annotations set <RUN_ID> source tangle-cli
    ```
 
 ## Fetching System Events

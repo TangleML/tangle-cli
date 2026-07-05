@@ -29,19 +29,19 @@ and graph state, the CLI commands below are the supported path).
 
 Light status for a single run (run + derived status summary):
 ```bash
-uv run tangle sdk pipeline-runs status RUN_ID
+tangle sdk pipeline-runs status RUN_ID
 ```
 
 Graph execution state (per-task status counts; takes an EXECUTION_ID):
 ```bash
-uv run tangle sdk pipeline-runs graph-state EXECUTION_ID
+tangle sdk pipeline-runs graph-state EXECUTION_ID
 ```
 
 For multiple runs, call `status` once per run id:
 ```bash
 for rid in RUN_1 RUN_2 RUN_3; do
   echo "$rid:"
-  uv run tangle sdk pipeline-runs status "$rid"
+  tangle sdk pipeline-runs status "$rid"
 done
 ```
 
@@ -54,7 +54,7 @@ Mark runs exceeding 2x `scenario.timing.total_seconds` as STUCK and replace.
 
 When a run completes (SUCCEEDED or FAILED), immediately run:
 ```bash
-uv run tangle sdk pipeline-runs details RUN_ID --include-execution-state
+tangle sdk pipeline-runs details RUN_ID --include-execution-state
 ```
 
 This returns the execution tree with per-component status. Check for:
@@ -99,14 +99,14 @@ Act on the diagnosis:
 
 Only cancel when the user asks or a run is blocking resources.
 ```bash
-uv run tangle sdk pipeline-runs cancel RUN_ID
+tangle sdk pipeline-runs cancel RUN_ID
 ```
 
 ## Waiting
 
 Use `dispatch` for non-blocking wait (if available), or sleep between light polls:
 ```
-dispatch({ command: "uv run tangle sdk pipeline-runs wait <run_id> --max-wait <interval> --poll-interval 10 --exit-on-first-failure" })
+dispatch({ command: "tangle sdk pipeline-runs wait <run_id> --max-wait <interval> --poll-interval 10 --exit-on-first-failure" })
 ```
 Interval: 180s (short pipelines), 600s (medium), 900s (long). `wait` defaults to
 `--max-wait 600` and `--poll-interval 10` if you omit them.

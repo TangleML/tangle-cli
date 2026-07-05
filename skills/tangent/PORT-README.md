@@ -38,7 +38,7 @@ references/                  ← the loop steps + topic references
 
 ## How to invoke
 
-Commands can run as **`uv run tangle …` from a checkout of the `tangle-cli` repo**, from a persistent uv tool install (`uv tool install tangle-cli`, then `tangle …` / `tangle-cli …`), or as a one-off uvx command (`uvx --from tangle-cli tangle …`). Elsewhere, `tangle` still appears as a bare command noun in prose and in the §2 CLI map (the naming-surface exception). See `OSS-CONVENTIONS.md` §1.
+Normal usage runs the **published `tangle-cli` package**: install persistently with `uv tool install tangle-cli`, then run `tangle …` / `tangle-cli …`, or use `uvx --from tangle-cli tangle …` for one-off commands. Local checkout invocation (`uv run tangle …`) is only for validating changes inside the `tangle-cli` repo. Elsewhere, `tangle` still appears as a bare command noun in prose and in the §2 CLI map (the naming-surface exception). See `OSS-CONVENTIONS.md` §1.
 
 ## What changed from the internal bundle
 
@@ -47,7 +47,7 @@ replaced with the project's open, backend-agnostic equivalent:
 
 | Internal coupling (removed)        | Open-source replacement                                              |
 | ---------------------------------- | -------------------------------------------------------------------- |
-| Internal CLI wrapper + env shim    | `uv run tangle …` (the public CLI), no environment shim              |
+| Internal CLI wrapper + env shim    | `tangle …` / `tangle-cli …` from the published package, no environment shim |
 | Cloud-object-storage artifact URIs | Scheme-agnostic artifact `uri` (e.g. `hf://…`); fetch via signed URL |
 | Hosted log-search backend          | `tangle sdk pipeline-runs logs` + launcher-native system events      |
 | Hard-coded internal API endpoint   | `--base-url` / `TANGLE_API_URL`                                      |

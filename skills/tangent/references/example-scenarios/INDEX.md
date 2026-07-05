@@ -6,7 +6,7 @@
 > a single hypothesis, express it as a small config delta, submit, watch the right signals,
 > and write down the outcome.
 
-Every command in these scenarios is the generic `uv run tangle …` surface documented in
+Every command in these scenarios uses the published `tangle …` surface documented in
 `references/tangle-tools.md`. They name only public datasets and public models, store
 artifacts scheme-agnostically (read the `uri`; see `OSS-CONVENTIONS.md` §5), and treat
 registry / promotion / scheduling / `--run-as` as **extension-only** (`OSS-CONVENTIONS.md`

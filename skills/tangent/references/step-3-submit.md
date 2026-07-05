@@ -28,7 +28,7 @@ Auto-loop bookkeeping rides along as generic `--annotation K=V` pairs:
 
 ```bash
 # experiment args + auto-loop annotations, assembled on the submit line
-uv run tangle sdk pipeline-runs submit $SCENARIO_DIR/pipeline.yaml \
+tangle sdk pipeline-runs submit $SCENARIO_DIR/pipeline.yaml \
   --arg <experiment_arg>=<value> \
   --annotation session=YYYY-MM-DD-<scenario_name> \
   --annotation round=<N> \
@@ -77,8 +77,8 @@ fi
 #    in the pipeline must exist under the authenticating identity. A typoed or
 #    not-yet-created name passes step 1 (it's not a credential body) but fails
 #    at runtime, which wastes budget and confuses the user.
-# Run under `uv run` so the project env (incl. PyYAML) is available — bare
-# python3 may not have PyYAML, per the bundle's uv-run rule (OSS-CONVENTIONS §1).
+# Run the helper in a Python environment with PyYAML available. `uv run` is shown
+# for scenario repos that manage dependencies with uv; this is not a Tangle CLI invocation.
 uv run python3 - <<'PY' "$SCENARIO_DIR/pipeline.yaml"
 import sys, yaml, subprocess, json
 path = sys.argv[1]
@@ -106,7 +106,7 @@ if missing:
     sys.stderr.write(
         "ERROR: pipeline references Tangle secrets that don't exist under the "
         "authenticating identity: " + ", ".join(missing) + "\n"
-        "      Ask the human to create them via: uv run tangle sdk secrets create <NAME> --from-env <NAME>\n"
+        "      Ask the human to create them via: tangle sdk secrets create <NAME> --from-env <NAME>\n"
         "      (see references/secrets.md § 'If the secret is missing, ask the human to create it').\n"
     )
     sys.exit(1)
@@ -127,7 +127,7 @@ stop, surface the failure to the human, and do not submit.
 ### Submit (only after every pre-submit check above exited cleanly)
 
 ```bash
-uv run tangle sdk pipeline-runs submit $SCENARIO_DIR/pipeline.yaml \
+tangle sdk pipeline-runs submit $SCENARIO_DIR/pipeline.yaml \
   --arg <experiment_arg>=<value> \
   --annotation session=YYYY-MM-DD-<scenario_name> \
   --annotation round=<N> \
@@ -137,11 +137,11 @@ uv run tangle sdk pipeline-runs submit $SCENARIO_DIR/pipeline.yaml \
 
 Hydration is the default, so component versions are resolved as part of submit.
 `submit` returns as soon as the run is created — it does **not** wait. To block
-on completion, follow up with `uv run tangle sdk pipeline-runs wait RUN_ID`.
+on completion, follow up with `tangle sdk pipeline-runs wait RUN_ID`.
 
 ### If you modified component source code:
 1. Rebuild from your Python source, pointing at the image you built and pushed
-   yourself: `uv run tangle sdk components generate from-python source.py --image <registry/img:tag> --output component.yaml`
+   yourself: `tangle sdk components generate from-python source.py --image <registry/img:tag> --output component.yaml`
 2. Update ref in pipeline YAML: swap `digest: ...` with `url: file://<path-to-component.yaml>`
 3. Submit with the command above
 
@@ -149,14 +149,14 @@ See `agents/builder.md` for the full workflow.
 
 ## Post-Submission
 
-`uv run tangle sdk pipeline-runs submit` returns a **`run_id`** for each submitted
+`tangle sdk pipeline-runs submit` returns a **`run_id`** for each submitted
 pipeline. Treat `run_id` as a first-class session concept:
 
 1. Log to `sessions/YYYY-MM-DD.md` — record the `run_id` in a `## Run Log`
    section with timestamp, round, label, config diff. Order is chronological.
 2. **Write to MEMORY.md "Active Runs" immediately** — `run_id`, run link
    (`<base-url>/runs/<run_id>`, or inspect via
-   `uv run tangle sdk pipeline-runs details RUN_ID`), label, config summary,
+   `tangle sdk pipeline-runs details RUN_ID`), label, config summary,
    timestamp. Survives session interruptions.
 3. The `run_id` is what keys learnings records in Step 7
    (`learning-<run_id>.json` under `$LEARNINGS_DIR/<scenario>/`), so make sure

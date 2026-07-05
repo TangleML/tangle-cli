@@ -4,7 +4,7 @@ A self-contained, public-data worked example of one autonomous tuning round. It 
 loop in `references/step-0-initialize.md` … `references/step-7-decide.md`: read the situation,
 form a hypothesis, express it as a small config delta, submit, watch the right signals, and
 write down the outcome. Nothing here is specific to any one backend — every command is the
-generic `uv run tangle …` surface from `references/tangle-tools.md`.
+published `tangle …` surface from `references/tangle-tools.md`.
 
 ## Dataset (public)
 
@@ -56,7 +56,7 @@ model" as out of scope here and just record the winning `run_id`.
 
 ### Situation
 
-A baseline run finished. Reading its metrics (`uv run tangle sdk artifacts get <run_id> -q
+A baseline run finished. Reading its metrics (`tangle sdk artifacts get <run_id> -q
 '{"tasks":["eval-ranker"]}'`, then fetching the metrics blob via the signed-URL recipe in
 `OSS-CONVENTIONS.md` §5):
 
@@ -88,7 +88,7 @@ args under test.
 Run A — regularize:
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --arg num_leaves=63 \
   --arg learning_rate=0.05 \
   --arg min_data_in_leaf=200 \
@@ -102,7 +102,7 @@ Run B — align truncation to the metric (and a matching `n_estimators` bump to 
 the lower learning rate):
 
 ```bash
-uv run tangle sdk pipeline-runs submit pipeline.yaml \
+tangle sdk pipeline-runs submit pipeline.yaml \
   --arg lambdarank_truncation_level=10 \
   --arg learning_rate=0.05 \
   --arg n_estimators=2000 \
@@ -122,13 +122,13 @@ While the runs are in flight, watch status and graph state with the CLI rather t
 poll loop (`OSS-CONVENTIONS.md` §10, D14):
 
 ```bash
-uv run tangle sdk pipeline-runs status <run_id>
-uv run tangle sdk pipeline-runs graph-state <execution_id>
+tangle sdk pipeline-runs status <run_id>
+tangle sdk pipeline-runs graph-state <execution_id>
 ```
 
-To block until done: `uv run tangle sdk pipeline-runs wait <run_id> --max-wait 600
+To block until done: `tangle sdk pipeline-runs wait <run_id> --max-wait 600
 --poll-interval 10`. Container logs (training progress, early-stopping rounds) come from
-`uv run tangle sdk pipeline-runs logs <execution_id>`; scheduling/OOM events come from your
+`tangle sdk pipeline-runs logs <execution_id>`; scheduling/OOM events come from your
 launcher's runtime, not from the Tangle backend (`OSS-CONVENTIONS.md` §7).
 
 When `eval-ranker` completes, read its metrics artifact and check, in order:

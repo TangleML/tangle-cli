@@ -11,28 +11,28 @@ components with local code changes for testing.
 
 ## Tools
 
-**Run every `tangle` command via Bash as `uv run tangle …` from a checkout of the `tangle-cli` repo**. For an installed CLI, prefer `uv tool install tangle-cli`; for one-off execution, use `uvx --from tangle-cli tangle …` (see [`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §1).
+**Use the published `tangle` CLI via Bash.** Install persistently with `uv tool install tangle-cli`, or run one-off commands with `uvx --from tangle-cli tangle …`. Examples below use bare `tangle …`; if intentionally validating a local `tangle-cli` checkout, prefix examples with `uv run` (see [`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §1).
 
-Run `uv run tangle quickstart` to discover available commands. Use `--help` on any
+Run `tangle quickstart` to discover available commands. Use `--help` on any
 command or group for detailed usage (there is no `--help-extended` / `--help-full`).
-For schema and concept docs, use `uv run tangle sdk <group> --help`,
-`uv run tangle sdk published-components library`, and the public OSS docs at
+For schema and concept docs, use `tangle sdk <group> --help`,
+`tangle sdk published-components library`, and the public OSS docs at
 `github.com/TangleML/website/tree/master/docs`.
 
 | What you need | Command |
 |---|---|
-| Export run as YAML | `uv run tangle sdk pipeline-runs export RUN_ID --output output.yaml` |
-| Inspect a published component | `uv run tangle sdk published-components inspect --name "Name" --full-spec` |
-| Search components (optional; may be empty) | `uv run tangle sdk published-components search "keyword"` |
-| Curated standard library | `uv run tangle sdk published-components library` |
-| Generate from Python | `uv run tangle sdk components generate from-python source.py [--image REG/IMG:TAG]` |
-| Bump version | `uv run tangle sdk components bump-version component.yaml` |
-| Hydrate refs | `uv run tangle sdk pipelines hydrate template.yaml -o output.yaml` |
-| Validate pipeline | `uv run tangle sdk pipelines validate pipeline.yaml` |
-| Auto-layout DAG | `uv run tangle sdk pipelines layout pipeline.yaml` |
-| Submit pipeline | `uv run tangle sdk pipeline-runs submit pipeline.yaml [--arg K=V \| --args-json JSON]` |
-| Run details | `uv run tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
-| Component as used | `uv run tangle sdk pipeline-runs details RUN_ID --execution-id EXEC_ID --include-implementations` |
+| Export run as YAML | `tangle sdk pipeline-runs export RUN_ID --output output.yaml` |
+| Inspect a published component | `tangle sdk published-components inspect --name "Name" --full-spec` |
+| Search components (optional; may be empty) | `tangle sdk published-components search "keyword"` |
+| Curated standard library | `tangle sdk published-components library` |
+| Generate from Python | `tangle sdk components generate from-python source.py [--image REG/IMG:TAG]` |
+| Bump version | `tangle sdk components bump-version component.yaml` |
+| Hydrate refs | `tangle sdk pipelines hydrate template.yaml -o output.yaml` |
+| Validate pipeline | `tangle sdk pipelines validate pipeline.yaml` |
+| Auto-layout DAG | `tangle sdk pipelines layout pipeline.yaml` |
+| Submit pipeline | `tangle sdk pipeline-runs submit pipeline.yaml [--arg K=V \| --args-json JSON]` |
+| Run details | `tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
+| Component as used | `tangle sdk pipeline-runs details RUN_ID --execution-id EXEC_ID --include-implementations` |
 
 Component discovery (search/library) is **optional** and **off by default** on a
 fresh OSS install — treat it as a best-effort lookup and tolerate empty results;
@@ -51,8 +51,8 @@ field, a `constantValue:`, a `cli_args:` entry, a run-arg passed via `--arg` /
 plaintext from your environment or a secret store. Treat raw credential values
 as poison.
 
-The correct flow is: `uv run tangle sdk secrets list` → if the secret doesn't exist,
-ask the human to create it with `uv run tangle sdk secrets create NAME --from-env NAME`
+The correct flow is: `tangle sdk secrets list` → if the secret doesn't exist,
+ask the human to create it with `tangle sdk secrets create NAME --from-env NAME`
 (`--from-env`/`-e` reads from an env var so the value never lands in shell
 history; the agent never touches the value) → reference it via
 `dynamicData.secret: { name: "NAME" }` on the consuming argument. See
@@ -95,7 +95,7 @@ When a pipeline produces an artifact worth keeping past the run's TTL —
 a curated eval set, a fine-tuned checkpoint, a generated annotation set,
 a frozen feature snapshot — record its identity so a later pipeline can
 re-reference it: capture the producing `run_id` and the artifact `uri`
-(`uv run tangle sdk artifacts get RUN_ID -q '<JSON>'` returns `{id, uri, size, hash}`
+(`tangle sdk artifacts get RUN_ID -q '<JSON>'` returns `{id, uri, size, hash}`
 records; see [`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §5) and save them
 in the scenario's `MEMORY.md` / session log. A downstream pipeline re-references
 the artifact by feeding that `uri` into the consuming task argument (typically
@@ -137,25 +137,25 @@ guarded pattern. Do not assume those components exist.
 See [`../references/iterating-on-runs.md`](../references/iterating-on-runs.md) for
 the full workflow.
 
-1. **Export**: `uv run tangle sdk pipeline-runs export RUN_ID --output /tmp/pipeline.yaml`
+1. **Export**: `tangle sdk pipeline-runs export RUN_ID --output /tmp/pipeline.yaml`
    — exports the root spec as-is (there is no `--dehydrate`). Omit `--output` to print
    to stdout.
-2. **Inspect**: `uv run tangle sdk pipeline-runs details RUN_ID --include-execution-state`
-   — identify task statuses. (`uv run tangle sdk pipeline-runs status RUN_ID` gives a
+2. **Inspect**: `tangle sdk pipeline-runs details RUN_ID --include-execution-state`
+   — identify task statuses. (`tangle sdk pipeline-runs status RUN_ID` gives a
    lighter run + derived status summary.)
 3. **Modify**: Edit the exported YAML. To swap a component, replace its `digest:`
    or `url: file://` reference with a new `url: file://` pointing to your
    replacement.
-4. **Validate**: `uv run tangle sdk pipelines validate /tmp/pipeline.yaml`
+4. **Validate**: `tangle sdk pipelines validate /tmp/pipeline.yaml`
 5. **Submit** (see Submission Rules in
    [`../references/tangle-tools.md`](../references/tangle-tools.md)):
    ```bash
-   uv run tangle sdk pipeline-runs submit /tmp/pipeline.yaml \
+   tangle sdk pipeline-runs submit /tmp/pipeline.yaml \
      --args-json @/tmp/pipeline.args.json
    ```
    `submit` hydrates by default (it resolves component versions), so there is no
    "dehydrate first" guard and no `--no-wait` — `submit` returns as soon as the
-   run is created; poll with `uv run tangle sdk pipeline-runs wait RUN_ID`. Pass run
+   run is created; poll with `tangle sdk pipeline-runs wait RUN_ID`. Pass run
    arguments with `--arg K=V` / `--args-json '<JSON>'` (or `--args-json @file.json`);
    `--config` carries CLI-option defaults (base-url/auth/log-type), not run args.
 
@@ -167,7 +167,7 @@ yourself with your own tooling (docker/podman), then point the component at it.
 
 1. **Find source code**: Inspect the published component to get source annotations:
    ```bash
-   uv run tangle sdk published-components inspect --name "Component Name" --full-spec
+   tangle sdk published-components inspect --name "Component Name" --full-spec
    ```
    Check the annotations the publisher attached (e.g. source path, repo, image,
    docs references) to locate the source.
@@ -179,7 +179,7 @@ yourself with your own tooling (docker/podman), then point the component at it.
 3. **Generate the component YAML** from your Python entrypoint, pointing at the
    image you pushed:
    ```bash
-   uv run tangle sdk components generate from-python source.py --image registry.example/img:tag
+   tangle sdk components generate from-python source.py --image registry.example/img:tag
    ```
 
 4. **Insert into pipeline**: In the exported YAML, change the task's `componentRef`
@@ -193,16 +193,16 @@ what you need. Component discovery is off by default on a fresh OSS install, so
 treat this as best-effort and tolerate empty results:
 ```bash
 # Optional keyword/name/digest search (may return nothing on a fresh install):
-uv run tangle sdk published-components search "<keyword>"
+tangle sdk published-components search "<keyword>"
 # Curated standard library:
-uv run tangle sdk published-components library
+tangle sdk published-components library
 ```
 There are no v2/semantic/fuzzy/regex/schema search variants in OSS. If discovery
 returns nothing, just generate the component you need.
 
 **From Python**:
 ```bash
-uv run tangle sdk components generate from-python my_module.py
+tangle sdk components generate from-python my_module.py
 ```
 Generates component YAML from a Python function. Looks for a function matching the
 filename by default; use `--function <name>` to pick a different one. Pass
@@ -214,10 +214,10 @@ yourself. `generate from-python` is the only generation path — there is no
 
 ```bash
 # Bump version first
-uv run tangle sdk components bump-version component.yaml
+tangle sdk components bump-version component.yaml
 
 # Publish
-uv run tangle sdk published-components publish component.yaml
+tangle sdk published-components publish component.yaml
 ```
 `bump-version` lives under `components`; `publish` lives under
 `published-components`. To publish several at once, pass a `--config` YAML/JSON
@@ -230,7 +230,7 @@ Always validate before submitting. See Submission Rules in
 [`../references/tangle-tools.md`](../references/tangle-tools.md) for the full
 pre-submit checklist.
 ```bash
-uv run tangle sdk pipelines validate pipeline.yaml
+tangle sdk pipelines validate pipeline.yaml
 ```
 Use `--verbose` only if validation fails and you need full error details.
 
