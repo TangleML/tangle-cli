@@ -42,6 +42,7 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-root = "packages/tangle-cli/src"
+source-include = ["skills/**"]
 
 [tool.uv.sources]
 cloud-pipelines-backend = { git = "https://github.com/TangleML/tangle", rev = "stable_cli" }

@@ -11,8 +11,7 @@ Generate an ML experiment report. Regenerate from scratch each round.
 ## Tools
 
 **Always use the `tangle` CLI via Bash. Do NOT use any MCP tools.**
-Run every command as `uv run tangle …` from a checkout of the `tangle-cli` repo (see
-[OSS-CONVENTIONS.md §1](../OSS-CONVENTIONS.md)).
+Run commands as `uv run tangle …` from a checkout of the `tangle-cli` repo. For an installed CLI, prefer `uv tool install tangle-cli`; for one-off execution, use `uvx --from tangle-cli tangle …` (see [OSS-CONVENTIONS.md §1](../OSS-CONVENTIONS.md)).
 
 Run `uv run tangle quickstart` to discover available commands. Use `--help` on any
 command for detailed usage.

@@ -22,10 +22,7 @@ bundle-refresh step. Relative cross-references in this skill (`agents/*.md`,
 `references/*.md`) resolve directly on disk. Read
 [`references/setup.md`](references/setup.md) to set up the CLI and auth.
 
-Run every command as `uv run tangle …` from a checkout of the `tangle-cli` repo. (Once `tangle-cli` is promoted to the public OSS package, you will be able to
-`pip install 'tangle-cli[native]'` and invoke `tangle …` directly; until then, use
-`uv run tangle …` from a checkout.) See
-[`OSS-CONVENTIONS.md`](OSS-CONVENTIONS.md) §1.
+Run commands as `uv run tangle …` from a checkout of the `tangle-cli` repo. For an installed CLI, prefer `uv tool install tangle-cli`; for one-off execution, use `uvx --from tangle-cli tangle …`. See [`OSS-CONVENTIONS.md`](OSS-CONVENTIONS.md) §1.
 
 ## Commands
 

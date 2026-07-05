@@ -11,17 +11,13 @@ core, run from a checkout of the `tangle-cli` repo:
 uv run tangle --help
 ```
 
-If that fails, work through `references/setup.md` first (checkout, `uv sync`, the
-`[native]` extra, base-url/auth). Once `uv run tangle --help` works, discover the
-available commands:
+If that fails, work through `references/setup.md` first (checkout, `uv tool install tangle-cli`, or `uvx --from tangle-cli tangle …`; base-url/auth). Once `uv run tangle --help` or installed `tangle --help` works, discover the available commands:
 
 ```bash
 uv run tangle quickstart
 ```
 
-> Once `tangle-cli` is promoted to the public OSS package you will be able to
-> `pip install 'tangle-cli[native]'` and invoke `tangle …` directly. Until then,
-> use `uv run tangle …` from a checkout of the repo.
+> For an installed CLI, prefer `uv tool install tangle-cli` and invoke `tangle …` or `tangle-cli …`; for one-off execution, use `uvx --from tangle-cli tangle …`.
 
 ## Scenario Directory
 
@@ -31,8 +27,10 @@ All experiment state lives in the scenario directory. Set the absolute path:
 SCENARIO_DIR=<path_to_scenario_directory>
 ```
 
-All `tangle` commands run via `uv run tangle …`. All file reads/writes use
-absolute `SCENARIO_DIR` paths. These are different locations — don't confuse them.
+From a checkout, all `tangle` commands run via `uv run tangle …`. From an
+installed CLI, use `tangle …` / `tangle-cli …`; for one-off execution, use
+`uvx --from tangle-cli tangle …`. All file reads/writes use absolute
+`SCENARIO_DIR` paths. These are different locations — don't confuse them.
 
 ## No Scenario Yet? Build One
 

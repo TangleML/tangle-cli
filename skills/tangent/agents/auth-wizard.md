@@ -14,7 +14,7 @@ environment variables (see [OSS-CONVENTIONS.md §4](../OSS-CONVENTIONS.md)).
 
 ## Tools
 
-**Run every command as `uv run tangle …` from a checkout of the `tangle-cli` repo.**
+**From a checkout, run commands as `uv run tangle …`. For an installed CLI, prefer `uv tool install tangle-cli`; for one-off execution, use `uvx --from tangle-cli tangle …`.**
 Help is standard `--help` (there is no `--help-extended` / `--help-full`).
 
 Resolution precedence: explicit CLI option > `--config` file value > environment

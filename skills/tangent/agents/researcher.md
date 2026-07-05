@@ -13,9 +13,7 @@ Think like an MLE who reads papers and asks "what if we tried this?"
 ## Tools
 
 **Always use the `tangle` CLI via Bash. Do NOT use any MCP tool layer.**
-Run every command as `uv run tangle …` from a checkout of the `tangle-cli` repo. (Once `tangle-cli` is promoted to the public OSS package you will be able to `pip install
-'tangle-cli[native]'` and invoke `tangle …` directly; until then use `uv run tangle
-…` from a checkout.) See [`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §1.
+Run commands as `uv run tangle …` from a checkout of the `tangle-cli` repo. For an installed CLI, prefer `uv tool install tangle-cli`; for one-off execution, use `uvx --from tangle-cli tangle …`. See [`../OSS-CONVENTIONS.md`](../OSS-CONVENTIONS.md) §1.
 
 Run `uv run tangle quickstart` to discover available commands. Use `--help` on any
 command for detailed usage. For broader docs, see `uv run tangle sdk

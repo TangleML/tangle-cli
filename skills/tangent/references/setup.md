@@ -10,8 +10,7 @@ cross-references resolve directly on disk.
 
 ## 1. Install / run the CLI
 
-The CLI is consumed from a checkout of the repo. Run every command as
-`uv run tangle …`:
+From a checkout, run commands through `uv run`:
 
 ```bash
 uv run tangle quickstart
@@ -20,14 +19,28 @@ uv run tangle sdk --help
 uv run tangle api --help
 ```
 
+For a persistent user-level CLI install, prefer uv tools:
+
+```bash
+uv tool install tangle-cli
+tangle quickstart
+tangle-cli --help
+```
+
+For one-off execution without a persistent install, use `uvx`:
+
+```bash
+uvx --from tangle-cli tangle --help
+```
+
+Generic Python environments may also use `pip install tangle-cli`; use
+`uv pip install tangle-cli` only inside an explicitly managed virtualenv.
+
 `uv` resolves dependencies against public PyPI. In the `tangle-cli` workspace, `uv`
 installs the workspace `tangle-api` package automatically for dev/tests. The
-`[native]` extra enables the static API-backed commands and the handwritten
-`TangleApiClient` wrapper.
-
-> Once `tangle-cli` is promoted to the public OSS package, you will be able to
-> `pip install 'tangle-cli[native]'` and invoke `tangle …` directly. Until then,
-> use `uv run tangle …` from a checkout of the repo.
+published default `tangle-cli` install includes `tangle-api`, enabling static
+API-backed commands and the handwritten `TangleApiClient` wrapper. The old
+`native` extra is retained only as a compatibility/no-op alias.
 
 Then discover available commands:
 ```bash
@@ -143,4 +156,4 @@ fetch bytes, use the signed-URL recipe in
 | `403 Forbidden` | Authenticated but not permitted — re-run with a different `--token` for the right identity. |
 | Connection error / timeout | Wrong or unreachable `--base-url` / `TANGLE_API_URL`; confirm the backend is up. |
 | Want to see the raw HTTP exchange | Set `TANGLE_VERBOSE=1` for redacted request/response diagnostics. |
-| Import error from `from tangle_cli.client import TangleApiClient` | Install the `[native]` extra (the client needs the native bindings). |
+| Import error from `from tangle_cli.client import TangleApiClient` | Install `tangle-cli` normally so `tangle-api` is present, or provide a compatible local/custom `tangle_api.generated` package for a custom API. |

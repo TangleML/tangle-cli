@@ -38,11 +38,7 @@ references/                  ← the loop steps + topic references
 
 ## How to invoke
 
-All commands run as **`uv run tangle …` from a checkout of the `tangle-cli` repo**. `tangle-cli` is not yet
-a published package, so the public `pip install 'tangle-cli[native]'` / bare `tangle …`
-*invocation* form is presented as a future state; elsewhere `tangle` still appears as a bare
-command noun in prose and in the §2 CLI map (the naming-surface exception). See
-`OSS-CONVENTIONS.md` §1.
+Commands can run as **`uv run tangle …` from a checkout of the `tangle-cli` repo**, from a persistent uv tool install (`uv tool install tangle-cli`, then `tangle …` / `tangle-cli …`), or as a one-off uvx command (`uvx --from tangle-cli tangle …`). Elsewhere, `tangle` still appears as a bare command noun in prose and in the §2 CLI map (the naming-surface exception). See `OSS-CONVENTIONS.md` §1.
 
 ## What changed from the internal bundle
 
