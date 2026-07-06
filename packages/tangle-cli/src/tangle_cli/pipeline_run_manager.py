@@ -37,8 +37,7 @@ _FAILURE_EARLY_EXIT_STATUSES = ("FAILED", "SYSTEM_ERROR")
 _EXECUTION_STATE_TIMINGS_METADATA_KEY = "execution_state_timings"
 _EXECUTION_STATE_TIMING_MONOTONIC_METADATA_KEY = "_execution_state_timing_monotonic"
 _SUBMISSION_ID_ANNOTATION_KEY = "tangle-cli/submission-id"
-_SUBMIT_RECOVERY_LOOKUP_ATTEMPTS = 2
-_SUBMIT_RECOVERY_LOOKUP_DELAY_SECONDS = 0.1
+_SUBMIT_RECOVERY_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
 
 
 class PipelineRunError(RuntimeError):
@@ -1557,11 +1556,19 @@ class PipelineRunManager(TangleCliHandler):
     ) -> dict[str, Any] | None:
         if not submission_id:
             return None
-        for lookup_attempt in range(1, _SUBMIT_RECOVERY_LOOKUP_ATTEMPTS + 1):
+        total_lookup_attempts = len(_SUBMIT_RECOVERY_BACKOFF_SECONDS)
+        for lookup_attempt, delay_seconds in enumerate(_SUBMIT_RECOVERY_BACKOFF_SECONDS, start=1):
+            self.logger.info(
+                "Waiting "
+                f"{delay_seconds:g}s before checking whether failed submit already created a pipeline run "
+                f"({_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}, "
+                f"lookup_attempt={lookup_attempt}/{total_lookup_attempts})"
+            )
+            time.sleep(delay_seconds)
             self.logger.info(
                 "Checking whether failed submit already created a pipeline run "
                 f"({_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}, "
-                f"lookup_attempt={lookup_attempt}/{_SUBMIT_RECOVERY_LOOKUP_ATTEMPTS})"
+                f"lookup_attempt={lookup_attempt}/{total_lookup_attempts})"
             )
             try:
                 matches = self._submitted_runs_for_submission_id(submission_id)
@@ -1598,8 +1605,6 @@ class PipelineRunManager(TangleCliHandler):
                     f"{_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}: {', '.join(run_ids) or matches!r}. "
                     "Refusing to submit a duplicate."
                 )
-            if lookup_attempt < _SUBMIT_RECOVERY_LOOKUP_ATTEMPTS:
-                time.sleep(_SUBMIT_RECOVERY_LOOKUP_DELAY_SECONDS)
         self.logger.warn(
             "No existing pipeline run found after submit failure "
             f"({_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}); "

@@ -11,15 +11,16 @@ import pytest
 import yaml
 
 from tangle_cli import cli, pipeline_run_manager, pipeline_runs_cli
-from tangle_cli.pipeline_runner import PipelineRunner, PipelineRunnerHooks
 from tangle_cli.pipeline_run_manager import (
+    AmbiguousPipelineRunRecoveryError,
     PipelineRunContext,
+    PipelineRunError,
     PipelineRunHooks,
     PipelineRunManager,
-    PipelineRunError,
     PipelineWaitOutcome,
     PipelineWaitPoll,
 )
+from tangle_cli.pipeline_runner import PipelineRunner, PipelineRunnerHooks
 
 
 def run_app(app, args: list[str]) -> None:
@@ -199,7 +200,10 @@ def test_pipeline_runs_submit_dry_run_prints_sanitized_payload(monkeypatch, tmp_
                                 "arguments": {"config": {"_meta": {"mode": "keep"}}},
                                 "componentRef": {
                                     "name": "text-component",
-                                    "text": "name: Text Component\n_source_dir: /tmp/private\nimplementation:\n  container:\n    image: busybox\n",
+                                    "text": (
+                                        "name: Text Component\n_source_dir: /tmp/private\nimplementation:\n"
+                                        "  container:\n    image: busybox\n"
+                                    ),
                                 }
                             }
                         }
@@ -970,7 +974,9 @@ def test_pipeline_runs_submit_trusted_hydration_allows_untrusted_local_from_pyth
 
     assert json.loads(capsys.readouterr().out)["id"] == "run-1"
     assert regenerated == [outside_python.resolve()]
-    submitted_task = fake_client.created[0]["root_task"]["componentRef"]["spec"]["implementation"]["graph"]["tasks"]["generated"]
+    submitted_task = fake_client.created[0]["root_task"]["componentRef"]["spec"]["implementation"]["graph"][
+        "tasks"
+    ]["generated"]
     assert submitted_task["componentRef"]["name"] == "Submit Generated Component"
 
 
@@ -1670,9 +1676,9 @@ def test_pipeline_runs_path_retry_rebuilds_submit_body_each_attempt(tmp_path: Pa
     ]
 
 
-
 def test_pipeline_runs_submit_failure_recovery_adopts_existing_run(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda _seconds: None)
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
     pipeline_path = tmp_path / "pipeline.yaml"
 
     class DynamicTimeHooks(PipelineRunnerHooks):
@@ -1727,6 +1733,7 @@ def test_pipeline_runs_submit_failure_recovery_adopts_existing_run(tmp_path: Pat
     assert hooks.prepare_run_arguments_calls == 1
     assert hooks.submit_errors == []
     assert len(client.created) == 1
+    assert sleeps == [0.5]
     submission_id = client.created[0]["annotations"]["tangle-cli/submission-id"]
     assert submission_id
     assert len(client.list_calls) == 1
@@ -1734,11 +1741,74 @@ def test_pipeline_runs_submit_failure_recovery_adopts_existing_run(tmp_path: Pat
     assert submission_id in client.list_calls[0]["filter_query"]
 
 
+def test_pipeline_runs_submit_failure_recovery_waits_for_delayed_registration(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
+
+    class DelayedRecoveryClient(FakeClient):
+        def pipeline_runs_create(self, body: Any = None) -> dict[str, Any]:
+            self.created.append(copy.deepcopy(body))
+            raise TimeoutError("submit timed out")
+
+        def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
+            self.list_calls.append(kwargs)
+            if len(self.list_calls) <= 2:
+                return {"pipeline_runs": [], "next_page_token": None}
+            return {
+                "pipeline_runs": [{"id": "run-created", "root_execution_id": "exec-created"}],
+                "next_page_token": None,
+            }
+
+    client = DelayedRecoveryClient()
+    manager = PipelineRunManager(client=client)
+    body = {"root_task": {"componentRef": {"spec": {"name": "delayed-recovery"}}}}
+
+    result = manager.run_prepared_body(body)
+
+    assert result["response"]["id"] == "run-created"
+    assert result["context"].metadata["recovered_after_submit_error"] is True
+    assert len(client.created) == 1
+    assert len(client.list_calls) == 3
+    assert sleeps == [0.5, 1.0, 2.0]
+
+
+def test_pipeline_runs_submit_failure_recovery_refuses_ambiguous_matches(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
+
+    class AmbiguousRecoveryClient(FakeClient):
+        def pipeline_runs_create(self, body: Any = None) -> dict[str, Any]:
+            self.created.append(copy.deepcopy(body))
+            raise TimeoutError("submit timed out")
+
+        def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
+            self.list_calls.append(kwargs)
+            return {
+                "pipeline_runs": [
+                    {"id": "run-created-1", "root_execution_id": "exec-created-1"},
+                    {"id": "run-created-2", "root_execution_id": "exec-created-2"},
+                ],
+                "next_page_token": None,
+            }
+
+    client = AmbiguousRecoveryClient()
+    manager = PipelineRunManager(client=client)
+    body = {"root_task": {"componentRef": {"spec": {"name": "ambiguous-recovery"}}}}
+
+    with pytest.raises(AmbiguousPipelineRunRecoveryError):
+        manager.run_prepared_body(body, max_attempts=2)
+
+    assert len(client.created) == 1
+    assert len(client.list_calls) == 1
+    assert sleeps == [0.5]
+
+
 def test_pipeline_runs_submit_failure_reuses_frozen_body_when_recovery_finds_no_run(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda _seconds: None)
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
     pipeline_path = tmp_path / "pipeline.yaml"
 
     class DynamicTimeHooks(PipelineRunnerHooks):
@@ -1799,12 +1869,14 @@ def test_pipeline_runs_submit_failure_reuses_frozen_body_when_recovery_finds_no_
     assert client.created[0]["annotations"]["tangle-cli/submission-id"] == client.created[1]["annotations"][
         "tangle-cli/submission-id"
     ]
-    assert len(client.list_calls) == 4
-
+    assert len(client.list_calls) == 2 * len(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS)
+    expected_sleeps = list(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS)
+    assert sleeps == expected_sleeps + expected_sleeps
 
 
 def test_pipeline_runs_recovered_retry_runs_after_retry_submit_hook(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda _seconds: None)
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
     pipeline_path = tmp_path / "pipeline.yaml"
     events: list[tuple[str, int, str | None]] = []
 
@@ -1842,7 +1914,7 @@ def test_pipeline_runs_recovered_retry_runs_after_retry_submit_hook(tmp_path: Pa
 
         def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
             self.list_calls.append(kwargs)
-            if len(self.list_calls) <= 2:
+            if len(self.list_calls) <= len(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS):
                 return {"pipeline_runs": [], "next_page_token": None}
             return {
                 "pipeline_runs": [
@@ -1862,6 +1934,8 @@ def test_pipeline_runs_recovered_retry_runs_after_retry_submit_hook(tmp_path: Pa
     assert result["context"].metadata["recovered_after_submit_error"] is True
     assert hooks.prepare_run_arguments_calls == 1
     assert len(client.created) == 1
+    assert len(client.list_calls) == len(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS) + 1
+    assert sleeps == [0.5, 1.0, 2.0, 0.5]
     assert events == [("before_retry", 2, None), ("after_retry_submit", 2, "run-created")]
 
 
