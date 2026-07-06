@@ -101,7 +101,7 @@ uv run tangle api --help
 uv run tangle sdk pipelines validate pipeline.yaml
 ```
 
-Custom API/codegen users can still run codegen from the fully capable install; generating bindings does not require removing the official `tangle-api` package. For project-local generated APIs, generate into a local source tree such as `src/tangle_api/generated` (and `src/tangle_api/schema/openapi.json` when you want `tangle api --schema-source official`) and run from that project so local `src/tangle_api` shadows site-packages. For packaged custom APIs, publish/provide a distribution named `tangle-api` with a version compatible with this `tangle-cli` release (for example `0.0.1a3+yourorg` for a `tangle-cli` dependency on `tangle-api==0.0.1a3`) via a private index, `--find-links`, or uv sources. As an expert escape hatch, `--no-deps` installs only `tangle-cli` and skips all dependencies, so that environment must manually provide every required runtime dependency plus its generated/custom `tangle_api`; this is acceptable for controlled codegen/custom scenarios but not normal UX.
+Custom API/codegen users can still run codegen from the fully capable install; generating bindings does not require removing the official `tangle-api` package. For project-local generated APIs, generate into a local source tree such as `src/tangle_api/generated` (and `src/tangle_api/schema/openapi.json` when you want `tangle api --schema-source official`) and run from that project so local `src/tangle_api` shadows site-packages. For packaged custom APIs, publish/provide a distribution named `tangle-api` with a version compatible with this `tangle-cli` release (for example `0.1.0+yourorg` for a `tangle-cli` dependency on `tangle-api==0.1.0`) via a private index, `--find-links`, or uv sources. As an expert escape hatch, `--no-deps` installs only `tangle-cli` and skips all dependencies, so that environment must manually provide every required runtime dependency plus its generated/custom `tangle_api`; this is acceptable for controlled codegen/custom scenarios but not normal UX.
 
 ## Agent skills
 
@@ -350,7 +350,7 @@ uv run python -m tangle_cli.openapi.codegen \
   --out src/tangle_api/generated
 ```
 
-That project-local `tangle_api` package can be an editable/package source tree. If you ship the custom API bindings as a wheel or source distribution, use the distribution name `tangle-api` and a compatible version for the `tangle-cli` release you are using. A PEP 440 local version such as `0.0.1a3+yourorg` can satisfy a public `==0.0.1a3` dependency while distinguishing your private build. Provide that package through your private index, `--find-links`, or uv source configuration so the resolver chooses it instead of the public official package.
+That project-local `tangle_api` package can be an editable/package source tree. If you ship the custom API bindings as a wheel or source distribution, use the distribution name `tangle-api` and a compatible version for the `tangle-cli` release you are using. A PEP 440 local version such as `0.1.0+yourorg` can satisfy a public `==0.1.0` dependency while distinguishing your private build. Provide that package through your private index, `--find-links`, or uv source configuration so the resolver chooses it instead of the public official package.
 
 Generate from a backend checkout explicitly:
 
