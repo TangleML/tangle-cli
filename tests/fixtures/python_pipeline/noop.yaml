@@ -1,0 +1,16 @@
+name: Noop
+description: Minimal no-op component referenced by compile fixtures via file://./noop.yaml.
+inputs:
+  - name: wait_for
+    type: String
+    optional: true
+outputs:
+  - name: wait_for_output
+    type: String
+implementation:
+  container:
+    image: python:3.12
+    command:
+      - sh
+      - -c
+      - "true"

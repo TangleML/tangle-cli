@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tangleml.com/schemas/tangle/dehydrated_pipeline_schema.json",
+  "title": "Tangle Dehydrated Pipeline Schema",
+  "description": "Formal schema for a Tangle pipeline in its *dehydrated* form. A dehydrated pipeline replaces every inline `componentSpec` with a lightweight `componentRef` (by url, digest, or name). Subgraphs are extracted to separate files and referenced via `componentRef.url` (typically `file://...`). Hydrate with `tangle sdk pipelines hydrate` to produce the full inline form.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "implementation"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Pipeline name."
+    },
+    "description": {
+      "type": "string",
+      "description": "Free-form human-readable description."
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "inputs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/InputSpec" },
+      "description": "Top-level pipeline inputs."
+    },
+    "outputs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/OutputSpec" },
+      "description": "Top-level pipeline outputs."
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["graph"],
+      "properties": {
+        "graph": { "$ref": "#/$defs/GraphSpec" }
+      }
+    }
+  },
+
+  "$defs": {
+    "Metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "annotations": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+
+    "TypeName": {
+      "description": "Tangle parameter type. Common values include String, Integer, Float, Boolean, JsonObject, JsonArray, GcsPath, BqTable. New types may be added; treat as an open enum.",
+      "type": "string",
+      "minLength": 1
+    },
+
+    "InputSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type"],
+      "properties": {
+        "name":        { "type": "string", "minLength": 1 },
+        "type":        { "$ref": "#/$defs/TypeName" },
+        "description": { "type": "string" },
+        "default":     {},
+        "optional":    { "type": "boolean" },
+        "annotations": { "type": "object", "additionalProperties": true }
+      }
+    },
+
+    "OutputSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type"],
+      "properties": {
+        "name":        { "type": "string", "minLength": 1 },
+        "type":        { "$ref": "#/$defs/TypeName" },
+        "description": { "type": "string" },
+        "annotations": { "type": "object", "additionalProperties": true }
+      }
+    },
+
+    "GraphSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tasks"],
+      "properties": {
+        "tasks": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/TaskSpec" },
+          "description": "Map of task-id -> TaskSpec. Task ids are referenced from `taskOutput.taskId`."
+        },
+        "outputValues": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ArgumentValue" },
+          "description": "Wire graph outputs to task outputs / graph inputs / constants."
+        }
+      }
+    },
+
+    "TaskSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["componentRef"],
+      "properties": {
+        "componentRef": { "$ref": "#/$defs/DehydratedComponentRef" },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ArgumentValue" },
+          "description": "Map of component input name -> argument source."
+        },
+        "isEnabled":        { "type": "boolean" },
+        "executionOptions": { "$ref": "#/$defs/ExecutionOptionsSpec" },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Free-form per-task annotations (e.g. `display_name`)."
+        }
+      }
+    },
+
+    "DehydratedComponentRef": {
+      "description": "Reference to a component. In a *dehydrated* pipeline this MUST be a pure reference — inline `spec`/`text` are forbidden. At least one of `url`, `digest`, or `name` must be present. `digest` may co-exist with `url`/`name` to pin to a specific version while still preserving the locator.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Locator for the component YAML. Supported schemes: `file://`, `http(s)://`, `gs://`, `resolve://`.",
+          "anyOf": [
+            { "pattern": "^file://" },
+            { "pattern": "^https?://" },
+            { "pattern": "^gs://" },
+            { "pattern": "^resolve://" }
+          ]
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$",
+          "description": "SHA-256 hex digest of the published component YAML. Auto-follows `superseded_by` at hydration time."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Component name as published in the Tangle Component Library. Resolves to the latest matching version at hydration time."
+        }
+      },
+      "anyOf": [
+        { "required": ["url"] },
+        { "required": ["digest"] },
+        { "required": ["name"] }
+      ],
+      "not": {
+        "anyOf": [
+          { "required": ["spec"] },
+          { "required": ["text"] }
+        ]
+      }
+    },
+
+    "ArgumentValue": {
+      "description": "Source of a task argument or graph output. Each argument has EXACTLY ONE source: a raw string constant, a `graphInput` wrapper, or a `taskOutput` wrapper (mixing sources in one object is rejected). The `graphInput` / `taskOutput` wrappers use the same shapes as runnable Tangle pipelines. The ONLY dehydrated-vs-runnable difference is `componentRef` (a lightweight ref) vs an inline `componentSpec`; argument values are identical to the runnable contract.",
+      "oneOf": [
+        { "type": "string" },
+        { "$ref": "#/$defs/GraphInputArgument" },
+        { "$ref": "#/$defs/TaskOutputArgument" }
+      ]
+    },
+
+    "GraphInputArgument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["graphInput"],
+      "properties": {
+        "graphInput": { "$ref": "#/$defs/GraphInputReference" }
+      }
+    },
+
+    "GraphInputReference": {
+      "type": "object",
+      "required": ["inputName"],
+      "properties": {
+        "inputName": { "type": "string" },
+        "type": {
+          "anyOf": [
+            { "type": "string" },
+            { "type": "object", "additionalProperties": true },
+            { "type": "array", "items": {} },
+            { "type": "null" }
+          ],
+          "default": null
+        }
+      }
+    },
+
+    "TaskOutputArgument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskOutput"],
+      "properties": {
+        "taskOutput": { "$ref": "#/$defs/TaskOutputReference" }
+      }
+    },
+
+    "TaskOutputReference": {
+      "type": "object",
+      "required": ["outputName", "taskId"],
+      "properties": {
+        "outputName": { "type": "string" },
+        "taskId":     { "type": "string" }
+      }
+    },
+
+    "ExecutionOptionsSpec": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "cachingStrategy": { "$ref": "#/$defs/CachingStrategySpec" },
+        "retryStrategy":   { "$ref": "#/$defs/RetryStrategySpec" },
+        "timeout":         { "type": "string", "description": "Go-style duration, e.g. `30m`, `2h`." }
+      }
+    },
+
+    "CachingStrategySpec": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "maxCacheStaleness": {
+          "type": ["string", "null"],
+          "description": "Maximum allowed cache age, e.g. `P7D` (ISO-8601) or `7d`."
+        }
+      }
+    },
+
+    "RetryStrategySpec": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "maxRetries": { "type": "integer", "minimum": 0 },
+        "backoff":    { "type": "string", "description": "Go-style duration, e.g. `30s`." }
+      }
+    }
+  }
+}
