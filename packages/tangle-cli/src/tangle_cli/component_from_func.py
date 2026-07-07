@@ -757,13 +757,22 @@ def _is_name_main_test(node: ast.expr) -> bool:
 # too, exactly like @task.
 _AUTHORING_DECORATOR_NAMES = frozenset({"task", "pipeline", "subpipeline", "registered"})
 
-# The python-pipeline authoring module. ONLY imports of this module (and its
-# submodules) are authoring-only and stripped from the baked source. We
-# deliberately do NOT strip other ``tangle_deploy.*`` packages (e.g.
-# ``tangle_deploy.utils``): those may be legitimate runtime helpers used inside a
-# ``@task`` body, and dropping them would raise ``NameError`` in the operation
-# container.
-_AUTHORING_IMPORT_MODULE = "tangle_deploy.python_pipeline"
+# The python-pipeline authoring modules. ONLY imports of these modules (and
+# their submodules) are authoring-only and stripped from the baked source. We
+# deliberately do NOT strip other ``tangle_deploy.*`` / ``tangle_cli.*`` packages
+# (e.g. ``tangle_deploy.utils``): those may be legitimate runtime helpers used
+# inside a ``@task`` body, and dropping them would raise ``NameError`` in the
+# operation container.
+#
+# Two authoring surfaces are recognised: the legacy ``tangle_deploy.python_pipeline``
+# path (used by every pipeline authored before the OSS move) and the canonical
+# OSS ``tangle_cli.python_pipeline`` path. Both expose the identical decorators —
+# ``tangle_deploy.python_pipeline`` re-exports the OSS objects — so an author may
+# use either import and codegen must strip either the same way.
+_AUTHORING_IMPORT_MODULES = (
+    "tangle_deploy.python_pipeline",
+    "tangle_cli.python_pipeline",
+)
 
 # The authoring-only ``TaskEnv`` class name. A module-level ``X = TaskEnv(...)``
 # (or ``X = <alias>.TaskEnv(...)``) declaration is authoring-only by contract and
@@ -812,19 +821,25 @@ def _decorator_called_name(node: ast.expr) -> str | None:
     return None
 
 
+def _is_authoring_module(name: str) -> bool:
+    """Return True if *name* is an authoring module or a submodule of one."""
+    return any(name == mod or name.startswith(mod + ".") for mod in _AUTHORING_IMPORT_MODULES)
+
+
 def _is_authoring_import(node: ast.stmt) -> bool:
     """Return True if *node* imports the python-pipeline authoring surface.
 
-    Matches ONLY the ``tangle_deploy.python_pipeline`` module (and its
-    submodules):
+    Matches ONLY the ``tangle_deploy.python_pipeline`` / ``tangle_cli.python_pipeline``
+    modules (and their submodules):
 
-    - ``from tangle_deploy.python_pipeline import ...`` (including the aliased
-      ``from tangle_deploy.python_pipeline import ref as operation_by_ref`` form
-      and submodules like ``from tangle_deploy.python_pipeline.x import y``);
-    - ``import tangle_deploy.python_pipeline`` / ``import
-      tangle_deploy.python_pipeline as tp``.
+    - ``from tangle_cli.python_pipeline import ...`` (including the aliased
+      ``from tangle_cli.python_pipeline import ref as operation_by_ref`` form
+      and submodules like ``from tangle_cli.python_pipeline.x import y``);
+    - ``import tangle_cli.python_pipeline`` / ``import
+      tangle_cli.python_pipeline as tp``;
+    - the legacy ``tangle_deploy.python_pipeline`` equivalents.
 
-    It does NOT match other ``tangle_deploy.*`` packages (e.g.
+    It does NOT match other ``tangle_deploy.*`` / ``tangle_cli.*`` packages (e.g.
     ``from tangle_deploy.utils import X``) — those can be genuine runtime helpers
     referenced inside a ``@task`` body and must survive into the baked program.
     Relative imports (``from . import x``) are never authoring imports.
@@ -832,13 +847,9 @@ def _is_authoring_import(node: ast.stmt) -> bool:
     if isinstance(node, ast.ImportFrom):
         if node.level:  # relative import — not the authoring package
             return False
-        module = node.module or ""
-        return module == _AUTHORING_IMPORT_MODULE or module.startswith(_AUTHORING_IMPORT_MODULE + ".")
+        return _is_authoring_module(node.module or "")
     if isinstance(node, ast.Import):
-        return any(
-            alias.name == _AUTHORING_IMPORT_MODULE or alias.name.startswith(_AUTHORING_IMPORT_MODULE + ".")
-            for alias in node.names
-        )
+        return any(_is_authoring_module(alias.name) for alias in node.names)
     return False
 
 
