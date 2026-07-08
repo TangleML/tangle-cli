@@ -3,8 +3,9 @@ name: "Publish release to PyPI"
 on:
   push:
     tags:
-      # Publish on any tag starting with a `v`, e.g., v0.0.1a2
-      - v*
+      # Publish package-scoped releases, e.g., tangle-cli-v0.1.1 or tangle-api-v0.1.0.
+      - "tangle-cli-v*"
+      - "tangle-api-v*"
 
 jobs:
   run:
@@ -52,21 +53,39 @@ jobs:
         run: |
           cli_wheel="$(echo dist/tangle_cli-*.whl)"
           uv run --isolated --no-project --find-links dist --with "${cli_wheel}[native]" tangle-cli version
-      - name: Determine packages to publish
+      - name: Determine package to publish
         id: publish-plan
         run: |
           python - <<'PY'
           import json
           import os
+          import sys
           import urllib.error
           import urllib.request
           from pathlib import Path
           import tomllib
 
-          packages = [
-              ("tangle-cli", "pyproject.toml", "dist/tangle_cli-*", "publish_cli"),
-              ("tangle-api", "packages/tangle-api/pyproject.toml", "dist/tangle_api-*", "publish_api"),
-          ]
+          tag = os.environ["GITHUB_REF_NAME"]
+          release_packages = {
+              "tangle-cli-v": ("tangle-cli", "pyproject.toml", "dist/tangle_cli-*"),
+              "tangle-api-v": ("tangle-api", "packages/tangle-api/pyproject.toml", "dist/tangle_api-*"),
+          }
+
+          for tag_prefix, package_config in release_packages.items():
+              if tag.startswith(tag_prefix):
+                  package, pyproject_path, dist_glob = package_config
+                  tag_version = tag.removeprefix(tag_prefix)
+                  break
+          else:
+              supported_tags = ", ".join(f"{prefix}*" for prefix in release_packages)
+              sys.exit(f"Unsupported release tag {tag!r}. Expected one of: {supported_tags}.")
+
+          package_version = tomllib.loads(Path(pyproject_path).read_text())["project"]["version"]
+          if tag_version != package_version:
+              sys.exit(
+                  f"Release tag {tag!r} declares {package} version {tag_version}, "
+                  f"but {pyproject_path} declares {package_version}."
+              )
 
           def version_exists(package: str, version: str) -> bool:
               url = f"https://pypi.org/pypi/{package}/json"
@@ -79,21 +98,18 @@ jobs:
                   raise
               return version in data.get("releases", {})
 
-          github_output = Path(os.environ["GITHUB_OUTPUT"])
-          with github_output.open("a") as output:
-              for package, pyproject_path, dist_glob, output_name in packages:
-                  version = tomllib.loads(Path(pyproject_path).read_text())["project"]["version"]
-                  exists = version_exists(package, version)
-                  should_publish = not exists
-                  print(
-                      f"{package} {version}: "
-                      f"{'publish ' + dist_glob if should_publish else 'skip; version already exists on PyPI'}"
-                  )
-                  print(f"{output_name}={'true' if should_publish else 'false'}", file=output)
+          should_publish = not version_exists(package, package_version)
+          print(
+              f"{tag}: "
+              f"{'publish ' + dist_glob if should_publish else package + ' ' + package_version + ' already exists on PyPI; skipping'}"
+          )
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              print(f"package={package}", file=output)
+              print(f"version={package_version}", file=output)
+              print(f"dist_glob={dist_glob}", file=output)
+              print(f"should_publish={'true' if should_publish else 'false'}", file=output)
           PY
-      - name: Publish tangle-cli
-        if: steps.publish-plan.outputs.publish_cli == 'true'
-        run: uv publish dist/tangle_cli-*
-      - name: Publish tangle-api
-        if: steps.publish-plan.outputs.publish_api == 'true'
-        run: uv publish dist/tangle_api-*
+      - name: Publish selected package
+        if: steps.publish-plan.outputs.should_publish == 'true'
+        run: uv publish ${{ steps.publish-plan.outputs.dist_glob }}
