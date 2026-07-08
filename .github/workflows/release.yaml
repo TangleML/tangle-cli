@@ -52,5 +52,5 @@ jobs:
         run: |
           cli_wheel="$(echo dist/tangle_cli-*.whl)"
           uv run --isolated --no-project --find-links dist --with "${cli_wheel}[native]" tangle-cli version
-      - name: Publish
-        run: uv publish --check-url https://pypi.org/simple/
+      - name: Publish tangle-cli
+        run: uv publish --check-url https://pypi.org/simple/ dist/tangle_cli-*
