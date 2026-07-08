@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-29T15:21:31.720493Z"
+exclude-newer = "2026-07-01T02:35:01.441363Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -1786,7 +1786,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.0" }]
 
 [[package]]
 name = "tangle-cli"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "cloud-pipelines" },

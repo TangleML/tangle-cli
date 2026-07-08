@@ -507,6 +507,7 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
         open_browser: bool = False,
         include_next_steps: bool = False,
         metadata: dict[str, Any] | None = None,
+        submit_recovery_attempts: int = 2,
     ) -> dict[str, Any]:
         """Run a pipeline path through generic preparation + lifecycle hooks.
 
@@ -603,6 +604,7 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
                 timeout_clock=timeout_clock,
                 exit_on_first_failure=exit_on_first_failure,
                 metadata_factory=metadata_factory,
+                submit_recovery_attempts=submit_recovery_attempts,
             )
             context = result.get("context")
             attempt = context.attempt if isinstance(context, PipelineRunContext) else max(preparations)
