@@ -187,6 +187,88 @@ def test_tangle_deploy_required_import_surface_includes_static_client() -> None:
     assert utils_module is not None
 
 
+def test_tangle_deploy_pipeline_compile_import_surface() -> None:
+    """Guards the pipeline-compile surface tangle-deploy consumes from tangle_cli.
+
+    The internal ``tangle-deploy pipeline compile from-python`` command delegates
+    to the OSS compile driver and only augments the Shopify zone-root seam. These
+    are the exact ``tangle_cli.*`` imports the delegating ``tangle_deploy``
+    modules make (the discovery originals imported the same names from
+    ``tangle_deploy.*`` before the driver was migrated OSS).
+    """
+    from tangle_cli.python_pipeline.cfg import Cfg, _coerce_override, load_cfg
+    from tangle_cli.python_pipeline.compiler_context import (
+        BroadcastLayer,
+        CompileContext,
+        PipelineCompileKey,
+        canonical_repo_path,
+        overrides_fingerprint,
+    )
+    from tangle_cli.python_pipeline.emit import _TASK_URL_PLACEHOLDER, emit_pipeline
+    from tangle_cli.python_pipeline.errors import CompileError
+    from tangle_cli.python_pipeline.pipeline import PipelineFn
+    from tangle_cli.python_pipeline.ref import CallableRef
+    from tangle_cli.python_pipeline.registered import _REGISTERED_URL_PLACEHOLDER
+    from tangle_cli.python_pipeline.subpipeline import (
+        SubpipelineRef,
+        _SUBPIPELINE_URL_PLACEHOLDER,
+    )
+    from tangle_cli.python_pipeline.trace import trace_pipeline
+    from tangle_cli.python_pipeline.types import In
+    from tangle_cli.schema_validation import (
+        SchemaValidationError,
+        validate_dehydrated_pipeline,
+    )
+    from tangle_cli.pipeline_compiler import (
+        CompileResult,
+        PipelineCompiler,
+        ZONE_ROOT_MARKERS,
+        compile_pipeline,
+    )
+    from tangle_cli.handler import TangleCliHandler
+
+    # python_pipeline authoring / compile DSL.
+    assert Cfg is not None
+    assert callable(load_cfg) and callable(_coerce_override)
+    assert BroadcastLayer and CompileContext and PipelineCompileKey
+    assert callable(canonical_repo_path) and callable(overrides_fingerprint)
+    assert callable(emit_pipeline)
+    assert _TASK_URL_PLACEHOLDER is not None
+    assert issubclass(CompileError, Exception)
+    assert PipelineFn is not None and CallableRef is not None
+    assert _REGISTERED_URL_PLACEHOLDER is not None
+    assert SubpipelineRef is not None and _SUBPIPELINE_URL_PLACEHOLDER is not None
+    assert callable(trace_pipeline)
+    assert In is not None
+    # schema validation.
+    assert issubclass(SchemaValidationError, Exception)
+    assert callable(validate_dehydrated_pipeline)
+    # compile driver + object-oriented handler the command delegates to.
+    assert callable(compile_pipeline)
+    assert CompileResult is not None
+    assert issubclass(PipelineCompiler, TangleCliHandler)
+    assert callable(PipelineCompiler.compile_file)
+    assert isinstance(ZONE_ROOT_MARKERS, list)
+
+
+def test_zone_root_markers_seam_is_empty_and_mutable_for_downstream() -> None:
+    """OSS ships an EMPTY zone-root marker list; downstream distributions
+    (tangle-deploy) append their own marker (e.g. the oasis component-root
+    marker) to re-enable zone-root resolution. Mirrors the mutable-CI-vars
+    provider-override contract above.
+    """
+    from tangle_cli import pipeline_compiler as pc
+
+    assert pc.ZONE_ROOT_MARKERS == []  # empty in OSS by default
+    original = list(pc.ZONE_ROOT_MARKERS)
+    try:
+        pc.ZONE_ROOT_MARKERS.append("oasis.pipeline_component_root.yaml")
+        assert "oasis.pipeline_component_root.yaml" in pc.ZONE_ROOT_MARKERS
+    finally:
+        pc.ZONE_ROOT_MARKERS[:] = original
+    assert pc.ZONE_ROOT_MARKERS == []
+
+
 def test_ci_var_globals_are_mutable_for_downstream_provider_overrides() -> None:
     from tangle_cli import utils as u
 
