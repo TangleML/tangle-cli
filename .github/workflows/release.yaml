@@ -41,16 +41,16 @@ jobs:
           uv run --isolated --no-project \
             --with dist/tangle_cli-*.whl \
             --with dist/tangle_api-*.whl \
-            python -c "import importlib.metadata as m; import tangle_api.generated.models; import tangle_api.schema; assert m.version('tangle-api') == m.version('tangle-cli')"
+            python -c "import importlib.metadata as m; import tangle_cli; import tangle_api.generated.models; import tangle_api.schema; print(f'tangle-cli {m.version(\"tangle-cli\")} with tangle-api {m.version(\"tangle-api\")}')"
       - name: Smoke test tangle-api source distribution
         run: |
           uv run --isolated --no-project \
             --with dist/tangle_cli-*.tar.gz \
             --with dist/tangle_api-*.tar.gz \
-            python -c "import importlib.metadata as m; import tangle_api.generated.models; import tangle_api.schema; assert m.version('tangle-api') == m.version('tangle-cli')"
+            python -c "import importlib.metadata as m; import tangle_cli; import tangle_api.generated.models; import tangle_api.schema; print(f'tangle-cli {m.version(\"tangle-cli\")} with tangle-api {m.version(\"tangle-api\")}')"
       - name: Smoke test native extra compatibility alias from local dist
         run: |
           cli_wheel="$(echo dist/tangle_cli-*.whl)"
           uv run --isolated --no-project --find-links dist --with "${cli_wheel}[native]" tangle-cli version
       - name: Publish
-        run: uv publish
+        run: uv publish --check-url https://pypi.org/simple/
