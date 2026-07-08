@@ -52,5 +52,48 @@ jobs:
         run: |
           cli_wheel="$(echo dist/tangle_cli-*.whl)"
           uv run --isolated --no-project --find-links dist --with "${cli_wheel}[native]" tangle-cli version
+      - name: Determine packages to publish
+        id: publish-plan
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+          import tomllib
+
+          packages = [
+              ("tangle-cli", "pyproject.toml", "dist/tangle_cli-*", "publish_cli"),
+              ("tangle-api", "packages/tangle-api/pyproject.toml", "dist/tangle_api-*", "publish_api"),
+          ]
+
+          def version_exists(package: str, version: str) -> bool:
+              url = f"https://pypi.org/pypi/{package}/json"
+              try:
+                  with urllib.request.urlopen(url, timeout=20) as response:
+                      data = json.load(response)
+              except urllib.error.HTTPError as error:
+                  if error.code == 404:
+                      return False
+                  raise
+              return version in data.get("releases", {})
+
+          github_output = Path(os.environ["GITHUB_OUTPUT"])
+          with github_output.open("a") as output:
+              for package, pyproject_path, dist_glob, output_name in packages:
+                  version = tomllib.loads(Path(pyproject_path).read_text())["project"]["version"]
+                  exists = version_exists(package, version)
+                  should_publish = not exists
+                  print(
+                      f"{package} {version}: "
+                      f"{'publish ' + dist_glob if should_publish else 'skip; version already exists on PyPI'}"
+                  )
+                  print(f"{output_name}={'true' if should_publish else 'false'}", file=output)
+          PY
       - name: Publish tangle-cli
-        run: uv publish --check-url https://pypi.org/simple/ dist/tangle_cli-*
+        if: steps.publish-plan.outputs.publish_cli == 'true'
+        run: uv publish dist/tangle_cli-*
+      - name: Publish tangle-api
+        if: steps.publish-plan.outputs.publish_api == 'true'
+        run: uv publish dist/tangle_api-*
