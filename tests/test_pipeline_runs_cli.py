@@ -135,7 +135,9 @@ def test_pipeline_runs_help_exposes_run_commands_not_local_pipeline_commands(cap
     assert "diagram" not in output
 
     run_app(app, ["sdk", "pipeline-runs", "submit", "--help"])
-    assert "--log-type" in capsys.readouterr().out
+    submit_help = capsys.readouterr().out
+    assert "--log-type" in submit_help
+    assert "--submit-recovery-attempts" in submit_help
 
 
 def test_pipeline_runs_submit_builds_create_payload(monkeypatch, tmp_path: Path, capsys):
@@ -161,10 +163,60 @@ def test_pipeline_runs_submit_builds_create_payload(monkeypatch, tmp_path: Path,
 
     result = json.loads(capsys.readouterr().out)
     assert result == {"id": "run-1", "root_execution_id": "exec-1"}
-    assert fake_client.created[0]["annotations"] == {"team": "oss"}
+    assert fake_client.created[0]["annotations"]["team"] == "oss"
+    assert fake_client.created[0]["annotations"]["tangle-cli/submission-id"]
     root_task = fake_client.created[0]["root_task"]
     assert root_task["componentRef"]["spec"]["name"] == "Demo Pipeline"
     assert root_task["arguments"] == {"query": "default", "required": "value"}
+
+
+def test_pipeline_runs_submit_uses_default_submit_recovery_attempts(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    captured: dict[str, Any] = {}
+
+    def fake_run_pipeline(self, pipeline_path, **kwargs):
+        del self, pipeline_path
+        captured.update(kwargs)
+        return {"response": {"id": "run-1"}}
+
+    monkeypatch.setattr(PipelineRunManager, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: FakeClient())
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit", str(pipeline_path), "--no-hydrate"])
+
+    assert json.loads(capsys.readouterr().out) == {"id": "run-1"}
+    assert captured["submit_recovery_attempts"] == pipeline_run_manager._DEFAULT_SUBMIT_RECOVERY_ATTEMPTS
+
+
+def test_pipeline_runs_submit_accepts_submit_recovery_attempts(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    captured: dict[str, Any] = {}
+
+    def fake_run_pipeline(self, pipeline_path, **kwargs):
+        del self, pipeline_path
+        captured.update(kwargs)
+        return {"response": {"id": "run-1"}}
+
+    monkeypatch.setattr(PipelineRunManager, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: FakeClient())
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit",
+            str(pipeline_path),
+            "--no-hydrate",
+            "--submit-recovery-attempts",
+            "6",
+        ],
+    )
+
+    assert json.loads(capsys.readouterr().out) == {"id": "run-1"}
+    assert captured["submit_recovery_attempts"] == 6
 
 
 def test_pipeline_runs_submit_accepts_export_config_args_and_hydrate(monkeypatch, tmp_path: Path):
@@ -1752,7 +1804,7 @@ def test_pipeline_runs_submit_failure_recovery_waits_for_delayed_registration(mo
 
         def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
             self.list_calls.append(kwargs)
-            if len(self.list_calls) <= 2:
+            if len(self.list_calls) < len(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS):
                 return {"pipeline_runs": [], "next_page_token": None}
             return {
                 "pipeline_runs": [{"id": "run-created", "root_execution_id": "exec-created"}],
@@ -1763,13 +1815,13 @@ def test_pipeline_runs_submit_failure_recovery_waits_for_delayed_registration(mo
     manager = PipelineRunManager(client=client)
     body = {"root_task": {"componentRef": {"spec": {"name": "delayed-recovery"}}}}
 
-    result = manager.run_prepared_body(body)
+    result = manager.run_prepared_body(body, submit_recovery_attempts=6)
 
     assert result["response"]["id"] == "run-created"
     assert result["context"].metadata["recovered_after_submit_error"] is True
     assert len(client.created) == 1
-    assert len(client.list_calls) == 3
-    assert sleeps == [0.5, 1.0, 2.0]
+    assert len(client.list_calls) == len(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS)
+    assert sleeps == list(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS)
 
 
 def test_pipeline_runs_submit_failure_recovery_refuses_ambiguous_matches(monkeypatch) -> None:
@@ -1869,8 +1921,8 @@ def test_pipeline_runs_submit_failure_reuses_frozen_body_when_recovery_finds_no_
     assert client.created[0]["annotations"]["tangle-cli/submission-id"] == client.created[1]["annotations"][
         "tangle-cli/submission-id"
     ]
-    assert len(client.list_calls) == 2 * len(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS)
-    expected_sleeps = list(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS)
+    expected_sleeps = list(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS[:2])
+    assert len(client.list_calls) == 2 * len(expected_sleeps)
     assert sleeps == expected_sleeps + expected_sleeps
 
 
@@ -1927,7 +1979,7 @@ def test_pipeline_runs_recovered_retry_runs_after_retry_submit_hook(tmp_path: Pa
     client = RecoverOnRetryClient()
     manager = PipelineRunner(client=client, hooks=hooks)
 
-    result = manager.run_pipeline(pipeline_path, hydrate=False, max_attempts=2)
+    result = manager.run_pipeline(pipeline_path, hydrate=False, max_attempts=2, submit_recovery_attempts=6)
 
     assert result["response"]["id"] == "run-created"
     assert result["context"].attempt == 2
@@ -1935,7 +1987,7 @@ def test_pipeline_runs_recovered_retry_runs_after_retry_submit_hook(tmp_path: Pa
     assert hooks.prepare_run_arguments_calls == 1
     assert len(client.created) == 1
     assert len(client.list_calls) == len(pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS) + 1
-    assert sleeps == [0.5, 1.0, 2.0, 0.5]
+    assert sleeps == [*pipeline_run_manager._SUBMIT_RECOVERY_BACKOFF_SECONDS, 0.5]
     assert events == [("before_retry", 2, None), ("after_retry_submit", 2, "run-created")]
 
 

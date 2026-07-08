@@ -37,7 +37,8 @@ _FAILURE_EARLY_EXIT_STATUSES = ("FAILED", "SYSTEM_ERROR")
 _EXECUTION_STATE_TIMINGS_METADATA_KEY = "execution_state_timings"
 _EXECUTION_STATE_TIMING_MONOTONIC_METADATA_KEY = "_execution_state_timing_monotonic"
 _SUBMISSION_ID_ANNOTATION_KEY = "tangle-cli/submission-id"
-_SUBMIT_RECOVERY_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+_SUBMIT_RECOVERY_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0, 8.0, 16.0)
+_DEFAULT_SUBMIT_RECOVERY_ATTEMPTS = 2
 
 
 class PipelineRunError(RuntimeError):
@@ -1528,6 +1529,11 @@ class PipelineRunManager(TangleCliHandler):
         submission_id = annotations.get(_SUBMISSION_ID_ANNOTATION_KEY)
         return str(submission_id) if submission_id else None
 
+    @staticmethod
+    def _submit_recovery_backoff_seconds(submit_recovery_attempts: int) -> tuple[float, ...]:
+        attempt_count = max(0, min(int(submit_recovery_attempts), len(_SUBMIT_RECOVERY_BACKOFF_SECONDS)))
+        return _SUBMIT_RECOVERY_BACKOFF_SECONDS[:attempt_count]
+
     def _submitted_runs_for_submission_id(self, submission_id: str) -> list[dict[str, Any]]:
         query = {
             "and": [
@@ -1553,11 +1559,21 @@ class PipelineRunManager(TangleCliHandler):
         self,
         *,
         submission_id: str | None,
+        submit_recovery_attempts: int = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
     ) -> dict[str, Any] | None:
         if not submission_id:
             return None
-        total_lookup_attempts = len(_SUBMIT_RECOVERY_BACKOFF_SECONDS)
-        for lookup_attempt, delay_seconds in enumerate(_SUBMIT_RECOVERY_BACKOFF_SECONDS, start=1):
+        backoff_seconds = self._submit_recovery_backoff_seconds(submit_recovery_attempts)
+        total_lookup_attempts = len(backoff_seconds)
+        if total_lookup_attempts == 0:
+            self.logger.warn(
+                "Submit recovery lookup disabled "
+                f"({_SUBMISSION_ID_ANNOTATION_KEY}={submission_id}, "
+                f"submit_recovery_attempts={submit_recovery_attempts}); "
+                "resubmitting the same frozen body with preserved inputs."
+            )
+            return None
+        for lookup_attempt, delay_seconds in enumerate(backoff_seconds, start=1):
             self.logger.info(
                 "Waiting "
                 f"{delay_seconds:g}s before checking whether failed submit already created a pipeline run "
@@ -1652,6 +1668,7 @@ class PipelineRunManager(TangleCliHandler):
         timeout_clock: str = "monotonic",
         exit_on_first_failure: bool = False,
         metadata: dict[str, Any] | None = None,
+        submit_recovery_attempts: int = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
         metadata_factory: Callable[
             [int, PipelineRunContext | None, Exception | None], dict[str, Any]
         ] | None = None,
@@ -1728,6 +1745,7 @@ class PipelineRunManager(TangleCliHandler):
                         if reused_after_submit_failure:
                             recovered_response = self._recover_submitted_run_after_submit_error(
                                 submission_id=self._submission_id_from_body(body),
+                                submit_recovery_attempts=submit_recovery_attempts,
                             )
                         if recovered_response is not None:
                             response = self._adopt_submitted_run(
@@ -1759,6 +1777,7 @@ class PipelineRunManager(TangleCliHandler):
                                 )
                                 recovered_response = self._recover_submitted_run_after_submit_error(
                                     submission_id=submission_id_for_recovery,
+                                    submit_recovery_attempts=submit_recovery_attempts,
                                 )
                                 if recovered_response is None:
                                     self.hooks.on_submit_error(submit_exc, context=context)
@@ -1839,6 +1858,7 @@ class PipelineRunManager(TangleCliHandler):
         timeout_clock: str = "monotonic",
         exit_on_first_failure: bool = False,
         metadata: dict[str, Any] | None = None,
+        submit_recovery_attempts: int = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
     ) -> dict[str, Any]:
         """Submit/wait/retry an already prepared submit body.
 
@@ -1867,6 +1887,7 @@ class PipelineRunManager(TangleCliHandler):
             timeout_clock=timeout_clock,
             exit_on_first_failure=exit_on_first_failure,
             metadata=metadata,
+            submit_recovery_attempts=submit_recovery_attempts,
         )
 
     def run_pipeline_spec(
@@ -1887,6 +1908,7 @@ class PipelineRunManager(TangleCliHandler):
         timeout_clock: str = "monotonic",
         exit_on_first_failure: bool = False,
         metadata: dict[str, Any] | None = None,
+        submit_recovery_attempts: int = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
     ) -> dict[str, Any]:
         """Submit/wait/retry an already hydrated/validated in-memory spec."""
 
@@ -1916,6 +1938,7 @@ class PipelineRunManager(TangleCliHandler):
             timeout_clock=timeout_clock,
             exit_on_first_failure=exit_on_first_failure,
             metadata=metadata,
+            submit_recovery_attempts=submit_recovery_attempts,
         )
 
     def run_pipeline(
@@ -1936,6 +1959,7 @@ class PipelineRunManager(TangleCliHandler):
         timeout_clock: str = "monotonic",
         exit_on_first_failure: bool = False,
         metadata: dict[str, Any] | None = None,
+        submit_recovery_attempts: int = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
     ) -> dict[str, Any]:
         """Submit (and optionally wait for) a pipeline with lifecycle hooks.
 
@@ -1970,6 +1994,7 @@ class PipelineRunManager(TangleCliHandler):
             timeout_clock=timeout_clock,
             exit_on_first_failure=exit_on_first_failure,
             metadata=metadata,
+            submit_recovery_attempts=submit_recovery_attempts,
         )
 
 

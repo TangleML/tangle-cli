@@ -14,7 +14,6 @@ from packaging.version import Version
 
 from tangle_cli.openapi import codegen
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -179,7 +178,7 @@ def test_tangle_cli_wheel_supports_expert_no_deps_import_path_without_tangle_api
     requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
     assert not any(name.startswith("tangle_api/") for name in names)
     assert "tangle_cli/openapi/openapi.json" not in names
-    assert "Version: 0.1.0" in metadata
+    assert "Version: 0.1.1" in metadata
     assert "Requires-Dist: tangle-api==0.1.0" in requires_dist
     assert not any("extra == 'native'" in line for line in requires_dist)
     assert "Provides-Extra: native" in metadata

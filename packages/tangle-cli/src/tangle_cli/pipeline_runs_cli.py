@@ -28,6 +28,7 @@ from .cli_options import (
 from .logger import Logger, logger_for_log_type
 from .pipeline_run_annotations import AnnotationManager
 from .pipeline_run_manager import (
+    _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
     PipelineRunError,
     PipelineRunHooks,
     PipelineRunManager,
@@ -166,6 +167,15 @@ def pipeline_runs_submit(
     auth_header: AuthHeaderOption = None,
     header: HeaderOption = None,
     config: ConfigOption = None,
+    submit_recovery_attempts: Annotated[
+        int,
+        Parameter(
+            help=(
+                "Number of post-failed-submit recovery lookups before resubmitting; "
+                "higher values wait longer for delayed run registration."
+            )
+        ),
+    ] = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
     log_type: LogTypeOption = "console",
 ) -> None:
     """Hydrate and submit a local pipeline YAML file as a run."""
@@ -181,6 +191,7 @@ def pipeline_runs_submit(
         "run_as": (run_as, None),
         "trusted_source": (trusted_source, None),
         "trusted_hydration_cli": ("trusted_hydration_cli", trusted_hydration, None, False),
+        "submit_recovery_attempts": (submit_recovery_attempts, _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
@@ -194,7 +205,12 @@ def pipeline_runs_submit(
         }
         if args.dry_run:
             return manager.build_submit_body(args.pipeline_path, **kwargs)
-        return manager.submit_pipeline(args.pipeline_path, **kwargs)
+        result = manager.run_pipeline(
+            args.pipeline_path,
+            **kwargs,
+            submit_recovery_attempts=args.submit_recovery_attempts,
+        )
+        return result["response"]
 
     _run_manager_action(config, base_url, specs, action)
 
