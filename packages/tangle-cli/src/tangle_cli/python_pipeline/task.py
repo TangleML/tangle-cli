@@ -9,7 +9,7 @@ inside a ``@pipeline`` body, auto-emits a sibling
 ``<out>.components.yaml`` with one ``local_from_python:`` entry per
 unique source file, and rewrites each task's componentRef URL to
 ``resolve://./<out_stem>.components.yaml#<fragment>``. Hydrate then uses
-tangle-deploy's own ``local_from_python`` resolver to call
+the hydrator's own ``local_from_python`` resolver to call
 ``regenerate_yaml`` at hydrate time -- no pre-codegen step on our side.
 
 Crucially, the decorator does NOT call the user function.
@@ -74,7 +74,7 @@ def task(
     the decorator captures metadata onto a :class:`CallableRef`. The
     compile driver emits a sibling ``<out>.components.yaml`` with a
     ``local_from_python:`` entry for the function and rewrites the
-    task's componentRef URL to point at it. Hydrate uses tangle-deploy's
+    task's componentRef URL to point at it. Hydrate uses the hydrator's
     own resolver to regenerate the component YAML at hydrate time.
 
     Args:
@@ -94,7 +94,7 @@ def task(
             ``components.yaml#local_from_python.image`` field. Overrides
             ``env.image`` when both are given.
         dependencies_from: Path to a ``pyproject.toml`` (or any file
-            ``tangle-deploy`` understands) that declares pip
+            the hydrator understands) that declares pip
             dependencies. Resolved relative to the caller's source
             file when given as a string. Emitted into
             ``components.yaml#local_from_python.dependencies_from``.
@@ -148,7 +148,7 @@ def task(
         # Capture the absolute path of the source file the user wrote
         # the function in. ``inspect.getfile`` raises TypeError for
         # builtins / dynamically-built functions; the @task path
-        # requires a real on-disk file because tangle-deploy reads
+        # requires a real on-disk file because the hydrator reads
         # the source via inspect.getfile too.
         try:
             source_path = Path(inspect.getfile(fn)).resolve()

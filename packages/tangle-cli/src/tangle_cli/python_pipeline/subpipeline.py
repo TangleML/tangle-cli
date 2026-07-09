@@ -134,7 +134,7 @@ class SubpipelineRef:
             raise RuntimeError(
                 "subpipeline(child)(...) requires an active @pipeline trace "
                 "context. Either call this inside a function decorated with "
-                "@pipeline, or use the `tangle-deploy pipeline compile from-python` driver."
+                "@pipeline, or compile the script with `tangle sdk pipelines compile`."
             )
 
         # Resolve the parent task ID. ``.named(...)`` always wins over the

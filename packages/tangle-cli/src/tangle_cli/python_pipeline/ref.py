@@ -199,8 +199,8 @@ class CallableRef:
             raise RuntimeError(
                 "CallableRef.__call__ requires an active @pipeline trace "
                 "context. Either call this inside a function decorated "
-                "with @pipeline, or use the `tangle-deploy pipeline compile "
-                "from-python` driver."
+                "with @pipeline, or compile the script with "
+                "`tangle sdk pipelines compile`."
             )
 
         # Resolve the task ID. ``.named(...)`` always wins over the

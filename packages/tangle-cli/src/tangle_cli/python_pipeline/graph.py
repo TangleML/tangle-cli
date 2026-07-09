@@ -31,10 +31,6 @@ class TaskNode:
     ``arguments`` values may be plain strings, TaskOutputProxy objects
     (for taskOutput edges in non-``wait_for`` argument positions — not
     used in the PoC), or GraphInputPlaceholder objects.
-
-    ``edge_kw`` is the separated bucket for ``wait_for`` / ``depends_on``
-    kwargs — emitted with their special edge value shape rather than as
-    a normal argument.
     """
 
     task_id: str
@@ -43,7 +39,6 @@ class TaskNode:
     ref_digest: str | None = None
     arguments: dict[str, Any] = field(default_factory=dict)
     annotations: dict[str, str] | None = None
-    edge_kw: dict[str, EdgeRef] = field(default_factory=dict)
 
 
 @dataclass
@@ -77,7 +72,7 @@ class GraphBuilder:
     # ``local_from_python:`` entry per unique source file, and (b)
     # rewrite each task's ``componentRef.url`` to
     # ``resolve://./<out_stem>.components.yaml#<fragment>`` so hydrate
-    # uses tangle-deploy's own ``local_from_python`` resolver.
+    # uses the hydrator's own ``local_from_python`` resolver.
     task_refs_for_local_from_python: list[tuple[str, Any]] = field(
         default_factory=list
     )

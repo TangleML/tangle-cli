@@ -52,7 +52,7 @@ class TaskEnv:
         image: Container image for the component. Required — naming the
             image once is the main point of ``TaskEnv``.
         dependencies_from: Optional path to a ``pyproject.toml`` (or any
-            file ``tangle-deploy`` understands) declaring pip
+            file the hydrator understands) declaring pip
             dependencies. A relative path is resolved at the ``TaskEnv``
             *definition site* (the module where ``TaskEnv(...)`` is
             written), so a shared ``_envs.py`` resolves intuitively.

@@ -98,7 +98,7 @@ def registered(
     :class:`CallableRef`. The compile driver rewrites the task's
     componentRef URL to ``resolve://<rel-path>/gen_config.yaml#<fragment>``,
     computed relative to the compiled artifact's output directory. Hydrate
-    then uses tangle-deploy's own ``resolve://`` resolver to read the
+    then uses the hydrator's own ``resolve://`` resolver to read the
     gen_config.yaml fragment and inline the component spec.
 
     Unlike ``@task``, ``@registered`` references an EXISTING

@@ -1,7 +1,7 @@
 """Compile-time error hierarchy.
 
 All errors raised by the Python pipeline authoring layer before/during
-``tangle-deploy pipeline compile from-python`` are subclasses of :class:`CompileError`.
+``tangle sdk pipelines compile`` are subclasses of :class:`CompileError`.
 They should include enough context for a user to fix the underlying issue
 without reading framework source: file:line of the offending call, the
 relevant primitive name, and a suggested remedy.

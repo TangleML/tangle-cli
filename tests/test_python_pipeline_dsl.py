@@ -99,15 +99,17 @@ class TestPublicSurface:
 
 
 class TestNoInternalReferences:
-    """The vendored DSL must be free of ``tangle_deploy`` references."""
+    """The vendored DSL must be free of internal ``tangle-deploy``
+    references, in either the ``tangle_deploy`` (module/import) or the
+    ``tangle-deploy`` (product/command) spelling."""
 
     def test_no_tangle_deploy_references_in_source(self):
         offenders = []
         for path in _DSL_DIR.glob("*.py"):
             text = path.read_text(encoding="utf-8")
-            if "tangle_deploy" in text:
+            if "tangle_deploy" in text or "tangle-deploy" in text:
                 offenders.append(path.name)
-        assert offenders == [], f"tangle_deploy referenced in: {offenders}"
+        assert offenders == [], f"tangle-deploy referenced in: {offenders}"
 
 
 # ============================================================================

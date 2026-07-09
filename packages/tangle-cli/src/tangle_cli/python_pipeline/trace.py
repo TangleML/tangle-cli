@@ -361,9 +361,3 @@ def _trace_multi_output(
 
 # Re-export commonly-used names.
 __all__ = ["current_builder", "trace_pipeline"]
-
-
-# Defensive: silence unused-import warnings for ``typing`` in some
-# linters when we don't actually call typing.* — kept for symmetry with
-# the other modules and to make adding generic helpers cheap.
-_ = typing
