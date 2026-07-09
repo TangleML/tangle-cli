@@ -11,13 +11,13 @@ from pathlib import Path
 import pytest
 import yaml
 
+import tangle_cli.component_from_func as cff
 from tangle_cli.component_from_func import (
     AuthoringStripError,
     FunctionSpec,
     InputPath,
     OutputPath,
     ParamInfo,
-    _AUTHORING_IMPORT_MODULES,
     _build_argparse_code,
     _build_args_section,
     _build_pip_install_command,
@@ -31,17 +31,24 @@ from tangle_cli.component_from_func import (
     _strip_authoring_constructs,
     _strip_main_guard,
     _strip_type_hints,
+    authoring_import_modules,
     build_component_dict,
     extract_interface,
     generate_component_yaml,
     get_function_from_module,
     load_python_module,
     read_dependencies,
+    register_authoring_import_module,
 )
 from tangle_cli.module_bundler import ModuleBundler
 
 # Real on-disk python-pipeline fixtures (``task_env_strip_*`` for Phase 3).
 _PIPELINE_FIXTURES = Path(__file__).parent / "fixtures" / "python_pipeline"
+
+# The downstream authoring surface these strip/codegen tests rely on (a
+# registered ``tangle_deploy.python_pipeline`` path + a stand-in module in
+# ``sys.modules``) is provided suite-wide by the autouse
+# ``downstream_authoring_surface`` fixture in ``tests/conftest.py``.
 
 # ============================================================================
 # Type resolution tests
@@ -1668,11 +1675,36 @@ class TestStripAuthoringConstructsTangleCli:
 class TestAuthoringImportPredicate:
     """Unit tests for the authoring-module recognition helpers."""
 
-    def test_authoring_modules_constant_contents(self):
-        assert _AUTHORING_IMPORT_MODULES == (
-            "tangle_deploy.python_pipeline",
-            "tangle_cli.python_pipeline",
-        )
+    def test_oss_seeds_only_the_canonical_surface(self):
+        # Under a pristine registry (no downstream registered), OSS recognises
+        # ONLY its own authoring path — it never hardcodes a downstream module.
+        # The autouse fixture registers the downstream path, so reset to the
+        # OSS seed for this assertion, then restore.
+        before = list(cff._AUTHORING_IMPORT_MODULES)
+        cff._AUTHORING_IMPORT_MODULES[:] = ["tangle_cli.python_pipeline"]
+        try:
+            assert authoring_import_modules() == ("tangle_cli.python_pipeline",)
+        finally:
+            cff._AUTHORING_IMPORT_MODULES[:] = before
+
+    def test_register_authoring_import_module_adds_downstream_surface(self):
+        register_authoring_import_module("acme_pipelines.python_pipeline")
+        assert "acme_pipelines.python_pipeline" in authoring_import_modules()
+        # A registered path is treated exactly like the canonical one.
+        assert _is_authoring_module("acme_pipelines.python_pipeline") is True
+        assert _is_authoring_module("acme_pipelines.python_pipeline.types") is True
+
+    def test_register_authoring_import_module_is_idempotent(self):
+        register_authoring_import_module("acme_pipelines.python_pipeline")
+        register_authoring_import_module("acme_pipelines.python_pipeline")
+        assert authoring_import_modules().count("acme_pipelines.python_pipeline") == 1
+
+    def test_authoring_import_modules_returns_immutable_snapshot(self):
+        # Callers get a tuple copy; mutating the return value must not leak into
+        # the registry.
+        snapshot = authoring_import_modules()
+        assert isinstance(snapshot, tuple)
+        assert authoring_import_modules() == snapshot
 
     @pytest.mark.parametrize(
         "name",

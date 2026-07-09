@@ -99,13 +99,20 @@ class TestPublicSurface:
 
 
 class TestNoInternalReferences:
-    """The vendored DSL must be free of internal ``tangle-deploy``
-    references, in either the ``tangle_deploy`` (module/import) or the
-    ``tangle-deploy`` (product/command) spelling."""
+    """The OSS authoring + compile surface must be free of internal
+    ``tangle-deploy`` references, in either the ``tangle_deploy`` (module/import)
+    or the ``tangle-deploy`` (product/command) spelling. The dependency points
+    inward: a downstream package registers its own authoring path via
+    ``register_authoring_import_module`` — OSS never names it."""
 
     def test_no_tangle_deploy_references_in_source(self):
+        # Scan the whole vendored DSL package plus the sibling compiler module
+        # (``component_from_func.py``), which drives the authoring-import strip
+        # and must stay decoupled from the downstream package name.
+        scanned = list(_DSL_DIR.glob("*.py"))
+        scanned.append(_DSL_DIR.parent / "component_from_func.py")
         offenders = []
-        for path in _DSL_DIR.glob("*.py"):
+        for path in scanned:
             text = path.read_text(encoding="utf-8")
             if "tangle_deploy" in text or "tangle-deploy" in text:
                 offenders.append(path.name)
