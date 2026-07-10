@@ -10,9 +10,8 @@ registered in, so that at compile time the driver can emit a
 ``componentRef: {url: "resolve://<rel-path>/gen_config.yaml#<fragment>"}``
 pointing at that already-existing config.
 
-This fits the common monorepo setup (e.g. the ``world`` zone
-``areas/ml/upi/``) where operations are published once into a
-hand-maintained ``gen_config.yaml`` and pipelines reference them by
+This fits the common monorepo setup where operations are published once
+into a hand-maintained ``gen_config.yaml`` and pipelines reference them by
 ``resolve://`` URL. Authors decorate the registered operation functions
 with ``@registered`` and call them from a ``@pipeline`` body; the compiler
 takes care of computing the right relative ``resolve://`` URL.

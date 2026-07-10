@@ -774,13 +774,21 @@ _AUTHORING_ENV_CLASS_NAME = "TaskEnv"
 
 
 class AuthoringStripError(ValueError):
-    """Raised when env-only authoring code cannot be safely stripped.
+    """Raised when authoring code cannot be safely stripped from baked source.
 
-    The TaskEnv runtime-strip hardening (``_strip_authoring_constructs``)
-    raises this when a ``@task(env=...)`` env binding is entangled with
-    runtime code — e.g. a mixed ``from _envs import UPI, helper`` import whose
-    ``helper`` is used at runtime, or a collected env name referenced by the
-    kept task body. Failing fast here is intentional: silently baking a broken
+    ``_strip_authoring_constructs`` raises this rather than bake a broken
+    program when an authoring construct is entangled with runtime code and
+    cannot be removed by line range without corrupting the kept program:
+
+    - a comma-separated ``import tangle_cli.python_pipeline as tp, os`` that
+      mixes the authoring surface with a runtime module on one statement (the
+      authoring alias must be stripped, but line-deletion would take ``os`` with
+      it); or
+    - a ``@task(env=...)`` env binding entangled with runtime code — e.g. a
+      mixed ``from _envs import UPI, helper`` import whose ``helper`` is used at
+      runtime, or a collected env name referenced by the kept task body.
+
+    Failing fast here is intentional: silently baking a broken ``import os`` /
     ``from _envs import UPI`` / ``UPI = TaskEnv(...)`` would only surface as a
     ``NameError`` / ``ImportError`` at container start. The message tells the
     author how to split the import or keep TaskEnv values authoring-only.
@@ -842,6 +850,25 @@ def _is_authoring_import(node: ast.stmt) -> bool:
     if isinstance(node, ast.Import):
         return any(_is_authoring_module(alias.name) for alias in node.names)
     return False
+
+
+def _mixed_authoring_import_aliases(node: ast.stmt) -> tuple[list[str], list[str]] | None:
+    """Classify a comma-separated ``import a, b`` that mixes import surfaces.
+
+    Only ``ast.Import`` (``import x, y``) can bind several modules in one
+    statement; a ``from X import ...`` binds a single module, so it is
+    all-or-nothing and never "mixed". Returns ``(authoring, runtime)`` alias
+    names when the statement mixes at least one authoring module with at least
+    one non-authoring one, else ``None`` (a pure-authoring or pure-runtime
+    ``import``, which the caller drops whole or leaves untouched respectively).
+    """
+    if not isinstance(node, ast.Import):
+        return None
+    authoring = [alias.name for alias in node.names if _is_authoring_module(alias.name)]
+    runtime = [alias.name for alias in node.names if not _is_authoring_module(alias.name)]
+    if authoring and runtime:
+        return authoring, runtime
+    return None
 
 
 def _attr_root_name(node: ast.expr) -> str | None:
@@ -990,7 +1017,10 @@ def _strip_authoring_constructs(source_code: str) -> str:
 
     - imports: only the registered authoring modules (and submodules) are
       dropped — see ``_is_authoring_import``. Other runtime helpers that merely
-      share a top-level name are preserved.
+      share a top-level name are preserved. A comma-separated ``import a, b``
+      that mixes the authoring surface with a runtime module raises
+      :class:`AuthoringStripError` (it cannot be partially line-deleted) — see
+      ``_mixed_authoring_import_aliases``.
     - decorators: matched by trailing NAME (``task`` / ``pipeline`` /
       ``subpipeline``), not by import resolution — see ``_decorator_called_name``
       for the limitation. Unrelated decorators (``@functools.cache``,
@@ -1039,6 +1069,27 @@ def _strip_authoring_constructs(source_code: str) -> str:
     for node in ast.walk(tree):
         # Authoring imports — delete the whole (possibly multi-line) statement.
         if isinstance(node, (ast.Import, ast.ImportFrom)) and _is_authoring_import(node):
+            # A comma-separated ``import authoring_surface, os`` mixes the
+            # authoring surface with a runtime module on one statement. We drop
+            # authoring imports by line range, which cannot delete just part of
+            # a statement — dropping the whole line would take the runtime
+            # ``import os`` with it (silent NameError in the baked program),
+            # while keeping it would leave the authoring import un-stripped. Fail
+            # fast with split guidance rather than bake a broken program.
+            mixed = _mixed_authoring_import_aliases(node)
+            if mixed is not None:
+                authoring_names, runtime_names = mixed
+                raise AuthoringStripError(
+                    "import statement mixes the python-pipeline authoring "
+                    f"surface ({', '.join(authoring_names)}) with runtime "
+                    f"import(s) ({', '.join(runtime_names)}) on one line. The "
+                    "authoring import is stripped from the baked runtime "
+                    "program, but a comma-separated `import a, b` cannot be "
+                    "partially line-deleted without corrupting the kept import. "
+                    "Split the authoring import onto its own line (e.g. `import "
+                    "tangle_cli.python_pipeline as tp` separate from `import "
+                    "os`)."
+                )
             start = node.lineno
             end = node.end_lineno or node.lineno
             removed.update(range(start, end + 1))

@@ -1493,6 +1493,25 @@ class TestStripAuthoringConstructs:
         assert "@task" not in result
         assert "def hello(out):" in result
 
+    def test_fail_fast_mixed_plain_import_downstream_surface(self):
+        # The mixed-import fail-fast is surface-agnostic: a registered
+        # downstream authoring path (here ``tangle_deploy.python_pipeline`` via
+        # the autouse fixture) mixed with a runtime module fails fast exactly
+        # like the canonical OSS path does.
+        source = textwrap.dedent("""\
+            import tangle_deploy.python_pipeline as tp, os
+
+            @tp.task(image="python:3.12")
+            def hello(out):
+                return os.path.join(out, "x")
+        """)
+        with pytest.raises(AuthoringStripError) as excinfo:
+            _strip_authoring_constructs(source)
+        msg = str(excinfo.value)
+        assert "tangle_deploy.python_pipeline" in msg
+        assert "os" in msg
+        assert "Split the authoring import" in msg
+
     def test_unrelated_decorator_preserved_alongside_task(self):
         # FIX 3(c): @task is stripped but a stacked unrelated decorator stays.
         source = textwrap.dedent("""\
@@ -1664,6 +1683,58 @@ class TestStripAuthoringConstructsTangleCli:
         """)
         result = _strip_authoring_constructs(source)
         assert "from tangle_cli.python_pipeline.types" not in result
+        assert "x = 1" in result
+
+    def test_fail_fast_mixed_plain_import_with_runtime_module(self):
+        # ``import tangle_cli.python_pipeline as tp, os`` mixes the authoring
+        # surface with a runtime module on ONE comma-separated statement. The
+        # authoring import must be stripped, but line-deletion cannot drop just
+        # part of the statement — dropping the whole line would take ``os`` with
+        # it (silent NameError in the baked program). Fail fast with split
+        # guidance instead.
+        source = textwrap.dedent("""\
+            import tangle_cli.python_pipeline as tp, os
+
+            @tp.task(image="python:3.12")
+            def hello(out):
+                return os.path.join(out, "x")
+        """)
+        with pytest.raises(AuthoringStripError) as excinfo:
+            _strip_authoring_constructs(source)
+        msg = str(excinfo.value)
+        assert "tangle_cli.python_pipeline" in msg
+        assert "os" in msg
+        assert "Split the authoring import" in msg
+
+    def test_mixed_plain_import_split_across_lines_is_dropped_cleanly(self):
+        # The remedy the fail-fast recommends: with the authoring import on its
+        # own line, the strip drops it whole and the runtime ``import os``
+        # survives — no fail-fast.
+        source = textwrap.dedent("""\
+            import os
+            import tangle_cli.python_pipeline as tp
+
+            @tp.task(image="python:3.12")
+            def hello(out):
+                return os.path.join(out, "x")
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "import tangle_cli.python_pipeline" not in result
+        assert "import os" in result
+        assert "@tp.task" not in result
+        assert 'return os.path.join(out, "x")' in result
+
+    def test_pure_authoring_multi_module_import_dropped_whole(self):
+        # A comma-separated ``import`` where EVERY alias is an authoring module
+        # is not "mixed" — there is no runtime alias to preserve — so it is
+        # still dropped whole rather than failing fast.
+        source = textwrap.dedent("""\
+            import tangle_cli.python_pipeline, tangle_cli.python_pipeline.types
+
+            x = 1
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "tangle_cli.python_pipeline" not in result
         assert "x = 1" in result
 
 
