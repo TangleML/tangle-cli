@@ -91,13 +91,13 @@ class GeneratedTangleApiOperations:
             response_model=self._response_model('ListComponentLibrariesResponse', ListComponentLibrariesResponse),
         )
 
-    def component_libraries_create(self, name: Any, hide_from_search: Any = None) -> ComponentLibraryResponse:
+    def component_libraries_create(self, name: Any, hide_from_search: Any = None, body: Any = None) -> ComponentLibraryResponse:
         return self._request_json(
             'POST',
             '/api/component_libraries/',
             path_params=None,
             params={'hide_from_search': hide_from_search},
-            json_data={'name': name},
+            json_data={**(body or {}), **{'name': name}},
             response_model=self._response_model('ComponentLibraryResponse', ComponentLibraryResponse),
         )
 
@@ -111,13 +111,13 @@ class GeneratedTangleApiOperations:
             response_model=self._response_model('ComponentLibraryResponse', ComponentLibraryResponse),
         )
 
-    def component_libraries_update(self, id: Any, name: Any, hide_from_search: Any = None) -> ComponentLibraryResponse:
+    def component_libraries_update(self, id: Any, name: Any, hide_from_search: Any = None, body: Any = None) -> ComponentLibraryResponse:
         return self._request_json(
             'PUT',
             '/api/component_libraries/{id}',
             path_params={'id': id},
             params={'hide_from_search': hide_from_search},
-            json_data={'name': name},
+            json_data={**(body or {}), **{'name': name}},
             response_model=self._response_model('ComponentLibraryResponse', ComponentLibraryResponse),
         )
 
@@ -291,13 +291,13 @@ class GeneratedTangleApiOperations:
             response_model=self._response_model('ListPublishedComponentsResponse', ListPublishedComponentsResponse),
         )
 
-    def published_components_create(self, digest: Any = None, name: Any = None, tag: Any = None, text: Any = None, url: Any = None) -> PublishedComponentResponse:
+    def published_components_create(self, digest: Any = None, name: Any = None, tag: Any = None, text: Any = None, url: Any = None, body: Any = None) -> PublishedComponentResponse:
         return self._request_json(
             'POST',
             '/api/published_components/',
             path_params=None,
             params=None,
-            json_data={key: value for key, value in {'digest': digest, 'name': name, 'tag': tag, 'text': text, 'url': url}.items() if value is not None},
+            json_data={**(body or {}), **{key: value for key, value in {'digest': digest, 'name': name, 'tag': tag, 'text': text, 'url': url}.items() if value is not None}},
             response_model=self._response_model('PublishedComponentResponse', PublishedComponentResponse),
         )
 
@@ -321,23 +321,23 @@ class GeneratedTangleApiOperations:
             response_model=self._response_model('ListSecretsResponse', ListSecretsResponse),
         )
 
-    def secrets_create(self, secret_name: Any, secret_value: Any, description: Any = None, expires_at: Any = None) -> SecretInfoResponse:
+    def secrets_create(self, secret_name: Any, secret_value: Any, description: Any = None, expires_at: Any = None, body: Any = None) -> SecretInfoResponse:
         return self._request_json(
             'POST',
             '/api/secrets/',
             path_params=None,
             params={'secret_name': secret_name, 'description': description, 'expires_at': expires_at},
-            json_data={'secret_value': secret_value},
+            json_data={**(body or {}), **{'secret_value': secret_value}},
             response_model=self._response_model('SecretInfoResponse', SecretInfoResponse),
         )
 
-    def secrets_update(self, secret_name: Any, secret_value: Any, description: Any = None, expires_at: Any = None) -> SecretInfoResponse:
+    def secrets_update(self, secret_name: Any, secret_value: Any, description: Any = None, expires_at: Any = None, body: Any = None) -> SecretInfoResponse:
         return self._request_json(
             'PUT',
             '/api/secrets/{secret_name}',
             path_params={'secret_name': secret_name},
             params={'description': description, 'expires_at': expires_at},
-            json_data={'secret_value': secret_value},
+            json_data={**(body or {}), **{'secret_value': secret_value}},
             response_model=self._response_model('SecretInfoResponse', SecretInfoResponse),
         )
 

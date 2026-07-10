@@ -1,6 +1,6 @@
 [project]
 name = "tangle-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "CLI for Tangle, the open-source ML pipeline orchestration platform"
 readme = "README.md"
 authors = [
@@ -18,7 +18,7 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "requests>=2.32.0",
-    "tangle-api==0.1.0",
+    "tangle-api==0.1.1",
     "tomli>=2.0; python_version < '3.11'",
 ]
 

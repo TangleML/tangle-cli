@@ -1,6 +1,6 @@
 [project]
 name = "tangle-api"
-version = "0.1.0"
+version = "0.1.1"
 description = "Checked-in generated Tangle API models and operation proxies"
 readme = "README.md"
 authors = [

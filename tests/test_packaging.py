@@ -178,8 +178,8 @@ def test_tangle_cli_wheel_supports_expert_no_deps_import_path_without_tangle_api
     requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
     assert not any(name.startswith("tangle_api/") for name in names)
     assert "tangle_cli/openapi/openapi.json" not in names
-    assert "Version: 0.1.1" in metadata
-    assert "Requires-Dist: tangle-api==0.1.0" in requires_dist
+    assert "Version: 0.1.2" in metadata
+    assert "Requires-Dist: tangle-api==0.1.1" in requires_dist
     assert not any("extra == 'native'" in line for line in requires_dist)
     assert "Provides-Extra: native" in metadata
     assert "tangle = tangle_cli.cli:main" in entry_points
@@ -207,7 +207,7 @@ def test_tangle_cli_wheel_supports_expert_no_deps_import_path_without_tangle_api
 
 
 def test_custom_tangle_api_local_version_can_satisfy_cli_pin() -> None:
-    assert Version("0.1.0+yourorg") in SpecifierSet("==0.1.0")
+    assert Version("0.1.1+yourorg") in SpecifierSet("==0.1.1")
 
 
 def test_tangle_cli_wheel_api_refresh_builds_in_expert_no_deps_fallback(tmp_path) -> None:
@@ -396,7 +396,7 @@ def test_default_wheels_provide_static_client_binding(tmp_path) -> None:
         metadata = archive.read(metadata_name).decode()
 
     requires_dist = [line for line in metadata.splitlines() if line.startswith("Requires-Dist: ")]
-    assert "Version: 0.1.0" in metadata
+    assert "Version: 0.1.1" in metadata
     assert "Requires-Dist: pydantic>=2.0" in requires_dist
     assert not any("tangle-cli" in line for line in requires_dist)
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(cli_wheel), str(api_wheel)])}

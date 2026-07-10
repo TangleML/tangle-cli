@@ -510,7 +510,7 @@ def _param_signature(
             body_names.append(name)
             if parameter.required:
                 required_body_names.add(name)
-    include_body = has_request_body and not body_names
+    include_body = has_request_body
     if include_body:
         body_annotation = "dict[str, Any] | None" if raw_body_override else "Any"
         signature_parts.append(f"body: {body_annotation} = None")
@@ -535,6 +535,12 @@ def _body_dict_literal(names: list[str], required_names: set[str]) -> str:
         return "{" + optional_expr + "}"
     required_literal = _dict_literal([name for name in names if name in required_names])
     return "{" + f"**{required_literal}, **{{{optional_expr}}}" + "}"
+
+
+def _merged_body_dict_literal(names: list[str], required_names: set[str]) -> str:
+    """Return request JSON with generic body fields overridden by named fields."""
+
+    return f"{{**(body or {{}}), **{_body_dict_literal(names, required_names)}}}"
 
 
 def _validate_operation_path(path: str) -> None:
@@ -625,7 +631,9 @@ def generate_operations(
             f"            path_params={_dict_literal(path_names)},",
             f"            params={_dict_literal(query_names)},",
         ])
-        if body_names:
+        if body_names and include_body:
+            lines.append(f"            json_data={_merged_body_dict_literal(body_names, required_body_names)},")
+        elif body_names:
             lines.append(f"            json_data={_body_dict_literal(body_names, required_body_names)},")
         elif include_body:
             lines.append("            json_data=body,")

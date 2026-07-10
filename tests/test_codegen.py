@@ -676,7 +676,8 @@ def test_generate_operations_without_request_body_override_omits_unset_optional_
     assert "def search_create(self," in operations
     assert "query: Any = None" in operations
     assert "limit: Any = None" in operations
-    assert "json_data={key: value for key, value in {'limit': limit, 'query': query}.items() if value is not None}" in operations
+    assert "body: Any = None" in operations
+    assert "json_data={**(body or {}), **{key: value for key, value in {'limit': limit, 'query': query}.items() if value is not None}}" in operations
     assert "body: dict[str, Any] | None" not in operations
 
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -693,9 +694,80 @@ def test_generate_operations_without_request_body_override_omits_unset_optional_
     client = Client()
     client.search_create(query="widgets")
     client.search_create()
+    client.search_create(query="widgets", body={"query": "old", "predicate": {"nested": True}})
 
     assert client.calls[0][1]["json_data"] == {"query": "widgets"}
     assert client.calls[1][1]["json_data"] == {}
+    assert client.calls[2][1]["json_data"] == {"query": "widgets", "predicate": {"nested": True}}
+
+
+def test_generate_operations_mixed_simple_and_complex_body_keeps_body_escape_hatch(monkeypatch, tmp_path) -> None:
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "mixed_body_api"
+    openapi.write_text(
+        json.dumps({
+            "openapi": "3.1.0",
+            "paths": {
+                "/api/schedules/pipelines": {
+                    "post": {
+                        "operationId": "create_pipeline_schedule",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["name", "pipeline_task_spec"],
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "enabled": {"type": "boolean"},
+                                            "pipeline_task_spec": {
+                                                "type": "object",
+                                                "additionalProperties": True,
+                                            },
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            },
+            "components": {"schemas": {}},
+        }),
+        encoding="utf-8",
+    )
+
+    codegen.generate(openapi, out)
+
+    operations = (out / "operations.py").read_text(encoding="utf-8")
+    assert "def schedules_pipelines(self, name: Any, enabled: Any = None, body: Any = None)" in operations
+    assert "pipeline_task_spec" not in operations.split("def schedules_pipelines", 1)[1].split("return self._request_json", 1)[0]
+    assert "json_data={**(body or {}), **{**{'name': name}, **{key: value for key, value in {'enabled': enabled}.items() if value is not None}}}" in operations
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    generated_operations = importlib.import_module("mixed_body_api.operations")
+
+    class Client(generated_operations.GeneratedTangleApiOperations):
+        def __init__(self) -> None:
+            self.calls = []
+
+        def _request_json(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return {"ok": True}
+
+    client = Client()
+    client.schedules_pipelines(
+        "scheduled-name",
+        body={
+            "name": "body-name",
+            "pipeline_task_spec": {"component": "train", "args": {"epochs": 3}},
+        },
+    )
+
+    assert client.calls[0][1]["json_data"] == {
+        "name": "scheduled-name",
+        "pipeline_task_spec": {"component": "train", "args": {"epochs": 3}},
+    }
 
 
 def test_generate_operations_preserves_required_body_kwargs(monkeypatch, tmp_path) -> None:
@@ -733,8 +805,8 @@ def test_generate_operations_preserves_required_body_kwargs(monkeypatch, tmp_pat
     codegen.generate(openapi, out)
 
     operations = (out / "operations.py").read_text(encoding="utf-8")
-    assert "def secrets_create(self, secret_value: Any, description: Any = None)" in operations
-    assert "json_data={**{'secret_value': secret_value}, **{key: value for key, value in {'description': description}.items() if value is not None}}" in operations
+    assert "def secrets_create(self, secret_value: Any, description: Any = None, body: Any = None)" in operations
+    assert "json_data={**(body or {}), **{**{'secret_value': secret_value}, **{key: value for key, value in {'description': description}.items() if value is not None}}}" in operations
 
     monkeypatch.syspath_prepend(str(tmp_path))
     generated_operations = importlib.import_module("required_body_api.operations")
@@ -749,8 +821,10 @@ def test_generate_operations_preserves_required_body_kwargs(monkeypatch, tmp_pat
 
     client = Client()
     client.secrets_create("secret")
+    client.secrets_create("secret", body={"extra": {"nested": True}, "secret_value": "old"})
 
     assert client.calls[0][1]["json_data"] == {"secret_value": "secret"}
+    assert client.calls[1][1]["json_data"] == {"extra": {"nested": True}, "secret_value": "secret"}
 
 
 def test_codegen_main_accepts_request_body_schema_file(monkeypatch, tmp_path) -> None:
