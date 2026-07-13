@@ -617,6 +617,9 @@ class PipelineRunManager(TangleCliHandler):
         if self.hooks is not self:
             setattr(self.hooks, "client", self.client)
 
+    def _http_error_type(self) -> type[Exception]:
+        return PipelineRunError
+
     @staticmethod
     def to_plain(value: Any) -> Any:
         if isinstance(value, Mapping):
@@ -1137,7 +1140,8 @@ class PipelineRunManager(TangleCliHandler):
         self.hooks.before_submit_context(submit_context)
         client = self._require_client()
         try:
-            response = self.to_plain(client.pipeline_runs_create(body=body))
+            with self._surface_http_errors():
+                response = self.to_plain(client.pipeline_runs_create(body=body))
         except Exception as exc:
             if notify_submit_error:
                 self.hooks.on_submit_error(exc, context=submit_context)
@@ -1224,12 +1228,13 @@ class PipelineRunManager(TangleCliHandler):
         return self.submit_prepared_payload(payload, pipeline_path=pipeline_path, attempt=attempt)
 
     def get_run(self, run_id: str, *, include_execution_stats: bool = True) -> dict[str, Any]:
-        return self.to_plain(
-            self.client.pipeline_runs_get(
-                run_id,
-                include_execution_stats=include_execution_stats,
+        with self._surface_http_errors():
+            return self.to_plain(
+                self.client.pipeline_runs_get(
+                    run_id,
+                    include_execution_stats=include_execution_stats,
+                )
             )
-        )
 
     def get_run_details(
         self,
@@ -1240,26 +1245,33 @@ class PipelineRunManager(TangleCliHandler):
         include_implementations: bool = False,
         execution_id: str | None = None,
     ) -> dict[str, Any]:
-        return PipelineRunDetails(client=self.client).get_run_details_output(
-            run_id,
-            include_implementations=include_implementations,
-            include_annotations=include_annotations,
-            include_execution_state=include_execution_state,
-            execution_id=execution_id,
-        )
+        with self._surface_http_errors():
+            return PipelineRunDetails(client=self.client).get_run_details_output(
+                run_id,
+                include_implementations=include_implementations,
+                include_annotations=include_annotations,
+                include_execution_state=include_execution_state,
+                execution_id=execution_id,
+            )
 
     def cancel_run(self, run_id: str) -> dict[str, Any]:
-        return self.to_plain(self.client.pipeline_runs_cancel(run_id)) or {"id": run_id, "cancelled": True}
+        with self._surface_http_errors():
+            cancelled = self.to_plain(self.client.pipeline_runs_cancel(run_id))
+        return cancelled or {"id": run_id, "cancelled": True}
 
     def graph_state(self, execution_id: str) -> Mapping[str, Any] | Any:
-        graph_state = self.client.executions_graph_execution_state(execution_id)
+        with self._surface_http_errors():
+            graph_state = self.client.executions_graph_execution_state(execution_id)
         return self.to_plain(graph_state)
 
     def graph_state_output(self, run_ids: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
+        # Per-run failures are reported in each result's "error" field rather
+        # than raised, so no HTTP-error surfacing is needed at this boundary.
         return PipelineRunDetails(client=self.client).get_graph_state_output(run_ids, timeout=timeout)
 
     def logs(self, execution_id: str) -> dict[str, Any]:
-        return self.to_plain(self.hooks.fetch_logs(self.client, execution_id))
+        with self._surface_http_errors():
+            return self.to_plain(self.hooks.fetch_logs(self.client, execution_id))
 
     def search_runs(
         self,
@@ -1270,15 +1282,16 @@ class PipelineRunManager(TangleCliHandler):
         include_pipeline_names: bool | None = None,
         include_execution_stats: bool | None = True,
     ) -> dict[str, Any]:
-        return self.to_plain(
-            self.client.pipeline_runs_list(
-                page_token=page_token,
-                filter=filter,
-                filter_query=filter_query,
-                include_pipeline_names=include_pipeline_names,
-                include_execution_stats=include_execution_stats,
+        with self._surface_http_errors():
+            return self.to_plain(
+                self.client.pipeline_runs_list(
+                    page_token=page_token,
+                    filter=filter,
+                    filter_query=filter_query,
+                    include_pipeline_names=include_pipeline_names,
+                    include_execution_stats=include_execution_stats,
+                )
             )
-        )
 
     def search_pipeline_runs(
         self,
@@ -1293,17 +1306,18 @@ class PipelineRunManager(TangleCliHandler):
         limit: int = 10,
         page_token: str | None = None,
     ) -> dict[str, Any]:
-        return PipelineRunSearch(client=self.client, logger=self.logger).search(
-            name=name,
-            created_by=created_by,
-            annotations=annotations,
-            start_date=start_date,
-            end_date=end_date,
-            local_time=local_time,
-            query=query,
-            limit=limit,
-            page_token=page_token,
-        )
+        with self._surface_http_errors():
+            return PipelineRunSearch(client=self.client, logger=self.logger).search(
+                name=name,
+                created_by=created_by,
+                annotations=annotations,
+                start_date=start_date,
+                end_date=end_date,
+                local_time=local_time,
+                query=query,
+                limit=limit,
+                page_token=page_token,
+            )
 
     def export_run(
         self,
@@ -1312,7 +1326,8 @@ class PipelineRunManager(TangleCliHandler):
         *,
         dehydrate: bool = False,
     ) -> dict[str, Any]:
-        task_spec = self.client.get_run_pipeline_spec(run_id)
+        with self._surface_http_errors():
+            task_spec = self.client.get_run_pipeline_spec(run_id)
         if task_spec is None:
             raise PipelineRunError(f"No pipeline spec found for run {run_id}")
         raw = getattr(task_spec, "raw", None)
@@ -1328,12 +1343,13 @@ class PipelineRunManager(TangleCliHandler):
         if dehydrate and output is None:
             raise PipelineRunError("--dehydrate requires --output")
         if dehydrate:
-            spec = PipelineDehydrator(
-                remembered_choices={"": DehydrateChoice.AUTO},
-                output_file=output,
-                client=self.client,
-                logger=self.logger,
-            ).dehydrate(spec)
+            with self._surface_http_errors():
+                spec = PipelineDehydrator(
+                    remembered_choices={"": DehydrateChoice.AUTO},
+                    output_file=output,
+                    client=self.client,
+                    logger=self.logger,
+                ).dehydrate(spec)
         content = dump_yaml(spec)
         if output is None:
             return {"run_id": run_id, "pipeline": spec, "yaml": content, "dehydrated": dehydrate}

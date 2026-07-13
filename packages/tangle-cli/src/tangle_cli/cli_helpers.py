@@ -4,9 +4,66 @@ from __future__ import annotations
 
 import json
 import pathlib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
+import requests
+
+from .api_transport import _content_to_text, _redact_url
 from .args_container import ArgsContainer, ConfigFileError
+
+_HTTP_ERROR_BODY_LIMIT = 2000
+
+
+def format_http_error(exc: requests.HTTPError) -> str:
+    """Render an HTTP status failure as a concise CLI message for SDK commands.
+
+    SDK/static client calls raise ``requests.HTTPError`` for non-2xx responses
+    (via ``raise_for_status``). Client-internal helpers handle the statuses they
+    can recover from (e.g. the 404 run-id -> execution-id fallback) and re-raise
+    the rest, so the command layer surfaces the remaining errors here instead of
+    letting a raw traceback reach the interpreter. The response status, reason,
+    attempted method/URL, and body are preserved as that context is what a caller
+    needs to act on. The attempted URL is stripped of userinfo and credential
+    query parameters, and the response body is passed through the shared
+    sensitive-key redaction before it is collapsed to a single line and
+    truncated, so neither the URL nor the body can leak secrets into the
+    message. Only HTTP status failures are formatted here; connection/timeout
+    errors carry no response and propagate unchanged.
+    """
+
+    response = exc.response
+    if response is None:
+        return f"Tangle API request failed: {exc}"
+    request = response.request
+    if request is not None and request.url:
+        target = f"{request.method} {_redact_url(request.url)}"
+    else:
+        target = _redact_url(response.url) or "Tangle API"
+    reason = f" {response.reason}" if response.reason else ""
+    summary = f"Tangle API request failed ({response.status_code}{reason}) for {target}"
+    body = " ".join(_content_to_text(response.content).split())
+    if not body or body == "<empty>":
+        return summary
+    if len(body) > _HTTP_ERROR_BODY_LIMIT:
+        body = f"{body[:_HTTP_ERROR_BODY_LIMIT]}... (truncated)"
+    return f"{summary}: {body}"
+
+
+@contextmanager
+def surface_http_errors(error_type: type[Exception]) -> Iterator[None]:
+    """Re-raise ``requests.HTTPError`` as ``error_type`` with a formatted message.
+
+    Client-internal recovery runs first and re-raises only the statuses it
+    cannot handle, so errors reaching here are the ones the command layer must
+    surface as a clean nonzero exit rather than a raw traceback.
+    """
+
+    try:
+        yield
+    except requests.HTTPError as exc:
+        raise error_type(format_http_error(exc)) from exc
 
 
 def load_args_or_exit(config: str | None, **kwargs: Any) -> list[ArgsContainer]:
