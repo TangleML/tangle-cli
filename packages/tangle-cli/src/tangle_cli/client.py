@@ -144,6 +144,24 @@ class TangleApiClient(GeneratedTangleApiOperations):
             )
         return response
 
+    def request_raw(
+        self,
+        method: str,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        json_data: Any = None,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Public alias for :meth:`_make_request`.
+
+        Issues an HTTP request against an API path and returns the raw
+        ``requests.Response`` (retries, auth refresh, and redirect handling
+        included). Standard ``requests`` keyword arguments such as
+        ``stream=True`` are forwarded.
+        """
+
+        return self._make_request(method, path, params=params, json_data=json_data, **kwargs)
+
     def _request_with_rate_limit_retries(
         self,
         method: str,
@@ -235,6 +253,12 @@ class TangleApiClient(GeneratedTangleApiOperations):
                 **request_kwargs,
             )
             if self.verbose:
+                # ``response.text`` buffers the whole body, which for a
+                # ``stream=True`` request (e.g. artifact downloads) would defeat
+                # the streaming guarantee and write artifact bytes verbatim into
+                # diagnostics. Log a placeholder instead of ever evaluating the
+                # body for streamed requests.
+                streaming = bool(request_kwargs.get("stream"))
                 log_http_exchange(
                     self.logger,
                     method=current_method,
@@ -243,7 +267,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
                     request_body=current_json,
                     response_status=response.status_code,
                     response_headers=dict(response.headers),
-                    response_body=response.text,
+                    response_body="<streaming body omitted>" if streaming else response.text,
                 )
             if response.status_code not in self._REDIRECT_STATUSES:
                 return response
