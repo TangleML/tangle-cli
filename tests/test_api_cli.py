@@ -1,6 +1,7 @@
 import importlib
 import json
 import sys
+from unittest.mock import ANY
 
 import httpx
 import pytest
@@ -460,6 +461,7 @@ def test_sdk_published_components_search_uses_config_with_cli_precedence(monkeyp
         "header": ["X-Config: yes"],
         "include_env_credentials": False,
         "command_name": "published-component commands",
+        "logger": ANY,
     }
 
 
