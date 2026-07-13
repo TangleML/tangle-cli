@@ -120,7 +120,10 @@ def _run_annotation_action(config: str | None, cli_base_url: str | None, specs: 
                 client=_api_client(args, cli_base_url=cli_base_url, command_name="pipeline-run annotation commands"),
                 logger=logger,
             )
-            print_json(fn(manager, args))
+            try:
+                print_json(fn(manager, args))
+            except PipelineRunError as exc:
+                raise SystemExit(str(exc)) from exc
         finally:
             finalize_logs()
 

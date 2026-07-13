@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from typing import Any
 
 from .api_transport import default_base_url
+from .cli_helpers import surface_http_errors
 from .logger import Logger, get_default_logger
 
 
@@ -94,3 +96,13 @@ class TangleCliHandler:
         if client is None:
             raise self._required_client_error_type(self._required_client_error_message)
         return client
+
+    def _http_error_type(self) -> type[Exception]:
+        """Exception type used to re-raise a formatted API HTTP failure."""
+
+        return self._required_client_error_type
+
+    def _surface_http_errors(self) -> AbstractContextManager[None]:
+        """Context manager re-raising API ``HTTPError`` as concise, formatted failures."""
+
+        return surface_http_errors(self._http_error_type())
