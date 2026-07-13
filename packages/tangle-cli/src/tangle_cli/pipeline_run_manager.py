@@ -15,12 +15,13 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+import requests
 import yaml
 
 from .handler import TangleCliHandler
@@ -52,6 +53,27 @@ class UnsupportedPipelineRunFeatureError(PipelineRunError):
 
 class AmbiguousPipelineRunRecoveryError(PipelineRunError):
     """Raised when submit recovery finds multiple runs for one submission id."""
+
+
+def _describe_http_error(exc: requests.HTTPError) -> str:
+    """Summarize an HTTP status failure with the attempted request target.
+
+    ``str(exc)`` alone can omit the URL (e.g. errors constructed by client
+    helpers), so read the status, reason, and method/URL off the attached
+    response when present.
+    """
+
+    response = exc.response
+    if response is None:
+        return str(exc)
+    request = response.request
+    target = (
+        f"{request.method} {request.url}"
+        if request is not None and request.url
+        else (response.url or "Tangle API")
+    )
+    reason = f" {response.reason}" if response.reason else ""
+    return f"HTTP {response.status_code}{reason} for {target}"
 
 
 @dataclass
@@ -598,6 +620,14 @@ class PipelineRunHooks:
     def fetch_logs(self, client: Any, execution_id: str) -> Any:
         """Hook for alternate TD log providers; OSS uses the Tangle API only."""
         return client.executions_container_log(execution_id)
+
+    def stream_logs(self, client: Any, execution_id: str) -> Iterable[str]:
+        """Hook for alternate TD log providers; OSS streams via the Tangle API.
+
+        Failures to open the stream must raise from this call; exceptions raised
+        while iterating are reported as mid-stream interruptions.
+        """
+        return client.iter_execution_container_log_lines(execution_id)
 
 
 @dataclass
@@ -1260,6 +1290,38 @@ class PipelineRunManager(TangleCliHandler):
 
     def logs(self, execution_id: str) -> dict[str, Any]:
         return self.to_plain(self.hooks.fetch_logs(self.client, execution_id))
+
+    def stream_logs(self, execution_id: str) -> Iterable[str]:
+        try:
+            lines = self.hooks.stream_logs(self.client, execution_id)
+        except requests.HTTPError as exc:
+            # A definitive non-2xx answer to the stream-open request (404 for a
+            # missing execution or endpoint, 403, ...): keep the status and the
+            # attempted target visible, since that is what the caller acts on.
+            raise PipelineRunError(
+                f"Failed to open log stream for execution {execution_id}: "
+                f"{_describe_http_error(exc)}"
+            ) from exc
+        except requests.RequestException as exc:
+            # Non-HTTP transport failures (connection refused, timeout) raise
+            # from the open call itself; surface them as a clean open failure.
+            raise PipelineRunError(
+                f"Failed to open log stream for execution {execution_id}: {exc}"
+            ) from exc
+        return self._relabel_stream_drops(lines, execution_id)
+
+    @staticmethod
+    def _relabel_stream_drops(lines: Iterable[str], execution_id: str) -> Iterable[str]:
+        try:
+            yield from lines
+        except requests.RequestException as exc:
+            # The stream opened (the hook call succeeded), so a transport
+            # failure here is a drop of the live follow, possibly before the
+            # first line arrived. Surface it as an interruption rather than a
+            # fetch failure, which would wrongly imply the initial open failed.
+            raise PipelineRunError(
+                f"Log stream for execution {execution_id} was interrupted: {exc}"
+            ) from exc
 
     def search_runs(
         self,
