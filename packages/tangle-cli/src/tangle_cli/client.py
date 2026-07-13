@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, is_dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
 
@@ -40,6 +40,69 @@ from .models import (
 )
 
 
+class _RetryBudget:
+    """Shared attempt/send/deadline budget for one logical request.
+
+    The transient-5xx, 429 rate-limit, and 401 auth-refresh retry layers all
+    draw from a single instance so a composed outage cannot multiply their
+    per-layer limits. Attempts and sends are counted separately because they
+    bound different things: ``attempts`` is how many logical tries remain (one
+    per entry into the redirect helper) while ``sends`` is how many physical
+    ``session.request`` calls remain, every same-origin redirect hop included.
+    Keeping ``sends`` larger than ``attempts`` is what lets a legal redirect
+    chain still be followed on a retry, instead of its hops being spent as if
+    they were tries. ``deadline`` is a ``time.monotonic`` value past which no
+    further send is admitted.
+    """
+
+    __slots__ = ("attempts", "sends", "deadline")
+
+    def __init__(self, max_attempts: int, max_sends: int, deadline: float) -> None:
+        self.attempts = max_attempts
+        self.sends = max_sends
+        self.deadline = deadline
+
+    def start_attempt(self) -> None:
+        """Charge one logical try; callers gate on :meth:`can_retry` first."""
+
+        self.attempts -= 1
+
+    def try_consume_send(self) -> bool:
+        """Atomically admit one physical send, charging the budget for it.
+
+        Checking and charging together, immediately before the send, is what
+        stops a request from slipping out after a long ``Retry-After`` or
+        backoff has already carried the clock past the deadline.
+        """
+
+        if self.sends <= 0 or time.monotonic() >= self.deadline:
+            return False
+        self.sends -= 1
+        return True
+
+    def exhaustion_reason(self) -> str:
+        """Why :meth:`try_consume_send` refused, for the exhaustion error text.
+
+        Mirrors that method's check order so the reported cause is the one that
+        actually stopped the send.
+        """
+
+        return "send pool exhausted" if self.sends <= 0 else "deadline exceeded"
+
+    def can_retry(self) -> bool:
+        return self.attempts > 0 and self.sends > 0 and time.monotonic() < self.deadline
+
+    def allows_wait(self, delay: float) -> bool:
+        """True when sleeping ``delay`` would still leave time to send again.
+
+        Waits are bounded by the remaining deadline rather than truncated to it:
+        a sleep that would reach the deadline can only be followed by a send the
+        budget must refuse, so the caller stops immediately instead.
+        """
+
+        return delay < self.deadline - time.monotonic()
+
+
 class TangleApiClient(GeneratedTangleApiOperations):
     """Single public API wrapper for Tangle backends.
 
@@ -50,9 +113,35 @@ class TangleApiClient(GeneratedTangleApiOperations):
 
     _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
     _MAX_REDIRECTS = 5
-    _MAX_RATE_LIMIT_RETRIES = 3
     _RATE_LIMIT_BACKOFF_SECONDS = 1.0
     _MAX_RETRY_AFTER_SECONDS = 60.0
+    # Requests that cannot be replayed after a transient failure (mutating
+    # methods and streamed GETs) keep the historical four-attempt 429 allowance
+    # and its 1/2/4s backoff rather than spending the larger shared GET budget
+    # on rate limiting alone.
+    _MAX_RATE_LIMIT_RETRIES = 3
+    _RETRYABLE_GET_STATUSES = frozenset({500, 502, 503, 504})
+    _MAX_GET_RETRIES = 6
+    _GET_RETRY_BACKOFF_SECONDS = 1.0
+    _MAX_GET_RETRY_BACKOFF_SECONDS = 30.0
+    # A single logical request may issue at most ``_MAX_GET_RETRIES + 1``
+    # attempts and ``_MAX_PHYSICAL_SENDS`` physical sends -- counting every
+    # same-origin redirect hop -- shared across the transient-5xx, 429
+    # rate-limit, and 401 auth-refresh layers, and must not spend more than
+    # ``_MAX_RETRY_ELAPSED_SECONDS`` retrying. One shared budget prevents the
+    # layers from multiplying into a large physical request count during an
+    # outage (e.g. interleaved 503/429 responses, a 401 mid-sequence, or a
+    # redirect chain in front of every retry).
+    #
+    # Sends are pooled separately from attempts because one attempt behind a
+    # redirect chain costs several sends. The pool is the larger of two floors:
+    # two full ``_MAX_REDIRECTS``-deep chains (12), so such a chain stays
+    # followable both before and after a 401 refresh, and two sends per logical
+    # attempt (14), so a one-hop gateway does not halve the effective retry
+    # count. The second dominates at current constants. The worst case stays far
+    # below attempts x chain length.
+    _MAX_PHYSICAL_SENDS = max(2 * (_MAX_REDIRECTS + 1), 2 * (_MAX_GET_RETRIES + 1))
+    _MAX_RETRY_ELAPSED_SECONDS = 120.0
 
     def __init__(
         self,
@@ -121,6 +210,12 @@ class TangleApiClient(GeneratedTangleApiOperations):
         clean_params = self._clean_mapping(params)
         request_method = method.upper()
 
+        budget = _RetryBudget(
+            self._MAX_GET_RETRIES + 1,
+            self._MAX_PHYSICAL_SENDS,
+            time.monotonic() + self._MAX_RETRY_ELAPSED_SECONDS,
+        )
+
         self._refresh_auth()
         response = self._request_with_rate_limit_retries(
             request_method,
@@ -130,18 +225,28 @@ class TangleApiClient(GeneratedTangleApiOperations):
             extra_headers=extra_headers,
             timeout=timeout,
             request_kwargs=kwargs,
+            budget=budget,
         )
-        if response.status_code == 401:
+        # The auth-refresh retry draws from the same budget, so a 401 late in a
+        # transient/rate-limit sequence cannot start a fresh round of retries.
+        if response.status_code == 401 and budget.can_retry():
             self._refresh_auth()
-            response = self._request_with_rate_limit_retries(
-                request_method,
-                url,
-                params=clean_params,
-                json_data=json_data,
-                extra_headers=extra_headers,
-                timeout=timeout,
-                request_kwargs=kwargs,
-            )
+            try:
+                response = self._request_with_rate_limit_retries(
+                    request_method,
+                    url,
+                    params=clean_params,
+                    json_data=json_data,
+                    extra_headers=extra_headers,
+                    timeout=timeout,
+                    request_kwargs=kwargs,
+                    budget=budget,
+                )
+            except requests.exceptions.RetryError:
+                # The retry ran out of sends before any response came back. The
+                # 401 already in hand is a real backend answer, so report it
+                # rather than an exhaustion error.
+                return response
         return response
 
     def _request_with_rate_limit_retries(
@@ -154,10 +259,97 @@ class TangleApiClient(GeneratedTangleApiOperations):
         extra_headers: Mapping[str, str] | None,
         timeout: float,
         request_kwargs: Mapping[str, Any],
+        budget: _RetryBudget,
     ) -> requests.Response:
-        response: requests.Response | None = None
-        for attempt in range(self._MAX_RATE_LIMIT_RETRIES + 1):
-            response = self._request_with_same_origin_redirects(
+        # Replayable GETs are bounded by the shared budget alone; everything else
+        # bypasses the transient layer and so keeps its historical 429 cap.
+        max_rounds = (
+            None
+            if self._is_transient_retryable(method, request_kwargs)
+            else self._MAX_RATE_LIMIT_RETRIES
+        )
+        rate_limit_round = 0
+        last_response: requests.Response | None = None
+        while True:
+            try:
+                response = self._request_with_transient_retries(
+                    method,
+                    url,
+                    params=params,
+                    json_data=json_data,
+                    extra_headers=extra_headers,
+                    timeout=timeout,
+                    request_kwargs=request_kwargs,
+                    budget=budget,
+                )
+            except requests.exceptions.RetryError:
+                # Sends ran out part-way through a redirect chain. The 429 from
+                # the previous round is a real backend answer and reports better
+                # than the exhaustion error.
+                if last_response is None:
+                    raise
+                return last_response
+            if response.status_code != 429:
+                return response
+            if max_rounds is not None and rate_limit_round >= max_rounds:
+                return response
+            delay = self._rate_limit_delay(response, rate_limit_round)
+            # A 429 retry re-enters the transient layer, so it must draw from the
+            # shared budget rather than a per-round allowance. A ``Retry-After``
+            # that would outlast the deadline ends the sequence here instead of
+            # sleeping into a send the budget must then refuse.
+            if not budget.can_retry() or not budget.allows_wait(delay):
+                return response
+            # Release the superseded 429 so its connection is not held for the
+            # whole wait. Streamed responses are released here too: a 429 is
+            # never the stream the caller asked for, and nothing has read its
+            # body. The status stays readable afterwards, so this response is
+            # still reportable if a later round exhausts the budget mid-chain.
+            last_response = response
+            self._release_response(response)
+            self._sleep_for_rate_limit(delay)
+            rate_limit_round += 1
+
+    @staticmethod
+    def _is_transient_retryable(method: str, request_kwargs: Mapping[str, Any]) -> bool:
+        """Only non-streamed GETs may be replayed after a transient failure.
+
+        Mutating methods must never be duplicated, and a streamed GET's consumer
+        owns any stream-open retries.
+        """
+
+        return method.upper() == "GET" and not request_kwargs.get("stream")
+
+    def _request_with_transient_retries(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None,
+        json_data: Any,
+        extra_headers: Mapping[str, str] | None,
+        timeout: float,
+        request_kwargs: Mapping[str, Any],
+        budget: _RetryBudget,
+    ) -> requests.Response:
+        """Retry idempotent GETs on transient 5xx and transport errors.
+
+        Mutating methods are sent once (never duplicated). Streamed GETs bypass
+        this layer so their consumer owns any stream-open retries. 429s are left
+        to the rate-limit layer, whose retries re-enter this layer with a fresh
+        backoff. ``SSLError`` raises immediately: certificate failures are
+        deterministic, so retrying only delays the report. Every physical send
+        draws from the shared ``budget`` at the send boundary, so the transient,
+        rate-limit, and auth-refresh layers cannot multiply into a large request
+        count. Each doubling sleep is capped at
+        ``_MAX_GET_RETRY_BACKOFF_SECONDS``, is skipped entirely when it would
+        outlast the deadline, and is announced through ``self.logger`` (a null
+        logger on non-verbose clients built without one), so a stalled GET is
+        bounded.
+        """
+
+        if not self._is_transient_retryable(method, request_kwargs):
+            return self._request_with_same_origin_redirects(
                 method,
                 url,
                 params=params,
@@ -165,18 +357,82 @@ class TangleApiClient(GeneratedTangleApiOperations):
                 extra_headers=extra_headers,
                 timeout=timeout,
                 request_kwargs=request_kwargs,
+                budget=budget,
             )
-            if response.status_code != 429 or attempt == self._MAX_RATE_LIMIT_RETRIES:
-                return response
-            self._sleep_for_rate_limit(response, attempt)
-        return response
 
-    def _sleep_for_rate_limit(self, response: requests.Response, attempt: int) -> None:
+        backoff = self._GET_RETRY_BACKOFF_SECONDS
+        attempt = 0
+        last_response: requests.Response | None = None
+        while True:
+            attempt += 1
+            delay = min(backoff, self._MAX_GET_RETRY_BACKOFF_SECONDS)
+            backoff *= 2.0
+            try:
+                response = self._request_with_same_origin_redirects(
+                    method,
+                    url,
+                    params=params,
+                    json_data=json_data,
+                    extra_headers=extra_headers,
+                    timeout=timeout,
+                    request_kwargs=request_kwargs,
+                    budget=budget,
+                )
+            except requests.exceptions.RetryError:
+                # Sends ran out part-way through a redirect chain. A completed
+                # 5xx from an earlier attempt tells the caller what the backend
+                # actually said, so ``raise_for_status`` still reports the true
+                # status instead of an exhaustion error.
+                if last_response is None:
+                    raise
+                return last_response
+            # Transient transport failures (reset/refused, timeout, truncated or
+            # corrupt body) can succeed on retry; other request errors surface.
+            except (
+                requests.ConnectionError,
+                requests.Timeout,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ContentDecodingError,
+            ) as exc:
+                # SSLError subclasses ConnectionError but signals a certificate
+                # or TLS configuration problem that no retry can fix.
+                if isinstance(exc, requests.exceptions.SSLError):
+                    raise
+                # Budget exhausted (attempts or deadline), or the backoff alone
+                # would outlast the deadline: surface the failure.
+                if not budget.can_retry() or not budget.allows_wait(delay):
+                    raise
+                self._sleep_for_transient_retry(delay, attempt, type(exc).__name__)
+            else:
+                if response.status_code not in self._RETRYABLE_GET_STATUSES:
+                    return response
+                # Budget exhausted, or the backoff alone would outlast the
+                # deadline: return the final 5xx for raise_for_status.
+                if not budget.can_retry() or not budget.allows_wait(delay):
+                    return response
+                # Release the intermediate response so its connection returns to
+                # the pool. Its body is already buffered (these GETs are never
+                # streamed), so it stays reportable if the retry runs out of
+                # sends mid-chain.
+                last_response = response
+                self._release_response(response)
+                self._sleep_for_transient_retry(delay, attempt, f"HTTP {response.status_code}")
+
+    def _sleep_for_transient_retry(self, delay: float, attempt: int, reason: str) -> None:
+        self.logger.warn(
+            f"transient {reason} on GET; retrying in {delay:.1f}s "
+            f"(attempt {attempt + 1}/{self._MAX_GET_RETRIES + 1})"
+        )
+        time.sleep(delay)
+
+    def _rate_limit_delay(self, response: requests.Response, attempt: int) -> float:
         retry_after = response.headers.get("Retry-After")
         delay = self._retry_after_delay(retry_after)
         if delay is None:
             delay = self._RATE_LIMIT_BACKOFF_SECONDS * (2 ** attempt)
-        delay = min(delay, self._MAX_RETRY_AFTER_SECONDS)
+        return min(delay, self._MAX_RETRY_AFTER_SECONDS)
+
+    def _sleep_for_rate_limit(self, delay: float) -> None:
         if self.verbose:
             self.logger.info(f"429 rate limited; retrying in {delay:.1f}s")
         time.sleep(delay)
@@ -207,6 +463,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         extra_headers: Mapping[str, str] | None,
         timeout: float,
         request_kwargs: Mapping[str, Any],
+        budget: _RetryBudget,
     ) -> requests.Response:
         """Send one request, following only same-origin redirects.
 
@@ -214,8 +471,16 @@ class TangleApiClient(GeneratedTangleApiOperations):
         ``requests`` does not strip those custom credentials on cross-origin
         redirects, so redirects are handled manually and constrained to the
         original origin.
+
+        This helper is entered once per logical attempt, so it charges the
+        shared budget one attempt on entry and one send per hop immediately
+        before that hop goes out. Charging hops keeps a redirect in front of
+        every retry from multiplying the total request count, while charging
+        them against the send pool rather than the attempt count leaves a legal
+        chain followable on every attempt.
         """
 
+        budget.start_attempt()
         current_method = method
         current_url = url
         current_params = params
@@ -223,6 +488,11 @@ class TangleApiClient(GeneratedTangleApiOperations):
         response: requests.Response | None = None
 
         for _ in range(self._MAX_REDIRECTS + 1):
+            if not budget.try_consume_send():
+                raise requests.exceptions.RetryError(
+                    f"Retry budget exhausted ({budget.exhaustion_reason()}) "
+                    f"while sending {current_method} {self._credential_safe_url(current_url)}"
+                )
             request_headers = self._headers(extra_headers)
             response = self.session.request(
                 current_method,
@@ -259,10 +529,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
                     response=response,
                 )
 
-            try:
-                response.close()
-            except Exception:
-                pass
+            self._release_response(response)
             if response.status_code == 303 or (
                 response.status_code in {301, 302} and current_method not in {"GET", "HEAD"}
             ):
@@ -275,6 +542,35 @@ class TangleApiClient(GeneratedTangleApiOperations):
             f"Exceeded {self._MAX_REDIRECTS} redirects for {url}",
             response=response,
         )
+
+    @staticmethod
+    def _credential_safe_url(url: str) -> str:
+        """Render a URL for error text with every credential-bearing part removed.
+
+        A same-origin redirect can land on a signed URL whose query, fragment,
+        or authority userinfo carries credentials, and this rendering flows
+        into CLI output and logs. Only scheme, host[:port], and path survive.
+        ``urlsplit`` rejects some malformed authorities (an unclosed IPv6
+        bracket, for one), and ``.hostname``/``.port`` reject malformed ports,
+        so the authority is taken from the raw netloc and parse failures fall
+        back to a placeholder rather than letting error formatting raise.
+        """
+
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return "<unparseable URL>"
+        netloc = parts.netloc.rpartition("@")[2]
+        return urlunsplit((parts.scheme, netloc, parts.path, "", "")) or "<unparseable URL>"
+
+    @staticmethod
+    def _release_response(response: requests.Response) -> None:
+        """Return an abandoned response's connection to the pool."""
+
+        try:
+            response.close()
+        except Exception:
+            pass
 
     @staticmethod
     def _same_origin(left: str, right: str) -> bool:

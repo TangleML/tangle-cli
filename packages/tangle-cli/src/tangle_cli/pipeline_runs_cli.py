@@ -69,7 +69,9 @@ def _allow_all_hydration_for_args(args: ArgsContainer) -> bool:
     return bool(config.get("allow_all", False))
 
 
-def _api_client(args: ArgsContainer, *, cli_base_url: str | None, command_name: str) -> LazyTangleApiClient:
+def _api_client(
+    args: ArgsContainer, *, cli_base_url: str | None, command_name: str, logger: Logger | None = None
+) -> LazyTangleApiClient:
     return LazyTangleApiClient(
         base_url=args.base_url,
         token=args.token,
@@ -77,12 +79,15 @@ def _api_client(args: ArgsContainer, *, cli_base_url: str | None, command_name: 
         header=args.header,
         include_env_credentials=include_env_credentials_for_args(args, cli_base_url),
         command_name=command_name,
+        logger=logger,
     )
 
 
 def _manager(args: ArgsContainer, *, cli_base_url: str | None, logger: Logger) -> PipelineRunManager:
     return PipelineRunManager(
-        client=_api_client(args, cli_base_url=cli_base_url, command_name="pipeline-run commands"),
+        client=_api_client(
+            args, cli_base_url=cli_base_url, command_name="pipeline-run commands", logger=logger
+        ),
         hooks=PipelineRunHooks(
             logger=logger,
             trusted_python_sources=_trusted_sources_for_args(args),
@@ -117,7 +122,12 @@ def _run_annotation_action(config: str | None, cli_base_url: str | None, specs: 
             raise SystemExit(str(exc)) from exc
         try:
             manager = AnnotationManager(
-                client=_api_client(args, cli_base_url=cli_base_url, command_name="pipeline-run annotation commands"),
+                client=_api_client(
+                    args,
+                    cli_base_url=cli_base_url,
+                    command_name="pipeline-run annotation commands",
+                    logger=logger,
+                ),
                 logger=logger,
             )
             print_json(fn(manager, args))

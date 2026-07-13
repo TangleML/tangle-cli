@@ -138,6 +138,7 @@ def test_published_components_publish_config_base_url_suppresses_env_credentials
             "header": ["X-Config: yes"],
             "include_env_credentials": False,
             "command_name": "published-component commands",
+            "logger": ANY,
         }
     ]
     assert FakePublisher.instances[0].kwargs["client"] is fake_client
@@ -271,6 +272,7 @@ def test_published_components_publish_config_array_uses_per_entry_controls(monke
             "header": None,
             "include_env_credentials": False,
             "command_name": "published-component commands",
+            "logger": ANY,
         }
     ]
     assert [publisher.kwargs for publisher in FakePublisher.instances] == [
@@ -341,6 +343,7 @@ def test_published_components_deprecate_cli_wiring_and_config(monkeypatch, tmp_p
             "header": ["X-Test: yes"],
             "include_env_credentials": False,
             "command_name": "published-component commands",
+            "logger": ANY,
         }
     ]
     assert deprecate_calls == [
