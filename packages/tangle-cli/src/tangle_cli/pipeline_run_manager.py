@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import math
 import re
 import time
 import uuid
@@ -740,6 +741,25 @@ class PipelineRunManager(TangleCliHandler):
         return bool(status and status.upper() in _TERMINAL_STATUSES)
 
     @staticmethod
+    def _validate_prepared_body(body: dict[str, Any]) -> dict[str, Any]:
+        """Fail fast on malformed prepared bodies, returning the componentRef.
+
+        Locator-style bodies (a componentRef with ``name``/``digest`` and no
+        inline ``spec``) are valid; only the ``root_task``/``componentRef``
+        mappings themselves are required.
+        """
+
+        root_task = body.get("root_task")
+        if not isinstance(root_task, dict):
+            raise PipelineRunError("Prepared submit body must contain a 'root_task' mapping")
+        component_ref = root_task.get("componentRef")
+        if not isinstance(component_ref, dict):
+            raise PipelineRunError(
+                "Prepared submit body 'root_task' must contain a 'componentRef' mapping"
+            )
+        return component_ref
+
+    @staticmethod
     def status_counts_from_run(run: Mapping[str, Any]) -> dict[str, int]:
         stats = run.get("execution_status_stats")
         if not isinstance(stats, Mapping):
@@ -1122,7 +1142,7 @@ class PipelineRunManager(TangleCliHandler):
         notify_submit_error: bool = True,
     ) -> dict[str, Any]:
         self.normalize_submit_body_in_place(body)
-        pipeline_spec = body["root_task"]["componentRef"]["spec"]
+        pipeline_spec = self._validate_prepared_body(body).get("spec")
         submit_context = context or PipelineRunContext(
             pipeline_path=pipeline_path,
             start_time=time.time(),
@@ -1452,6 +1472,36 @@ class PipelineRunManager(TangleCliHandler):
             execution_state_timings=execution_state_timings,
         )
 
+    @staticmethod
+    def _validate_wait_params(
+        *,
+        max_wait: float | None,
+        poll_interval: float,
+        timeout_clock: str,
+        allow_zero_poll_interval: bool,
+    ) -> None:
+        """Validate wait/poll parameters, raising before any run is submitted.
+
+        The CLI wait/run commands and the programmatic API share this path, so
+        error messages name both the parameter and its CLI flag.
+        """
+
+        # NaN/inf pass the sign checks below (NaN compares False, inf is
+        # "positive") and would become a never-firing deadline or a raw
+        # ValueError from time.sleep; reject them up front. An unbounded wait is
+        # spelled max_wait=None, not an explicit inf.
+        if max_wait is not None:
+            if not math.isfinite(max_wait):
+                raise PipelineRunError("max_wait (--max-wait) must be a finite number")
+            if max_wait < 0:
+                raise PipelineRunError("max_wait (--max-wait) must be non-negative")
+        if not math.isfinite(poll_interval):
+            raise PipelineRunError("poll_interval (--poll-interval) must be a finite number")
+        if poll_interval < 0 or (poll_interval == 0 and not allow_zero_poll_interval):
+            raise PipelineRunError("poll_interval (--poll-interval) must be positive")
+        if timeout_clock not in {"monotonic", "wall"}:
+            raise PipelineRunError("timeout_clock must be 'monotonic' or 'wall'")
+
     def wait_for_completion(
         self,
         run_id: str,
@@ -1467,12 +1517,12 @@ class PipelineRunManager(TangleCliHandler):
         wait_context = context or PipelineRunContext(run_id=run_id, start_time=time.time())
         if exit_on_first_failure:
             wait_context.metadata["exit_on_first_failure"] = True
-        if max_wait is not None and max_wait < 0:
-            raise PipelineRunError("--max-wait must be non-negative")
-        if poll_interval < 0 or (poll_interval == 0 and not allow_zero_poll_interval):
-            raise PipelineRunError("--poll-interval must be positive")
-        if timeout_clock not in {"monotonic", "wall"}:
-            raise PipelineRunError("timeout_clock must be 'monotonic' or 'wall'")
+        self._validate_wait_params(
+            max_wait=max_wait,
+            poll_interval=poll_interval,
+            timeout_clock=timeout_clock,
+            allow_zero_poll_interval=allow_zero_poll_interval,
+        )
         enforce_max_wait = max_wait is not None and self.hooks.should_enforce_max_wait(wait_context)
         poll_started_at = time.monotonic()
         deadline_now: Callable[[], float] = time.time if timeout_clock == "wall" else time.monotonic
@@ -1751,6 +1801,15 @@ class PipelineRunManager(TangleCliHandler):
 
         if max_attempts < 1:
             raise PipelineRunError("max_attempts must be at least 1")
+        if wait:
+            # Validate wait/poll params up front so an invalid request never
+            # submits a run it can't wait on.
+            self._validate_wait_params(
+                max_wait=max_wait,
+                poll_interval=poll_interval,
+                timeout_clock=timeout_clock,
+                allow_zero_poll_interval=allow_zero_poll_interval,
+            )
         last_error: Exception | None = None
         previous_context: PipelineRunContext | None = None
         attempts: list[PipelineRunContext] = []
@@ -1797,7 +1856,9 @@ class PipelineRunManager(TangleCliHandler):
             context.metadata["submission_id"] = submission_id
             if metadata_factory is not None:
                 context.metadata.update(metadata_factory(attempt, previous_context, last_error))
-            pipeline_spec = body.get("root_task", {}).get("componentRef", {}).get("spec")
+            # Validate before the tolerant spec extraction so a malformed body
+            # raises PipelineRunError instead of an AttributeError.
+            pipeline_spec = self._validate_prepared_body(body).get("spec")
             context.submit_body = body
             context.pipeline_spec = pipeline_spec if isinstance(pipeline_spec, dict) else None
             if context.pipeline_spec is not None:
@@ -2074,6 +2135,111 @@ class PipelineRunManager(TangleCliHandler):
             metadata=metadata,
             submit_recovery_attempts=submit_recovery_attempts,
         )
+
+
+def _build_default_manager(*, logger: Logger | None = None) -> PipelineRunManager:
+    """Construct a manager backed by the native ``TangleApiClient``.
+
+    Imported lazily so the lightweight top-level package and local-only SDK
+    commands stay native-free. Credentials/base URL come from the standard
+    ``TangleApiClient`` environment defaults.
+    """
+
+    try:
+        from .client import TangleApiClient
+    except ModuleNotFoundError as exc:
+        # Catch both the top-level package and any missing submodule (e.g. a
+        # partially-installed ``tangle_api.generated``).
+        if exc.name is not None and (exc.name == "tangle_api" or exc.name.startswith("tangle_api.")):
+            raise PipelineRunError(
+                "Native generated Tangle API bindings are required to submit a prepared "
+                "body without an explicit client. Install tangle-cli[native], provide a "
+                "local tangle_api.generated package, or pass client=/manager=."
+            ) from exc
+        raise
+
+    hooks = PipelineRunHooks(logger=logger) if logger is not None else PipelineRunHooks()
+    return PipelineRunManager(client=TangleApiClient(), hooks=hooks, logger=logger or hooks.logger)
+
+
+def submit_and_wait_prepared_body(
+    body: dict[str, Any],
+    *,
+    manager: PipelineRunManager | None = None,
+    client: Any | None = None,
+    logger: Logger | None = None,
+    wait: bool = True,
+    max_wait: float | None = 600.0,
+    poll_interval: float = 10.0,
+    use_graph_state: bool = False,
+    allow_zero_poll_interval: bool = False,
+    timeout_clock: str = "monotonic",
+    exit_on_first_failure: bool = False,
+    metadata: dict[str, Any] | None = None,
+    submit_recovery_attempts: int = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
+) -> dict[str, Any]:
+    """Submit an already-prepared API submit body and optionally wait for completion.
+
+    Thin wrapper over :meth:`PipelineRunManager.run_prepared_body` for callers
+    that already hold a fully formed submit ``body`` (``{"root_task": {...}}``);
+    it reuses the existing submit/wait/poll and submit-recovery logic and never
+    mutates ``body``. Provide ``manager`` to reuse a configured manager,
+    ``client`` to wrap an existing API client, or neither to build a
+    :class:`tangle_cli.client.TangleApiClient` from the environment (requires
+    the native extra). ``logger`` applies only when this helper constructs the
+    manager (the ``client`` and default paths); a supplied ``manager`` keeps
+    its own configured logger and ``logger`` is ignored.
+
+    Returns a dict with ``response``, ``run_id``, ``root_execution_id``, and
+    ``wait`` (when ``wait=True``); the result is JSON-serializable whenever the
+    API responses are. With ``wait=True``, a submit response carrying no run id
+    raises :class:`PipelineRunError`; use ``wait=False`` to inspect such
+    responses.
+    """
+
+    if manager is not None and client is not None:
+        raise PipelineRunError("Pass at most one of manager= or client=")
+
+    if manager is None:
+        if client is not None:
+            hooks = PipelineRunHooks(logger=logger) if logger is not None else PipelineRunHooks()
+            manager = PipelineRunManager(client=client, hooks=hooks, logger=logger or hooks.logger)
+        else:
+            manager = _build_default_manager(logger=logger)
+
+    raw = manager.run_prepared_body(
+        body,
+        wait=wait,
+        max_wait=max_wait,
+        poll_interval=poll_interval,
+        use_graph_state=use_graph_state,
+        allow_zero_poll_interval=allow_zero_poll_interval,
+        timeout_clock=timeout_clock,
+        exit_on_first_failure=exit_on_first_failure,
+        metadata=metadata,
+        submit_recovery_attempts=submit_recovery_attempts,
+    )
+
+    context: PipelineRunContext | None = raw.get("context")
+    result: dict[str, Any] = {
+        "response": raw.get("response"),
+        "run_id": context.run_id if context is not None else None,
+        "root_execution_id": context.root_execution_id if context is not None else None,
+    }
+    if "wait" in raw:
+        result["wait"] = raw["wait"]
+    elif wait:
+        # The underlying run skips waiting when the submit response carries no
+        # run id; surface that instead of silently returning without waiting.
+        raise PipelineRunError(
+            "Run was submitted but the submit response did not include a run id, "
+            "so completion cannot be awaited; use wait=False to inspect the response."
+        )
+    return result
+
+
+# Short public alias; ``submit_and_wait_prepared_body`` is the definition.
+submit_and_wait = submit_and_wait_prepared_body
 
 
 def parse_key_value_entries(entries: list[str] | None) -> dict[str, str]:
