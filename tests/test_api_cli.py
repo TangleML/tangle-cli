@@ -1681,6 +1681,37 @@ def test_refresh_http_error_does_not_echo_response_body(monkeypatch):
     assert "secret-token" not in message
 
 
+def test_refresh_connection_error_is_clean_and_actionable(monkeypatch):
+    def fake_get(url, **kwargs):
+        raise httpx.ConnectError("connection refused", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(api_cli.httpx, "get", fake_get)
+    app = api_cli.build_app(SCHEMA)
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["refresh", "--base-url", "http://api.test"])
+
+    message = str(exc_info.value)
+    assert "\n" not in message
+    assert message.startswith("Failed to fetch http://api.test/openapi.json:")
+    assert "connection failed: connection refused" in message
+
+
+def test_refresh_error_redacts_base_url_credentials(monkeypatch):
+    def fake_get(url, **kwargs):
+        raise httpx.ConnectError("connection refused", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(api_cli.httpx, "get", fake_get)
+    app = api_cli.build_app(SCHEMA)
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["refresh", "--base-url", "http://alice:hunter2@api.test"])
+
+    message = str(exc_info.value)
+    assert "hunter2" not in message
+    assert "<redacted>@api.test" in message
+
+
 def test_nested_refs_are_resolved_for_simple_array_body_fields(monkeypatch):
     schema = {
         "openapi": "3.1.0",
@@ -1725,9 +1756,22 @@ def test_nested_refs_are_resolved_for_simple_array_body_fields(monkeypatch):
     assert json.loads(requests[-1]["content"].decode()) == {"names": ["alice"]}
 
 
-def test_http_error_prints_body_and_exits_with_status(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    ("status_code", "reason", "body", "expected_detail"),
+    [
+        (401, "Unauthorized", "not authorized", "not authorized"),
+        # JSON bodies are re-serialized by the structured redaction pass, so the
+        # detail is asserted on the normalized field rather than the raw bytes.
+        (404, "Not Found", '{"detail": "missing"}', '"detail": "missing"'),
+        (500, "Internal Server Error", '{"detail": "boom"}', '"detail": "boom"'),
+        (512, "", "unused status multiple of 256", "unused status multiple of 256"),
+    ],
+)
+def test_dynamic_operation_http_error_is_clean_one_line_nonzero(
+    monkeypatch, capsys, status_code, reason, body, expected_detail
+):
     def fake_request(method, url, **kwargs):
-        return text_response(method, url, "not authorized", status_code=401)
+        return text_response(method, url, body, status_code=status_code)
 
     monkeypatch.setattr(api_cli.httpx, "request", fake_request)
     app = api_cli.build_app(SCHEMA)
@@ -1735,11 +1779,84 @@ def test_http_error_prints_body_and_exits_with_status(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc_info:
         app(["pipeline-runs", "list", "--base-url", "http://api.test"])
 
-    assert exc_info.value.code == 401
-    assert "not authorized" in capsys.readouterr().err
+    # Non-zero exit that is never the raw HTTP status: exit codes are 8-bit, so a
+    # status would truncate (404 -> 148) and multiples of 256 would report success.
+    code = exc_info.value.code
+    assert code not in (0, None, status_code)
+    message = str(code)
+    assert "\n" not in message
+    assert f"HTTP {status_code}" in message
+    if reason:
+        assert reason in message
+    assert "GET http://api.test/api/pipeline_runs/" in message
+    assert expected_detail in message
+    assert capsys.readouterr().err == ""
 
 
-def test_network_error_message_includes_url(monkeypatch):
+def test_dynamic_operation_http_error_bounds_huge_multiline_body(monkeypatch):
+    body = "detail:\n\n" + "\t".join("x" * 200 for _ in range(50))
+
+    def fake_request(method, url, **kwargs):
+        return text_response(method, url, body, status_code=500)
+
+    monkeypatch.setattr(api_cli.httpx, "request", fake_request)
+    app = api_cli.build_app(SCHEMA)
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["pipeline-runs", "list", "--base-url", "http://api.test"])
+
+    message = str(exc_info.value.code)
+    assert "\n" not in message and "\t" not in message
+    assert message.endswith("…")
+    assert len(message) < 700
+
+
+def test_dynamic_operation_http_error_redacts_reflected_body_secrets(monkeypatch, capsys):
+    body = '{"detail": "invalid token", "credential": "BODYSECRET", "api_key": "AK123"}'
+
+    def fake_request(method, url, **kwargs):
+        return text_response(method, url, body, status_code=401)
+
+    monkeypatch.setattr(api_cli.httpx, "request", fake_request)
+    app = api_cli.build_app(SCHEMA)
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["pipeline-runs", "list", "--base-url", "http://api.test"])
+
+    message = str(exc_info.value.code)
+    assert "BODYSECRET" not in message
+    assert "AK123" not in message
+    assert "<redacted>" in message
+    assert "invalid token" in message
+    assert capsys.readouterr().err == ""
+
+
+def test_dynamic_operation_http_error_redacts_url_credentials(monkeypatch):
+    def fake_request(method, url, **kwargs):
+        return text_response(method, url, "denied", status_code=403)
+
+    monkeypatch.setattr(api_cli.httpx, "request", fake_request)
+    app = api_cli.build_app(SCHEMA)
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(
+            [
+                "pipeline-runs",
+                "list",
+                "--filter",
+                "active",
+                "--base-url",
+                "http://alice:hunter2@api.test",
+            ]
+        )
+
+    message = str(exc_info.value.code)
+    assert "hunter2" not in message
+    assert "alice" not in message
+    assert "<redacted>@api.test" in message
+
+
+def test_network_error_message_includes_url_and_redacts_credentials(monkeypatch):
     def fake_request(method, url, **kwargs):
         request = httpx.Request(method, url)
         raise httpx.ConnectError("connection refused", request=request)
@@ -1748,11 +1865,51 @@ def test_network_error_message_includes_url(monkeypatch):
     app = api_cli.build_app(SCHEMA)
 
     with pytest.raises(SystemExit) as exc_info:
+        app(["pipeline-runs", "list", "--base-url", "http://alice:pw@api.test"])
+
+    message = str(exc_info.value)
+    assert "\n" not in message
+    assert message.startswith("Failed to reach GET ")
+    assert "/api/pipeline_runs/" in message
+    assert "connection refused" in message
+    assert "pw" not in message
+
+
+def test_dynamic_operation_connection_refused_real_socket(monkeypatch):
+    # A refused connection against a closed local port exercises the real httpx
+    # transport (no monkeypatched request) and must still exit cleanly.
+    import socket
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    refused_port = probe.getsockname()[1]
+    probe.close()
+
+    app = api_cli.build_app(SCHEMA)
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["pipeline-runs", "list", "--base-url", f"http://127.0.0.1:{refused_port}"])
+
+    message = str(exc_info.value)
+    assert exc_info.value.code not in (0, None)
+    assert "\n" not in message
+    assert message.startswith("Failed to reach GET ")
+    assert f"127.0.0.1:{refused_port}" in message
+
+
+def test_dynamic_operation_timeout_is_clean(monkeypatch):
+    def fake_request(method, url, **kwargs):
+        raise httpx.ConnectTimeout("timed out", request=httpx.Request(method, url))
+
+    monkeypatch.setattr(api_cli.httpx, "request", fake_request)
+    app = api_cli.build_app(SCHEMA)
+
+    with pytest.raises(SystemExit) as exc_info:
         app(["pipeline-runs", "list", "--base-url", "http://api.test"])
 
     message = str(exc_info.value)
-    assert "http://api.test/api/pipeline_runs/" in message
-    assert "connection refused" in message
+    assert "\n" not in message
+    assert "connection timed out" in message
 
 
 def test_custom_headers_apply_to_schema_fetch_and_generated_requests(monkeypatch):
