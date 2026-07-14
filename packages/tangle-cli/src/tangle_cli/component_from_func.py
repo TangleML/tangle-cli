@@ -181,11 +181,18 @@ class FunctionSpec:
 
 
 def _ensure_cloud_pipelines_shim() -> None:
-    """Register import-time shims used while introspecting authoring files.
+    """Register the import-time ``cloud_pipelines`` shim used while introspecting
+    authoring files.
 
-    This allows loading Python files that use `from cloud_pipelines import components`
-    and/or TD authoring decorators without requiring those authoring packages.
-    The TD authoring constructs are stripped from generated runtime code later.
+    This lets us load Python files that use ``from cloud_pipelines import
+    components`` without requiring that authoring package to be installed; the
+    authoring constructs are stripped from the generated runtime code later.
+
+    OSS deliberately does NOT fabricate a shim for any *downstream* authoring
+    surface (e.g. a module a downstream package exposes to re-export the
+    authoring objects under its own import path). A downstream package that
+    wants its own authoring path recognised both makes that module importable
+    itself and registers it via :func:`register_authoring_import_module`.
     """
     if "cloud_pipelines" not in sys.modules:
         components_mod = types.ModuleType("cloud_pipelines.components")
@@ -197,41 +204,6 @@ def _ensure_cloud_pipelines_shim() -> None:
 
         sys.modules["cloud_pipelines"] = cloud_pipelines_mod
         sys.modules["cloud_pipelines.components"] = components_mod
-
-    _ensure_tangle_deploy_authoring_shim()
-
-
-def _identity_decorator(*args, **kwargs):
-    def decorate(func):
-        return func
-
-    return decorate
-
-
-class _AuthoringGeneric:
-    def __class_getitem__(cls, item):
-        return cls
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-
-def _ensure_tangle_deploy_authoring_shim() -> None:
-    """Register a tiny shim for TD pipeline authoring imports if absent."""
-    if "tangle_deploy.python_pipeline" in sys.modules:
-        return
-
-    tangle_deploy_mod = sys.modules.get("tangle_deploy") or types.ModuleType("tangle_deploy")
-    python_pipeline_mod = types.ModuleType("tangle_deploy.python_pipeline")
-    for name in ("task", "pipeline", "subpipeline", "registered"):
-        setattr(python_pipeline_mod, name, _identity_decorator)
-    for name in ("In", "Out", "Outputs", "TaskEnv"):
-        setattr(python_pipeline_mod, name, _AuthoringGeneric)
-    setattr(python_pipeline_mod, "ref", lambda *args, **kwargs: None)
-
-    setattr(tangle_deploy_mod, "python_pipeline", python_pipeline_mod)
-    sys.modules.setdefault("tangle_deploy", tangle_deploy_mod)
-    sys.modules["tangle_deploy.python_pipeline"] = python_pipeline_mod
 
 
 def load_python_module(file_path: Path, extra_sys_path: list[Path] | None = None) -> Any:
@@ -757,31 +729,66 @@ def _is_name_main_test(node: ast.expr) -> bool:
 # too, exactly like @task.
 _AUTHORING_DECORATOR_NAMES = frozenset({"task", "pipeline", "subpipeline", "registered"})
 
-# The python-pipeline authoring module. ONLY imports of this module (and its
-# submodules) are authoring-only and stripped from the baked source. We
-# deliberately do NOT strip other ``tangle_deploy.*`` packages (e.g.
-# ``tangle_deploy.utils``): those may be legitimate runtime helpers used inside a
-# ``@task`` body, and dropping them would raise ``NameError`` in the operation
-# container.
-_AUTHORING_IMPORT_MODULE = "tangle_deploy.python_pipeline"
+# The python-pipeline authoring modules. ONLY imports of these modules (and
+# their submodules) are authoring-only and stripped from the baked source. We
+# deliberately do NOT strip other packages that merely share a top-level name
+# (e.g. a downstream ``*.utils``): those may be legitimate runtime helpers used
+# inside a ``@task`` body, and dropping them would raise ``NameError`` in the
+# operation container.
+#
+# OSS recognises exactly one authoring surface out of the box: the canonical
+# ``tangle_cli.python_pipeline`` path. A downstream package that re-exports the
+# authoring objects under its own module path — so authors may write ``from
+# <downstream>.python_pipeline import task`` — registers that path via
+# :func:`register_authoring_import_module`; codegen then strips either import
+# the same way. OSS never hardcodes a downstream module name (the dependency
+# points inward), mirroring the resolver/reader registries in the hydrator.
+_AUTHORING_IMPORT_MODULES: list[str] = ["tangle_cli.python_pipeline"]
+
+
+def register_authoring_import_module(module: str) -> None:
+    """Register *module* as an additional python-pipeline authoring surface.
+
+    A downstream package that re-exports the ``tangle_cli.python_pipeline``
+    authoring objects under its own module path calls this (typically at import
+    time) so codegen strips ``from <module> import ...`` / ``import <module>``
+    lines — and their submodules — from baked runtime source exactly like the
+    canonical OSS surface. Idempotent: registering an already-known module is a
+    no-op, so repeated import-time registration is safe.
+    """
+    if module not in _AUTHORING_IMPORT_MODULES:
+        _AUTHORING_IMPORT_MODULES.append(module)
+
+
+def authoring_import_modules() -> tuple[str, ...]:
+    """Return the python-pipeline authoring modules recognised by codegen."""
+    return tuple(_AUTHORING_IMPORT_MODULES)
 
 # The authoring-only ``TaskEnv`` class name. A module-level ``X = TaskEnv(...)``
 # (or ``X = <alias>.TaskEnv(...)``) declaration is authoring-only by contract and
 # is stripped from the baked source by ``_strip_authoring_constructs``.
 # Matched by trailing NAME only (like the authoring decorators), because in
-# python-pipeline authoring files ``TaskEnv`` always
-# resolves to ``tangle_deploy.python_pipeline.TaskEnv``.
+# python-pipeline authoring files ``TaskEnv`` always resolves to the
+# python-pipeline authoring surface's ``TaskEnv``.
 _AUTHORING_ENV_CLASS_NAME = "TaskEnv"
 
 
 class AuthoringStripError(ValueError):
-    """Raised when env-only authoring code cannot be safely stripped.
+    """Raised when authoring code cannot be safely stripped from baked source.
 
-    The TaskEnv runtime-strip hardening (``_strip_authoring_constructs``)
-    raises this when a ``@task(env=...)`` env binding is entangled with
-    runtime code — e.g. a mixed ``from _envs import UPI, helper`` import whose
-    ``helper`` is used at runtime, or a collected env name referenced by the
-    kept task body. Failing fast here is intentional: silently baking a broken
+    ``_strip_authoring_constructs`` raises this rather than bake a broken
+    program when an authoring construct is entangled with runtime code and
+    cannot be removed by line range without corrupting the kept program:
+
+    - a comma-separated ``import tangle_cli.python_pipeline as tp, os`` that
+      mixes the authoring surface with a runtime module on one statement (the
+      authoring alias must be stripped, but line-deletion would take ``os`` with
+      it); or
+    - a ``@task(env=...)`` env binding entangled with runtime code — e.g. a
+      mixed ``from _envs import UPI, helper`` import whose ``helper`` is used at
+      runtime, or a collected env name referenced by the kept task body.
+
+    Failing fast here is intentional: silently baking a broken ``import os`` /
     ``from _envs import UPI`` / ``UPI = TaskEnv(...)`` would only surface as a
     ``NameError`` / ``ImportError`` at container start. The message tells the
     author how to split the import or keep TaskEnv values authoring-only.
@@ -793,7 +800,7 @@ def _decorator_called_name(node: ast.expr) -> str | None:
 
     Handles ``@name`` / ``@name(...)`` and ``@mod.name`` / ``@mod.name(...)``
     forms, returning the trailing attribute/name (e.g. ``task`` for both
-    ``@task(...)`` and ``@tangle_deploy.python_pipeline.task(...)``). Returns
+    ``@task(...)`` and ``@tangle_cli.python_pipeline.task(...)``). Returns
     ``None`` for shapes we do not recognise so callers leave them untouched.
 
     Limitation (v1, intentional): matching is by trailing NAME only, not by
@@ -812,34 +819,56 @@ def _decorator_called_name(node: ast.expr) -> str | None:
     return None
 
 
+def _is_authoring_module(name: str) -> bool:
+    """Return True if *name* is an authoring module or a submodule of one."""
+    return any(name == mod or name.startswith(mod + ".") for mod in _AUTHORING_IMPORT_MODULES)
+
+
 def _is_authoring_import(node: ast.stmt) -> bool:
     """Return True if *node* imports the python-pipeline authoring surface.
 
-    Matches ONLY the ``tangle_deploy.python_pipeline`` module (and its
-    submodules):
+    Matches ONLY the registered authoring modules (and their submodules) — the
+    canonical ``tangle_cli.python_pipeline`` plus any registered via
+    :func:`register_authoring_import_module`:
 
-    - ``from tangle_deploy.python_pipeline import ...`` (including the aliased
-      ``from tangle_deploy.python_pipeline import ref as operation_by_ref`` form
-      and submodules like ``from tangle_deploy.python_pipeline.x import y``);
-    - ``import tangle_deploy.python_pipeline`` / ``import
-      tangle_deploy.python_pipeline as tp``.
+    - ``from tangle_cli.python_pipeline import ...`` (including the aliased
+      ``from tangle_cli.python_pipeline import ref as operation_by_ref`` form
+      and submodules like ``from tangle_cli.python_pipeline.x import y``);
+    - ``import tangle_cli.python_pipeline`` / ``import
+      tangle_cli.python_pipeline as tp``;
+    - the equivalents for any registered downstream authoring path.
 
-    It does NOT match other ``tangle_deploy.*`` packages (e.g.
-    ``from tangle_deploy.utils import X``) — those can be genuine runtime helpers
+    It does NOT match other packages that merely share a top-level name (e.g. a
+    downstream ``*.utils`` module) — those can be genuine runtime helpers
     referenced inside a ``@task`` body and must survive into the baked program.
     Relative imports (``from . import x``) are never authoring imports.
     """
     if isinstance(node, ast.ImportFrom):
         if node.level:  # relative import — not the authoring package
             return False
-        module = node.module or ""
-        return module == _AUTHORING_IMPORT_MODULE or module.startswith(_AUTHORING_IMPORT_MODULE + ".")
+        return _is_authoring_module(node.module or "")
     if isinstance(node, ast.Import):
-        return any(
-            alias.name == _AUTHORING_IMPORT_MODULE or alias.name.startswith(_AUTHORING_IMPORT_MODULE + ".")
-            for alias in node.names
-        )
+        return any(_is_authoring_module(alias.name) for alias in node.names)
     return False
+
+
+def _mixed_authoring_import_aliases(node: ast.stmt) -> tuple[list[str], list[str]] | None:
+    """Classify a comma-separated ``import a, b`` that mixes import surfaces.
+
+    Only ``ast.Import`` (``import x, y``) can bind several modules in one
+    statement; a ``from X import ...`` binds a single module, so it is
+    all-or-nothing and never "mixed". Returns ``(authoring, runtime)`` alias
+    names when the statement mixes at least one authoring module with at least
+    one non-authoring one, else ``None`` (a pure-authoring or pure-runtime
+    ``import``, which the caller drops whole or leaves untouched respectively).
+    """
+    if not isinstance(node, ast.Import):
+        return None
+    authoring = [alias.name for alias in node.names if _is_authoring_module(alias.name)]
+    runtime = [alias.name for alias in node.names if not _is_authoring_module(alias.name)]
+    if authoring and runtime:
+        return authoring, runtime
+    return None
 
 
 def _attr_root_name(node: ast.expr) -> str | None:
@@ -971,7 +1000,7 @@ def _strip_authoring_constructs(source_code: str) -> str:
     - re-running an ``@task`` / ``@pipeline`` / ``@subpipeline`` decorator
       replaces the function with a ``CallableRef`` recorder, which raises at
       call time because there is no active ``@pipeline`` trace context;
-    - on a thin image the ``from tangle_deploy.python_pipeline import ...``
+    - on a thin image the ``from tangle_cli.python_pipeline import ...``
       import itself can fail with ``ImportError``.
 
     This removes them via surgical AST line-range deletion (mirroring
@@ -986,9 +1015,12 @@ def _strip_authoring_constructs(source_code: str) -> str:
 
     Scope of the strip (intentional v1 boundaries):
 
-    - imports: only ``tangle_deploy.python_pipeline`` (and submodules) are
-      dropped — see ``_is_authoring_import``. Other ``tangle_deploy.*`` runtime
-      helpers are preserved.
+    - imports: only the registered authoring modules (and submodules) are
+      dropped — see ``_is_authoring_import``. Other runtime helpers that merely
+      share a top-level name are preserved. A comma-separated ``import a, b``
+      that mixes the authoring surface with a runtime module raises
+      :class:`AuthoringStripError` (it cannot be partially line-deleted) — see
+      ``_mixed_authoring_import_aliases``.
     - decorators: matched by trailing NAME (``task`` / ``pipeline`` /
       ``subpipeline``), not by import resolution — see ``_decorator_called_name``
       for the limitation. Unrelated decorators (``@functools.cache``,
@@ -1037,6 +1069,27 @@ def _strip_authoring_constructs(source_code: str) -> str:
     for node in ast.walk(tree):
         # Authoring imports — delete the whole (possibly multi-line) statement.
         if isinstance(node, (ast.Import, ast.ImportFrom)) and _is_authoring_import(node):
+            # A comma-separated ``import authoring_surface, os`` mixes the
+            # authoring surface with a runtime module on one statement. We drop
+            # authoring imports by line range, which cannot delete just part of
+            # a statement — dropping the whole line would take the runtime
+            # ``import os`` with it (silent NameError in the baked program),
+            # while keeping it would leave the authoring import un-stripped. Fail
+            # fast with split guidance rather than bake a broken program.
+            mixed = _mixed_authoring_import_aliases(node)
+            if mixed is not None:
+                authoring_names, runtime_names = mixed
+                raise AuthoringStripError(
+                    "import statement mixes the python-pipeline authoring "
+                    f"surface ({', '.join(authoring_names)}) with runtime "
+                    f"import(s) ({', '.join(runtime_names)}) on one line. The "
+                    "authoring import is stripped from the baked runtime "
+                    "program, but a comma-separated `import a, b` cannot be "
+                    "partially line-deleted without corrupting the kept import. "
+                    "Split the authoring import onto its own line (e.g. `import "
+                    "tangle_cli.python_pipeline as tp` separate from `import "
+                    "os`)."
+                )
             start = node.lineno
             end = node.end_lineno or node.lineno
             removed.update(range(start, end + 1))
@@ -1686,7 +1739,8 @@ def generate_component_yaml(
         path_annotation_mode: ``"oss"`` always records source/YAML paths relative
             to their common ancestor. ``"td_legacy"`` only uses that relative
             common-root behavior inside a git checkout; outside git it records
-            ``file_path.name`` / ``output_path.name`` like legacy tangle-deploy.
+            ``file_path.name`` / ``output_path.name`` to preserve the legacy
+            downstream driver's historical basename-only snapshots.
 
     Returns:
         True on success, False on failure.
@@ -1764,8 +1818,9 @@ def generate_component_yaml(
         # Use the common ancestor of source and output so both paths are clean
         # forward references (no ".."). This lets later local maintenance
         # commands find the source even when YAML is generated into a separate
-        # output directory. TD legacy compatibility keeps basename-only paths
-        # outside a git checkout to preserve historical snapshots.
+        # output directory. Legacy (``td_legacy``) compatibility keeps
+        # basename-only paths outside a git checkout to preserve historical
+        # snapshots.
         resolved_source = file_path.resolve()
         resolved_output = output_path.resolve()
         common_dir = Path(os.path.commonpath([resolved_source, resolved_output]))

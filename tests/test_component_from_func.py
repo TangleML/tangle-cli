@@ -1,5 +1,6 @@
 """Tests for the native component YAML generator (component_from_func)."""
 
+import ast
 import inspect
 import json
 import subprocess
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import tangle_cli.component_from_func as cff
 from tangle_cli.component_from_func import (
     AuthoringStripError,
     FunctionSpec,
@@ -20,6 +22,8 @@ from tangle_cli.component_from_func import (
     _build_args_section,
     _build_pip_install_command,
     _build_python_source,
+    _is_authoring_import,
+    _is_authoring_module,
     _python_name_to_component_name,
     _resolve_annotation,
     _resolve_return_type,
@@ -27,17 +31,24 @@ from tangle_cli.component_from_func import (
     _strip_authoring_constructs,
     _strip_main_guard,
     _strip_type_hints,
+    authoring_import_modules,
     build_component_dict,
     extract_interface,
     generate_component_yaml,
     get_function_from_module,
     load_python_module,
     read_dependencies,
+    register_authoring_import_module,
 )
 from tangle_cli.module_bundler import ModuleBundler
 
 # Real on-disk python-pipeline fixtures (``task_env_strip_*`` for Phase 3).
 _PIPELINE_FIXTURES = Path(__file__).parent / "fixtures" / "python_pipeline"
+
+# The downstream authoring surface these strip/codegen tests rely on (a
+# registered ``tangle_deploy.python_pipeline`` path + a stand-in module in
+# ``sys.modules``) is provided suite-wide by the autouse
+# ``downstream_authoring_surface`` fixture in ``tests/conftest.py``.
 
 # ============================================================================
 # Type resolution tests
@@ -1482,6 +1493,25 @@ class TestStripAuthoringConstructs:
         assert "@task" not in result
         assert "def hello(out):" in result
 
+    def test_fail_fast_mixed_plain_import_downstream_surface(self):
+        # The mixed-import fail-fast is surface-agnostic: a registered
+        # downstream authoring path (here ``tangle_deploy.python_pipeline`` via
+        # the autouse fixture) mixed with a runtime module fails fast exactly
+        # like the canonical OSS path does.
+        source = textwrap.dedent("""\
+            import tangle_deploy.python_pipeline as tp, os
+
+            @tp.task(image="python:3.12")
+            def hello(out):
+                return os.path.join(out, "x")
+        """)
+        with pytest.raises(AuthoringStripError) as excinfo:
+            _strip_authoring_constructs(source)
+        msg = str(excinfo.value)
+        assert "tangle_deploy.python_pipeline" in msg
+        assert "os" in msg
+        assert "Split the authoring import" in msg
+
     def test_unrelated_decorator_preserved_alongside_task(self):
         # FIX 3(c): @task is stripped but a stacked unrelated decorator stays.
         source = textwrap.dedent("""\
@@ -1545,6 +1575,254 @@ class TestStripAuthoringConstructs:
                 return os.path.join(x, "y")
         """)
         assert _strip_authoring_constructs(source) == source
+
+
+# ============================================================================
+# _strip_authoring_constructs — tangle_cli.python_pipeline surface
+# ============================================================================
+
+
+class TestStripAuthoringConstructsTangleCli:
+    """The strip must recognise the OSS ``tangle_cli.python_pipeline`` path.
+
+    ``tangle_deploy.python_pipeline`` re-exports the OSS objects, so an
+    author may import from EITHER module. Every case here mirrors a
+    ``tangle_deploy`` case above but through the OSS import path, so a
+    component baked on a thin image (without the authoring DSL) still
+    imports cleanly.
+    """
+
+    def test_strips_from_import_and_simple_decorator(self):
+        source = textwrap.dedent("""\
+            from tangle_cli.python_pipeline import task
+
+            @task(image="python:3.12")
+            def hello(out, who="world"):
+                with open(out, "w") as f:
+                    f.write(who)
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "from tangle_cli.python_pipeline" not in result
+        assert "@task" not in result
+        assert 'def hello(out, who="world"):' in result
+        assert "f.write(who)" in result
+
+    def test_strips_dotted_decorator_form(self):
+        source = textwrap.dedent("""\
+            import tangle_cli.python_pipeline as tp
+
+            @tp.task(image="python:3.12")
+            def hello(out):
+                pass
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "import tangle_cli.python_pipeline" not in result
+        assert "@tp.task" not in result
+        assert "def hello(out):" in result
+
+    def test_strips_aliased_import(self):
+        source = textwrap.dedent("""\
+            from tangle_cli.python_pipeline import ref as operation_by_ref
+
+            x = 1
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "operation_by_ref" not in result
+        assert "from tangle_cli.python_pipeline" not in result
+        assert "x = 1" in result
+
+    def test_strips_plain_import_of_python_pipeline(self):
+        source = textwrap.dedent("""\
+            import tangle_cli.python_pipeline
+
+            x = 1
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "import tangle_cli.python_pipeline" not in result
+        assert "x = 1" in result
+
+    def test_preserves_non_authoring_tangle_cli_import(self):
+        # Only ``tangle_cli.python_pipeline`` is authoring. A genuine runtime
+        # helper from another ``tangle_cli.*`` package must survive.
+        source = textwrap.dedent("""\
+            from tangle_cli.python_pipeline import task
+            from tangle_cli.utils import something
+
+            @task(image="python:3.12")
+            def hello(out):
+                return something(out)
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "from tangle_cli.python_pipeline import task" not in result
+        assert "@task" not in result
+        assert "from tangle_cli.utils import something" in result
+        assert "return something(out)" in result
+
+    def test_multi_name_authoring_import_line_dropped(self):
+        source = textwrap.dedent("""\
+            from tangle_cli.python_pipeline import In, Out, task
+
+            @task(image="python:3.12")
+            def hello(out):
+                return out
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "In" not in result
+        assert "Out" not in result
+        assert "from tangle_cli.python_pipeline" not in result
+        assert "@task" not in result
+        assert "def hello(out):" in result
+
+    def test_strips_submodule_import(self):
+        # ``from tangle_cli.python_pipeline.x import y`` is a submodule of the
+        # authoring package and must also be dropped.
+        source = textwrap.dedent("""\
+            from tangle_cli.python_pipeline.types import In, Out
+
+            x = 1
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "from tangle_cli.python_pipeline.types" not in result
+        assert "x = 1" in result
+
+    def test_fail_fast_mixed_plain_import_with_runtime_module(self):
+        # ``import tangle_cli.python_pipeline as tp, os`` mixes the authoring
+        # surface with a runtime module on ONE comma-separated statement. The
+        # authoring import must be stripped, but line-deletion cannot drop just
+        # part of the statement — dropping the whole line would take ``os`` with
+        # it (silent NameError in the baked program). Fail fast with split
+        # guidance instead.
+        source = textwrap.dedent("""\
+            import tangle_cli.python_pipeline as tp, os
+
+            @tp.task(image="python:3.12")
+            def hello(out):
+                return os.path.join(out, "x")
+        """)
+        with pytest.raises(AuthoringStripError) as excinfo:
+            _strip_authoring_constructs(source)
+        msg = str(excinfo.value)
+        assert "tangle_cli.python_pipeline" in msg
+        assert "os" in msg
+        assert "Split the authoring import" in msg
+
+    def test_mixed_plain_import_split_across_lines_is_dropped_cleanly(self):
+        # The remedy the fail-fast recommends: with the authoring import on its
+        # own line, the strip drops it whole and the runtime ``import os``
+        # survives — no fail-fast.
+        source = textwrap.dedent("""\
+            import os
+            import tangle_cli.python_pipeline as tp
+
+            @tp.task(image="python:3.12")
+            def hello(out):
+                return os.path.join(out, "x")
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "import tangle_cli.python_pipeline" not in result
+        assert "import os" in result
+        assert "@tp.task" not in result
+        assert 'return os.path.join(out, "x")' in result
+
+    def test_pure_authoring_multi_module_import_dropped_whole(self):
+        # A comma-separated ``import`` where EVERY alias is an authoring module
+        # is not "mixed" — there is no runtime alias to preserve — so it is
+        # still dropped whole rather than failing fast.
+        source = textwrap.dedent("""\
+            import tangle_cli.python_pipeline, tangle_cli.python_pipeline.types
+
+            x = 1
+        """)
+        result = _strip_authoring_constructs(source)
+        assert "tangle_cli.python_pipeline" not in result
+        assert "x = 1" in result
+
+
+# ============================================================================
+# _is_authoring_module / _is_authoring_import predicates
+# ============================================================================
+
+
+class TestAuthoringImportPredicate:
+    """Unit tests for the authoring-module recognition helpers."""
+
+    def test_oss_seeds_only_the_canonical_surface(self):
+        # Under a pristine registry (no downstream registered), OSS recognises
+        # ONLY its own authoring path — it never hardcodes a downstream module.
+        # The autouse fixture registers the downstream path, so reset to the
+        # OSS seed for this assertion, then restore.
+        before = list(cff._AUTHORING_IMPORT_MODULES)
+        cff._AUTHORING_IMPORT_MODULES[:] = ["tangle_cli.python_pipeline"]
+        try:
+            assert authoring_import_modules() == ("tangle_cli.python_pipeline",)
+        finally:
+            cff._AUTHORING_IMPORT_MODULES[:] = before
+
+    def test_register_authoring_import_module_adds_downstream_surface(self):
+        register_authoring_import_module("acme_pipelines.python_pipeline")
+        assert "acme_pipelines.python_pipeline" in authoring_import_modules()
+        # A registered path is treated exactly like the canonical one.
+        assert _is_authoring_module("acme_pipelines.python_pipeline") is True
+        assert _is_authoring_module("acme_pipelines.python_pipeline.types") is True
+
+    def test_register_authoring_import_module_is_idempotent(self):
+        register_authoring_import_module("acme_pipelines.python_pipeline")
+        register_authoring_import_module("acme_pipelines.python_pipeline")
+        assert authoring_import_modules().count("acme_pipelines.python_pipeline") == 1
+
+    def test_authoring_import_modules_returns_immutable_snapshot(self):
+        # Callers get a tuple copy; mutating the return value must not leak into
+        # the registry.
+        snapshot = authoring_import_modules()
+        assert isinstance(snapshot, tuple)
+        assert authoring_import_modules() == snapshot
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "tangle_deploy.python_pipeline",
+            "tangle_cli.python_pipeline",
+            "tangle_deploy.python_pipeline.types",
+            "tangle_cli.python_pipeline.task",
+        ],
+    )
+    def test_is_authoring_module_true(self, name):
+        assert _is_authoring_module(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "tangle_cli.utils",
+            "tangle_deploy.utils",
+            "tangle_cli",
+            "tangle_deploy",
+            "tangle_cli.python_pipelinex",  # not a submodule boundary
+            "os",
+            "",
+        ],
+    )
+    def test_is_authoring_module_false(self, name):
+        assert _is_authoring_module(name) is False
+
+    def test_is_authoring_import_from_both_paths(self):
+        for mod in ("tangle_deploy.python_pipeline", "tangle_cli.python_pipeline"):
+            node = ast.parse(f"from {mod} import task").body[0]
+            assert _is_authoring_import(node) is True
+
+    def test_is_authoring_import_plain_import_both_paths(self):
+        for mod in ("tangle_deploy.python_pipeline", "tangle_cli.python_pipeline"):
+            node = ast.parse(f"import {mod}").body[0]
+            assert _is_authoring_import(node) is True
+
+    def test_is_authoring_import_rejects_relative_import(self):
+        # A relative ``from . import x`` is never the authoring package.
+        node = ast.parse("from . import sibling").body[0]
+        assert _is_authoring_import(node) is False
+
+    def test_is_authoring_import_rejects_non_authoring(self):
+        for src in ("import os", "from tangle_cli.utils import x", "x = 1"):
+            node = ast.parse(src).body[0]
+            assert _is_authoring_import(node) is False
 
 
 # ============================================================================
