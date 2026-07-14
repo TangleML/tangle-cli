@@ -700,8 +700,8 @@ def test_compile_subpipeline_emits_child_sidecar(tmp_path):
         FIXTURES / "subpipeline_pipeline.py", out, pipeline_name="Parent Pipeline"
     )
 
-    # Exactly one child sidecar, named after the child pipeline (content-hash
-    # suffix), living under the parent's <stem>.subgraphs/ directory.
+    # Exactly one child sidecar, named after the child pipeline (compile-key
+    # hash suffix), living under the parent's <stem>.subgraphs/ directory.
     assert len(result.subgraph_paths) == 1
     child = result.subgraph_paths[0]
     assert child.exists()
@@ -738,6 +738,51 @@ def test_compile_subpipeline_override_config_wins(tmp_path):
     tasks = child["implementation"]["graph"]["tasks"]
     (task,) = tasks.values()
     assert task["arguments"]["message"] == "from-override"
+
+
+# ---------------------------------------------------------------------------
+# propagate_config broadcast. A pipeline with propagate_config=True broadcasts
+# its own config.yaml deep into the subtree by key name; the broadcast must
+# flow PAST config-less intermediate subpipelines to reach descendants that
+# declare the key.
+
+_BROADCAST_ZONE = FIXTURES / "broadcast_zone"
+
+
+def test_compile_propagate_config_broadcasts_through_configless_intermediate(tmp_path):
+    """``propagate_config=True`` broadcasts a config key deep into the subtree,
+    flowing PAST a config-less intermediate (no ``cfg``/``config=``, so no
+    config.yaml on disk) to a config-declaring grandchild, where the root's
+    broadcast value wins over the grandchild's own config.yaml (same key).
+
+    Regression guard: before the broadcast path tolerated a missing
+    intermediate config.yaml, this compile hard-failed with a spurious
+    ``config file not found`` for the config-less ``Broadcast Middle``. The
+    grandchild leaf emits ``cfg.shared_key`` as a task-argument constant, so
+    the broadcast value is observable and can only be the root's — it is
+    neither the ``@task`` default (``from-task-default``) nor the grandchild's
+    own config value (``from-grandchild``)."""
+    out = tmp_path / "compiled.yaml"
+    result = compile_pipeline(
+        _BROADCAST_ZONE / "broadcast_pipeline.py", out, pipeline_name="Broadcast Root"
+    )
+    # Two child sidecars: the config-less Middle and the Grandchild leaf.
+    assert len(result.subgraph_paths) == 2
+    slugs = sorted(p.name.rsplit("-", 1)[0] for p in result.subgraph_paths)
+    assert slugs == ["broadcast-grandchild", "broadcast-middle"]
+    # The grandchild leaf task argument carries the root's broadcast value,
+    # proving the key flowed through the config-less intermediate and won over
+    # the grandchild's own config.yaml.
+    gc_path = next(
+        p for p in result.subgraph_paths if p.name.startswith("broadcast-grandchild-")
+    )
+    gc = yaml.safe_load(gc_path.read_text())
+    (leaf,) = gc["implementation"]["graph"]["tasks"].values()
+    assert leaf["arguments"]["shared_key"] == "from-root-broadcast"
+    # Parent + both child sidecars are structurally valid dehydrated pipelines.
+    validate_dehydrated_data(yaml.safe_load(out.read_text()))
+    for p in result.subgraph_paths:
+        validate_dehydrated_data(yaml.safe_load(p.read_text()))
 
 
 # ---------------------------------------------------------------------------

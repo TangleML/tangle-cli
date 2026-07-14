@@ -566,7 +566,18 @@ def _process_subpipeline_children(
         # when the child's OWN effective overrides are identical.
         ambient_passthrough: dict[str, Any] = {}
         if ctx.broadcast_stack or sub_ref.config_overrides:
-            child_raw = _read_raw_cfg(child_cfg_path)
+            # A config-less child (no ``cfg`` param, no ``config=``) has no
+            # ``config.yaml`` on disk. Under an active broadcast (or an
+            # explicit ``.override_config``) we still consult the child's
+            # declared keys to drive the same-name overlay and the ambient
+            # pass-through — but a MISSING file means the child simply declares
+            # nothing to overlay, so treat it as ``{}`` and let every broadcast
+            # key flow PAST it to descendants. Reading it strictly here would
+            # hard-fail a config-less intermediate purely because an ancestor
+            # broadcasts. A config-DECLARING child whose file is genuinely
+            # missing is still caught, with guidance, later in
+            # ``_load_cfg_and_raw`` (via the child's own ``_compile_pipeline_fn``).
+            child_raw = _read_raw_cfg(child_cfg_path) if child_cfg_path.exists() else {}
             effective = _effective_overrides_for_child(
                 child_raw=child_raw,
                 broadcast_stack=ctx.broadcast_stack,
@@ -1682,9 +1693,9 @@ def _candidate_names(fn: PipelineFn) -> tuple[str, str]:
     """Return ``(function_name, display_name)`` for ``--pipeline`` matching.
 
     ``function_name`` is the decorated function's ``__name__`` (a clean,
-    shell-friendly identifier such as ``options_standardization``);
-    ``display_name`` is the ``@pipeline(name=...)`` value emitted as the
-    YAML ``name:`` (may contain spaces, e.g. ``"Options Standardization"``).
+    shell-friendly identifier such as ``train_model``); ``display_name`` is
+    the ``@pipeline(name=...)`` value emitted as the YAML ``name:`` (may
+    contain spaces, e.g. ``"Train Model"``).
     Selection matches the function name first, then the display name.
     """
     func_name = getattr(fn.fn, "__name__", "") or ""
