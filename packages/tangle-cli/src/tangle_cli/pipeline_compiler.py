@@ -1913,18 +1913,6 @@ def _pipeline_accepts_cfg(pipeline_fn: PipelineFn) -> bool:
     return getattr(annotation, "__origin__", None) is not In
 
 
-def _resolve_cfg_path(pipeline_fn: PipelineFn, module_path: Path) -> Path:
-    """Resolve the cfg path declared by ``@pipeline(config=...)``.
-
-    Relative to the file holding the decorated function. If the
-    decorator omits ``config=``, returns the module's directory /
-    ``config.yaml`` as the default. Thin wrapper over
-    :func:`_resolve_cfg_path_in_dir` for callers that have the module FILE
-    rather than its directory.
-    """
-    return _resolve_cfg_path_in_dir(pipeline_fn, module_path.parent)
-
-
 def _resolve_cfg_path_in_dir(pipeline_fn: PipelineFn, base_dir: Path) -> Path:
     """Resolve ``@pipeline(config=...)`` relative to ``base_dir``.
 

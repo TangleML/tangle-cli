@@ -9,6 +9,7 @@ compiler is migrated on top of it.
 from __future__ import annotations
 
 import importlib
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,18 +101,28 @@ class TestPublicSurface:
 
 class TestNoInternalReferences:
     """The OSS authoring + compile surface must be free of internal
-    ``tangle-deploy`` references, in either the ``tangle_deploy`` (module/import)
-    or the ``tangle-deploy`` (product/command) spelling. The dependency points
+    references — neither the downstream package (``tangle_deploy`` /
+    ``tangle-deploy``) nor the internal products/infra it was carved out of
+    (Oasis, UPI, Comet, ``areas-ml*`` image paths). The dependency points
     inward: a downstream package registers its own authoring path via
-    ``register_authoring_import_module`` — OSS never names it."""
+    ``register_authoring_import_module`` — OSS never names it, and OSS
+    docstrings/examples never name an internal product. A leaked ref here
+    would surface in a user-facing CompileError, as one did before this
+    guard was widened."""
+
+    # Substring terms: unambiguous, safe to match anywhere in the text.
+    _INTERNAL_SUBSTRINGS = ("tangle_deploy", "tangle-deploy", "areas-ml", "areas/ml")
+    # Word-boundary terms: short/common enough that a bare substring match
+    # would false-positive (e.g. "upi" inside "deduping"), so match only as a
+    # standalone, case-insensitive word.
+    _INTERNAL_WORDS = ("oasis", "upi", "comet")
 
     def test_no_tangle_deploy_references_in_source(self):
         # Scan the whole vendored DSL package plus the sibling modules that make
         # up the OSS compile surface: the authoring-import strip driver
         # (``component_from_func.py``) and the ported compiler + its schema
         # validator + the ``pipelines`` facade/CLI. All must stay decoupled from
-        # the downstream package name (a leaked ref here would surface in a
-        # user-facing CompileError, as one did before this guard was widened).
+        # the downstream package name and from internal product names.
         scanned = list(_DSL_DIR.glob("*.py"))
         scanned += [
             _DSL_DIR.parent / name
@@ -123,12 +134,17 @@ class TestNoInternalReferences:
                 "pipelines_cli.py",
             )
         ]
-        offenders = []
+        word_re = re.compile(
+            r"\b(" + "|".join(self._INTERNAL_WORDS) + r")\b", re.IGNORECASE
+        )
+        offenders = {}
         for path in scanned:
             text = path.read_text(encoding="utf-8")
-            if "tangle_deploy" in text or "tangle-deploy" in text:
-                offenders.append(path.name)
-        assert offenders == [], f"tangle-deploy referenced in: {offenders}"
+            hits = [term for term in self._INTERNAL_SUBSTRINGS if term in text]
+            hits += sorted({m.group(0).lower() for m in word_re.finditer(text)})
+            if hits:
+                offenders[path.name] = hits
+        assert offenders == {}, f"internal references found: {offenders}"
 
 
 # ============================================================================
