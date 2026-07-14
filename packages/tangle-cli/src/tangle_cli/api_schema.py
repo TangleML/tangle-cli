@@ -18,7 +18,9 @@ from .api_transport import (
     _normalize_base_url,
     _openapi_url,
     _request_headers,
+    _VERIFY_UNSET,
     default_base_url,
+    httpx_verify,
 )
 
 SUPPORTED_METHODS = {"get", "post", "put", "patch", "delete"}
@@ -122,6 +124,7 @@ def fetch_schema(
     auth_header: str | None = None,
     headers: dict[str, str] | None = None,
     include_env_credentials: bool = True,
+    verify: Any = _VERIFY_UNSET,
 ) -> dict[str, Any]:
     """Fetch ``/openapi.json``, applying bearer and custom auth headers."""
 
@@ -136,6 +139,7 @@ def fetch_schema(
             include_env_credentials=include_env_credentials,
         ),
         timeout=DEFAULT_TIMEOUT_SECONDS,
+        verify=httpx_verify(verify),
     )
     response.raise_for_status()
     payload = response.text
@@ -152,6 +156,7 @@ def refresh_schema(
     auth_header: str | None = None,
     headers: dict[str, str] | None = None,
     include_env_credentials: bool = True,
+    verify: Any = _VERIFY_UNSET,
 ) -> tuple[dict[str, Any], Path]:
     """Fetch and cache the latest schema for a backend."""
 
@@ -163,6 +168,7 @@ def refresh_schema(
         auth_header,
         headers,
         include_env_credentials=include_env_credentials,
+        verify=verify,
     )
     path = write_cached_schema(schema, base_url)
     return schema, path
@@ -175,6 +181,7 @@ def load_or_fetch_schema(
     auth_header: str | None = None,
     headers: dict[str, str] | None = None,
     include_env_credentials: bool = True,
+    verify: Any = _VERIFY_UNSET,
 ) -> dict[str, Any]:
     """Use a cached schema when available, otherwise fetch once and cache it."""
 
@@ -188,6 +195,7 @@ def load_or_fetch_schema(
         auth_header,
         headers,
         include_env_credentials=include_env_credentials,
+        verify=verify,
     )
     return schema
 

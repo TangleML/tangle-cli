@@ -60,6 +60,57 @@ API-backed commands commonly accept these options. Explicit CLI options win over
 | `--config` | YAML/JSON defaults. Many commands accept a single object, a list of objects, or `_defaults` + `configs`. |
 | `--log-type` | SDK progress logs: `console`, `none`, or `file`. Logs go to stderr or a temp log file so structured stdout stays parseable. |
 | `TANGLE_VERBOSE=1` | Redacted HTTP request/response diagnostics only. This is separate from normal progress logging. |
+| `--ca-bundle` | Global CLI flag: path to a PEM CA bundle used as the TLS trust store for every transport. Overrides `TANGLE_API_CA_BUNDLE`. Place before the subcommand. |
+| `--verify-tls` / `--no-verify-tls` | Global CLI flag: enable or disable TLS verification for every transport. Overrides `TANGLE_API_VERIFY_TLS`. `--no-verify-tls` is local-development only. Place before the subcommand. |
+| `TANGLE_API_CA_BUNDLE` | Path to a PEM CA bundle used to verify TLS for every transport. Use this to trust a private or corporate CA without disabling verification. |
+| `TANGLE_API_VERIFY_TLS` | TLS verification toggle. Values `0`, `false`, or `no` (case/space-insensitive) disable verification; any other nonempty value keeps it on. |
+
+### TLS verification
+
+TLS certificate verification is enabled by default for all HTTP transports (schema
+fetches, `tangle api` calls, and the programmatic clients). The effective setting is
+resolved with the following precedence, highest to lowest:
+
+1. An explicit `verify=` argument to the Python clients (a `bool` or a path to a CA bundle).
+2. The global CLI flags `--ca-bundle` / `--verify-tls` / `--no-verify-tls`.
+3. `TANGLE_API_CA_BUNDLE` — verify against the given CA bundle.
+4. `TANGLE_API_VERIFY_TLS` — enable or disable verification.
+5. The secure default: verification enabled against the system trust store.
+
+The global CLI flags are true root options that apply to every command — the static
+`tangle sdk ...` clients, the dynamic `tangle api ...` commands, and `tangle api refresh`.
+Place them **before** the subcommand, for example `tangle --ca-bundle ca.pem api ...` or
+`tangle --no-verify-tls sdk ...`. They are honored even by the dynamic OpenAPI schema
+discovery that runs before command dispatch. A defaulted (absent) flag does not override
+the environment: when a flag is not supplied, the `TANGLE_API_*` variables and the standard
+`REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE` handling still apply. `--ca-bundle` combined with an
+explicit `--no-verify-tls` is contradictory and fails fast before any request; `--ca-bundle`
+with `--verify-tls` is redundant but accepted.
+
+If both env vars are set, `TANGLE_API_CA_BUNDLE` wins and TLS stays verified against the
+bundle. Empty values are treated as unset. A `--ca-bundle` or `TANGLE_API_CA_BUNDLE` that
+does not point to an existing file fails fast with an actionable error before any request is
+made. When no Tangle-specific setting is provided, the standard `REQUESTS_CA_BUNDLE` /
+`CURL_CA_BUNDLE` handling and any caller-supplied `requests.Session.verify` are left
+untouched.
+
+For a private CA, prefer `--ca-bundle` / `TANGLE_API_CA_BUNDLE` over disabling verification:
+it keeps certificates verified against a trusted root. `--no-verify-tls` /
+`TANGLE_API_VERIFY_TLS=0` disables verification entirely and is intended for local
+development only — never use it against production endpoints.
+
+```bash
+# Trust a private CA with the global flag (recommended for internal/self-hosted APIs)
+uv run tangle --ca-bundle /etc/ssl/private-ca.pem \
+  api refresh --base-url https://internal.example
+
+# Or via environment variable
+TANGLE_API_CA_BUNDLE=/etc/ssl/private-ca.pem \
+  uv run tangle api refresh --base-url https://internal.example
+
+# Disable verification (local development only)
+uv run tangle --no-verify-tls api refresh --base-url https://localhost:8443
+```
 
 Examples for protected APIs:
 

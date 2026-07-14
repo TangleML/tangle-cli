@@ -640,10 +640,22 @@ def _argv_dispatches_dynamic_command(argv: list[str]) -> bool:
 
 
 def _api_argv_tail(argv: list[str]) -> list[str] | None:
-    """Return args after the root `api` command, or None for non-API invocations."""
+    """Return args after the root `api` command, or None for non-API invocations.
+
+    Global TLS flags (``--ca-bundle``/``--verify-tls``/``--no-verify-tls``) may
+    precede the subcommand, so they are skipped before locating `api`.
+    """
 
     args = list(argv[1:])
-    for index, arg in enumerate(args):
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--ca-bundle" and index + 1 < len(args):
+            index += 2
+            continue
+        if arg.startswith("--ca-bundle=") or arg in {"--verify-tls", "--no-verify-tls"}:
+            index += 1
+            continue
         if arg == "--":
             if index + 1 < len(args) and args[index + 1] == "api":
                 return args[index + 2 :]
