@@ -40,6 +40,14 @@ _SUBMISSION_ID_ANNOTATION_KEY = "tangle-cli/submission-id"
 _SUBMIT_RECOVERY_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0, 8.0, 16.0)
 _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS = 2
 
+_SUBMIT_ROOT_GRAPH_KEY = "graph"
+_SUBMIT_ROOT_CONTAINER_KEY = "container"
+_SUBMIT_ROOT_VALIDATION_MESSAGE = (
+    "Pipeline root must be a graph (implementation.graph), but the submitted root "
+    "is a bare container (implementation.container). Wrap the container in a graph "
+    "pipeline before submitting, or pass --skip-validation to submit it unchanged."
+)
+
 
 class PipelineRunError(RuntimeError):
     """Raised when a pipeline-run operation cannot complete."""
@@ -900,6 +908,29 @@ class PipelineRunManager(TangleCliHandler):
             hydrate=hydrate,
         )
 
+    @staticmethod
+    def validate_submit_root(submit_spec: Any) -> None:
+        """Reject a bare-container submit root before contacting the API.
+
+        The canonical submit spec is ``root_task.componentRef.spec`` after
+        hydration and sanitization. Current orchestrators require a graph root,
+        so a bare ``implementation.container`` root is rejected here. Only that
+        specific shape is rejected; specs without an ``implementation`` mapping
+        or without a container root are left for the API to validate, and
+        callers can bypass this check entirely.
+        """
+
+        if not isinstance(submit_spec, Mapping):
+            return
+        implementation = submit_spec.get("implementation")
+        if not isinstance(implementation, Mapping):
+            return
+        if _SUBMIT_ROOT_GRAPH_KEY in implementation:
+            return
+        if _SUBMIT_ROOT_CONTAINER_KEY not in implementation:
+            return
+        raise PipelineRunError(_SUBMIT_ROOT_VALIDATION_MESSAGE)
+
     def prepare_submit_payload_from_spec(
         self,
         pipeline_spec: dict[str, Any],
@@ -909,6 +940,7 @@ class PipelineRunManager(TangleCliHandler):
         pipeline_path: str | Path | None = None,
         run_as: str | None = None,
         hydrate: bool = True,
+        validate_root: bool = True,
     ) -> PipelineSubmitPayload:
         """Prepare the generic submit payload from a pipeline spec.
 
@@ -916,6 +948,10 @@ class PipelineRunManager(TangleCliHandler):
         prepare the spec, prepare runtime arguments, expand run-name templates,
         convert/sanitize the payload, then merge downstream/default annotations
         before caller-supplied annotations override them.
+
+        When ``validate_root`` is true, the canonical submit spec is checked for
+        a graph root and a bare-container root is rejected before any API call.
+        Pass ``validate_root=False`` to submit the body unchanged.
         """
 
         prepared_spec = self.prepare_pipeline_spec_for_submit(
@@ -935,6 +971,8 @@ class PipelineRunManager(TangleCliHandler):
             if isinstance(component_ref, Mapping) and isinstance(component_ref.get("spec"), dict)
             else prepared_spec
         )
+        if validate_root:
+            self.validate_submit_root(submit_spec)
         submit_annotations = self.hooks.extra_submit_annotations(
             pipeline_spec=prepared_spec,
             pipeline_path=pipeline_path,
@@ -961,6 +999,7 @@ class PipelineRunManager(TangleCliHandler):
         pipeline_path: str | Path | None = None,
         run_as: str | None = None,
         hydrate: bool = True,
+        validate_root: bool = True,
     ) -> dict[str, Any]:
         """Build a submit body from an already-prepared pipeline spec."""
 
@@ -971,6 +1010,7 @@ class PipelineRunManager(TangleCliHandler):
             pipeline_path=pipeline_path,
             run_as=run_as,
             hydrate=hydrate,
+            validate_root=validate_root,
         ).to_body()
 
     def prepare_submit_payload(
@@ -982,6 +1022,7 @@ class PipelineRunManager(TangleCliHandler):
         hydrate: bool = True,
         run_as: str | None = None,
         resolution_overrides: dict[str, Any] | None = None,
+        validate_root: bool = True,
     ) -> PipelineSubmitPayload:
         pipeline_spec = self.load_pipeline_for_submit(
             pipeline_path,
@@ -995,6 +1036,7 @@ class PipelineRunManager(TangleCliHandler):
             pipeline_path=pipeline_path,
             run_as=run_as,
             hydrate=hydrate,
+            validate_root=validate_root,
         )
 
     def build_submit_body(
@@ -1006,6 +1048,7 @@ class PipelineRunManager(TangleCliHandler):
         hydrate: bool = True,
         run_as: str | None = None,
         resolution_overrides: dict[str, Any] | None = None,
+        validate_root: bool = True,
     ) -> dict[str, Any]:
         return self.prepare_submit_payload(
             pipeline_path,
@@ -1014,6 +1057,7 @@ class PipelineRunManager(TangleCliHandler):
             hydrate=hydrate,
             run_as=run_as,
             resolution_overrides=resolution_overrides,
+            validate_root=validate_root,
         ).to_body()
 
     @staticmethod
@@ -1117,6 +1161,7 @@ class PipelineRunManager(TangleCliHandler):
         run_as: str | None = None,
         hydrate: bool = True,
         attempt: int = 1,
+        validate_root: bool = True,
     ) -> dict[str, Any]:
         payload = self.prepare_submit_payload_from_spec(
             pipeline_spec,
@@ -1125,6 +1170,7 @@ class PipelineRunManager(TangleCliHandler):
             pipeline_path=pipeline_path,
             run_as=run_as,
             hydrate=hydrate,
+            validate_root=validate_root,
         )
         return self.submit_prepared_payload(payload, pipeline_path=pipeline_path, attempt=attempt)
 
@@ -1138,6 +1184,7 @@ class PipelineRunManager(TangleCliHandler):
         run_as: str | None = None,
         resolution_overrides: dict[str, Any] | None = None,
         attempt: int = 1,
+        validate_root: bool = True,
     ) -> dict[str, Any]:
         payload = self.prepare_submit_payload(
             pipeline_path,
@@ -1146,6 +1193,7 @@ class PipelineRunManager(TangleCliHandler):
             hydrate=hydrate,
             run_as=run_as,
             resolution_overrides=resolution_overrides,
+            validate_root=validate_root,
         )
         return self.submit_prepared_payload(payload, pipeline_path=pipeline_path, attempt=attempt)
 
@@ -1909,6 +1957,7 @@ class PipelineRunManager(TangleCliHandler):
         exit_on_first_failure: bool = False,
         metadata: dict[str, Any] | None = None,
         submit_recovery_attempts: int = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
+        validate_root: bool = True,
     ) -> dict[str, Any]:
         """Submit/wait/retry an already hydrated/validated in-memory spec."""
 
@@ -1924,6 +1973,7 @@ class PipelineRunManager(TangleCliHandler):
                 pipeline_path=pipeline_path,
                 run_as=run_as,
                 hydrate=hydrate,
+                validate_root=validate_root,
             ).to_body()
 
         return self._run_body_factory(
@@ -1960,6 +2010,7 @@ class PipelineRunManager(TangleCliHandler):
         exit_on_first_failure: bool = False,
         metadata: dict[str, Any] | None = None,
         submit_recovery_attempts: int = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
+        validate_root: bool = True,
     ) -> dict[str, Any]:
         """Submit (and optionally wait for) a pipeline with lifecycle hooks.
 
@@ -1980,6 +2031,7 @@ class PipelineRunManager(TangleCliHandler):
                 hydrate=hydrate,
                 run_as=run_as,
                 resolution_overrides=resolution_overrides,
+                validate_root=validate_root,
             ).to_body()
 
         return self._run_body_factory(

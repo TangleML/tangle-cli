@@ -8,7 +8,7 @@ from typing import Annotated, Any
 
 from cyclopts import App, Parameter
 
-from .args_container import ArgsContainer
+from .args_container import ArgsContainer, ConfigFileError
 from .cli_helpers import (
     LazyTangleApiClient,
     api_arg_specs,
@@ -40,6 +40,17 @@ from .pipeline_run_search import normalize_query_input, parse_annotation
 app = App(name="pipeline-runs", help="Submit and inspect Tangle pipeline runs.")
 annotations_app = App(name="annotations", help="Work with pipeline-run annotations.")
 app.command(annotations_app)
+
+
+def _require_bool_config(field_name: str):
+    """Config converter that accepts only real booleans."""
+
+    def convert(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        raise ConfigFileError(f"{field_name} must be a boolean, got {type(value).__name__}")
+
+    return convert
 
 
 def _trusted_hydration_config(args: ArgsContainer) -> dict[str, Any]:
@@ -143,6 +154,15 @@ def pipeline_runs_submit(
         bool | None,
         Parameter(help="Hydrate and print the submit payload without creating a run."),
     ] = None,
+    skip_validation: Annotated[
+        bool | None,
+        Parameter(
+            help=(
+                "Skip the submit-time root-shape check and submit the body unchanged. "
+                "Parsing, hydration, and security checks still run."
+            )
+        ),
+    ] = None,
     run_as: Annotated[
         str | None,
         Parameter(help="Downstream extension point; unsupported by the OSS default hooks."),
@@ -188,6 +208,14 @@ def pipeline_runs_submit(
         "annotation": (annotation, None),
         "hydrate": (hydrate, True),
         "dry_run": (dry_run, None),
+        "skip_validation": (
+            "skip_validation",
+            skip_validation,
+            None,
+            False,
+            False,
+            _require_bool_config("skip_validation"),
+        ),
         "run_as": (run_as, None),
         "trusted_source": (trusted_source, None),
         "trusted_hydration_cli": ("trusted_hydration_cli", trusted_hydration, None, False),
@@ -202,6 +230,7 @@ def pipeline_runs_submit(
             "annotations": parse_key_value_entries(args.annotation),
             "hydrate": bool(args.hydrate),
             "run_as": args.run_as,
+            "validate_root": not bool(args.skip_validation),
         }
         if args.dry_run:
             return manager.build_submit_body(args.pipeline_path, **kwargs)

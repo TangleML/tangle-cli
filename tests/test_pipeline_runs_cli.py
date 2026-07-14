@@ -2455,3 +2455,209 @@ def test_pipeline_runner_cleanup_runs_after_prepare_failure(tmp_path: Path) -> N
 
     assert cleaned == [(temp_effective_path, "Pipeline validation failed:\n  - boom")]
     assert not temp_effective_path.exists()
+
+
+def _write_bare_container_pipeline(path: Path) -> Path:
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "Bare Container",
+                "implementation": {"container": {"image": "busybox"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_pipeline_runs_submit_rejects_bare_container_root(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_bare_container_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(["sdk", "pipeline-runs", "submit", str(pipeline_path), "--no-hydrate"])
+
+    message = str(excinfo.value)
+    assert "graph" in message
+    assert "--skip-validation" in message
+    assert fake_client.created == []
+
+
+def test_pipeline_runs_submit_skip_validation_submits_bare_root_unchanged(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_bare_container_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        ["sdk", "pipeline-runs", "submit", str(pipeline_path), "--no-hydrate", "--skip-validation"],
+    )
+
+    assert json.loads(capsys.readouterr().out) == {"id": "run-1", "root_execution_id": "exec-1"}
+    assert len(fake_client.created) == 1
+    submitted_spec = fake_client.created[0]["root_task"]["componentRef"]["spec"]
+    assert submitted_spec["implementation"] == {"container": {"image": "busybox"}}
+
+
+def test_pipeline_runs_submit_graph_root_accepted_by_default(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        ["sdk", "pipeline-runs", "submit", str(pipeline_path), "--no-hydrate", "--arg", "required=value"],
+    )
+
+    assert json.loads(capsys.readouterr().out) == {"id": "run-1", "root_execution_id": "exec-1"}
+    assert fake_client.created[0]["root_task"]["componentRef"]["spec"]["name"] == "Demo Pipeline"
+
+
+def test_pipeline_runs_submit_dry_run_rejects_bare_root(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_bare_container_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(["sdk", "pipeline-runs", "submit", str(pipeline_path), "--no-hydrate", "--dry-run"])
+
+    assert "--skip-validation" in str(excinfo.value)
+    assert fake_client.created == []
+
+
+def test_pipeline_runs_submit_dry_run_skip_validation_prints_bare_root(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_bare_container_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit",
+            str(pipeline_path),
+            "--no-hydrate",
+            "--dry-run",
+            "--skip-validation",
+        ],
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert fake_client.created == []
+    assert payload["root_task"]["componentRef"]["spec"]["implementation"] == {"container": {"image": "busybox"}}
+
+
+def test_pipeline_runs_submit_graph_pipeline_with_container_task_accepted(monkeypatch, tmp_path: Path, capsys):
+    (tmp_path / "component.yaml").write_text(
+        yaml.safe_dump(
+            {"name": "Local Component", "implementation": {"container": {"image": "busybox"}}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "Demo Pipeline",
+                "implementation": {
+                    "graph": {"tasks": {"task": {"componentRef": {"url": "file://./component.yaml"}}}}
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit", str(pipeline_path)])
+
+    assert json.loads(capsys.readouterr().out) == {"id": "run-1", "root_execution_id": "exec-1"}
+    submitted_spec = fake_client.created[0]["root_task"]["componentRef"]["spec"]
+    assert "graph" in submitted_spec["implementation"]
+    task_ref = submitted_spec["implementation"]["graph"]["tasks"]["task"]["componentRef"]
+    assert task_ref["spec"]["implementation"] == {"container": {"image": "busybox"}}
+
+
+def test_pipeline_runs_submit_skip_validation_via_config(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_bare_container_pipeline(tmp_path / "pipeline.yaml")
+    config = tmp_path / "pipeline.config.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {"pipeline_path": str(pipeline_path), "hydrate": False, "skip_validation": True},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit", "--config", str(config)])
+
+    assert len(fake_client.created) == 1
+    submitted_spec = fake_client.created[0]["root_task"]["componentRef"]["spec"]
+    assert submitted_spec["implementation"] == {"container": {"image": "busybox"}}
+
+
+def test_pipeline_runs_submit_rejects_non_bool_skip_validation_config(monkeypatch, tmp_path: Path):
+    pipeline_path = _write_bare_container_pipeline(tmp_path / "pipeline.yaml")
+    config = tmp_path / "pipeline.config.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {"pipeline_path": str(pipeline_path), "hydrate": False, "skip_validation": "yes"},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(["sdk", "pipeline-runs", "submit", "--config", str(config)])
+
+    message = str(excinfo.value)
+    assert "skip_validation" in message
+    assert "boolean" in message
+    assert fake_client.created == []
+
+
+def test_validate_submit_root_rejects_bare_container_and_allows_bypass():
+    manager = PipelineRunManager(client=FakeClient())
+    bare_spec = {"name": "Bare", "implementation": {"container": {"image": "busybox"}}}
+
+    with pytest.raises(PipelineRunError, match="--skip-validation"):
+        manager.build_submit_body_from_spec(bare_spec, hydrate=False)
+
+    body = manager.build_submit_body_from_spec(bare_spec, hydrate=False, validate_root=False)
+    assert body["root_task"]["componentRef"]["spec"]["implementation"] == {"container": {"image": "busybox"}}
+
+
+def test_validate_submit_root_skips_unrelated_validation():
+    manager = PipelineRunManager(client=FakeClient())
+    # Missing name would fail the full authoring validator, but the submit-time
+    # root check only cares about the graph-vs-container root shape.
+    graph_spec = {"implementation": {"graph": {"tasks": {}}}}
+
+    body = manager.build_submit_body_from_spec(graph_spec, hydrate=False)
+    assert "graph" in body["root_task"]["componentRef"]["spec"]["implementation"]
+
+
+def test_validate_submit_root_ignores_specs_without_container_or_graph():
+    manager = PipelineRunManager(client=FakeClient())
+    # No implementation mapping at all: leave it for the API to validate.
+    spec = {"name": "No Implementation"}
+
+    body = manager.build_submit_body_from_spec(spec, hydrate=False)
+    assert body["root_task"]["componentRef"]["spec"]["name"] == "No Implementation"

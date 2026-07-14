@@ -547,6 +547,7 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
                 pipeline_path=pipeline_path,
                 run_as=run_as,
                 hydrate=False,
+                validate_root=not skip_validation,
             )
             submit_payloads[attempt] = submit_payload
             return submit_payload.to_body()
