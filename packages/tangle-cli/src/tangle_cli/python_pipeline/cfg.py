@@ -43,8 +43,8 @@ from .errors import CompileError, UnknownCfgKeyError
 def _coerce_override(value: str) -> Any:
     """Type a single ``--override key=value`` *value* string.
 
-    Override values arrive from the CLI as raw strings (see
-    ``pipeline_compiler._parse_overrides``). To give an override the SAME
+    Override values arrive from the CLI as raw strings (parsed from
+    ``--override key=value`` by the ``pipelines`` CLI). To give an override the SAME
     Python type the equivalent ``key: value`` line in ``config.yaml`` would
     (which is already typed via ``yaml.safe_load``), we run each value
     through the same loader.

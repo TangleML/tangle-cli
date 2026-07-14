@@ -1024,8 +1024,8 @@ def _artifact_label(artifact: SubgraphArtifact) -> str:
 def _fragment_for_task(ref: CallableRef) -> str:
     """Stable fragment key for a @task ref in the components sidecar.
 
-    Uses the hyphenated function name, matching tangle-deploy's own
-    ``_resolve_local_from_python`` output-filename convention
+    Uses the hyphenated function name, matching the ``local_from_python``
+    resolver's output-filename convention
     (``my_task`` -> ``my-task``). Multiple call sites for the SAME
     function share one fragment — the local_from_python entry is keyed by
     source file, not by call site.
@@ -1594,21 +1594,6 @@ def _validate_local_component_refs_for_artifact(
 # Orchestration helpers
 
 
-def _parse_overrides(entries: list[str]) -> dict[str, str]:
-    """Parse ``--override key=value`` strings into a dict.
-
-    Raises:
-        CompileError: if an entry has no ``=`` separator.
-    """
-    overrides: dict[str, str] = {}
-    for entry in entries:
-        if "=" not in entry:
-            raise CompileError(f"--override expects key=value, got {entry!r} (no '=' separator)")
-        key, _, value = entry.partition("=")
-        overrides[key] = value
-    return overrides
-
-
 def _evict_shadowed_bundle_modules(bundle_dir: Path) -> None:
     """Evict ``sys.modules`` entries that shadow a module file in ``bundle_dir``.
 
@@ -1981,7 +1966,7 @@ def _assert_config_output_path_is_separate(
         f"@pipeline config for {pipeline_fn.name!r} resolves to the same path as "
         f"the {output_label}: {cfg_path}. The `config=` argument names a "
         "compile-time input config file; it is read before the compiled YAML "
-        "is written. tangle-deploy creates the output file automatically after "
+        "is written. The compiler creates the output file automatically after "
         "validation, so do not point `config=` at the output. Use a separate "
         "config file (for example an empty `*.compile_config.yaml`) or omit "
         "`config=` to use `config.yaml`, and keep `--output` for the compiled YAML."

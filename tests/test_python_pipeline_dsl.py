@@ -106,11 +106,23 @@ class TestNoInternalReferences:
     ``register_authoring_import_module`` — OSS never names it."""
 
     def test_no_tangle_deploy_references_in_source(self):
-        # Scan the whole vendored DSL package plus the sibling compiler module
-        # (``component_from_func.py``), which drives the authoring-import strip
-        # and must stay decoupled from the downstream package name.
+        # Scan the whole vendored DSL package plus the sibling modules that make
+        # up the OSS compile surface: the authoring-import strip driver
+        # (``component_from_func.py``) and the ported compiler + its schema
+        # validator + the ``pipelines`` facade/CLI. All must stay decoupled from
+        # the downstream package name (a leaked ref here would surface in a
+        # user-facing CompileError, as one did before this guard was widened).
         scanned = list(_DSL_DIR.glob("*.py"))
-        scanned.append(_DSL_DIR.parent / "component_from_func.py")
+        scanned += [
+            _DSL_DIR.parent / name
+            for name in (
+                "component_from_func.py",
+                "pipeline_compiler.py",
+                "schema_validation.py",
+                "pipelines.py",
+                "pipelines_cli.py",
+            )
+        ]
         offenders = []
         for path in scanned:
             text = path.read_text(encoding="utf-8")

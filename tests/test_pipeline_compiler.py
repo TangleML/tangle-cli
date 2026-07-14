@@ -1,12 +1,11 @@
-"""Tests for ``tangle sdk pipelines compile`` (the ported PipelineCompiler).
+"""Tests for ``tangle sdk pipelines compile`` (the PipelineCompiler).
 
-Ported from tangle-deploy's ``test_pipeline_compiler.py``. The generic
-compile behavior — free functions, dehydrated single-file output, runnable
-argument emission, ``@task`` sidecars, and user-facing failure modes — is
-exercised directly against ``tangle_cli.pipeline_compiler``. CLI coverage
-targets the cyclopts ``compile`` command (``tangle sdk pipelines compile``)
-and the ``compile_pipeline_file`` facade rather than tangle-deploy's typer
-surface.
+The generic compile behavior — free functions, dehydrated single-file output,
+runnable argument emission, ``@task`` sidecars, subpipeline child sidecars,
+``@registered`` resolution, and user-facing failure modes — is exercised
+directly against ``tangle_cli.pipeline_compiler``. CLI coverage targets the
+cyclopts ``compile`` command (``tangle sdk pipelines compile``) and the
+``compile_pipeline_file`` facade.
 """
 import shutil
 import sys
@@ -20,7 +19,6 @@ from tangle_cli.pipeline_compiler import (
     ZONE_ROOT_MARKERS,
     CompileResult,
     PipelineCompiler,
-    _parse_overrides,
     compile_pipeline,
 )
 from tangle_cli.pipelines import PipelineValidationError, compile_pipeline_file
@@ -139,12 +137,6 @@ def test_compile_pipeline_does_not_leak_sys_state(tmp_path):
         m for m in new_modules if m.startswith("_tangle_user_pipeline_")
     ]
     assert leaked_user_modules == []
-
-
-def test_parse_overrides_rejects_missing_equals():
-    assert _parse_overrides(["a=1", "b=two"]) == {"a": "1", "b": "two"}
-    with pytest.raises(CompileError):
-        _parse_overrides(["no_equals"])
 
 
 # ---------------------------------------------------------------------------
@@ -690,3 +682,129 @@ def test_compile_cli_task_decorator_exit_zero(tmp_path):
     )
     assert out.exists()
     assert out.with_name("compiled.components.yaml").exists()
+
+
+# ---------------------------------------------------------------------------
+# Subpipeline composition: a child @pipeline embedded via subpipeline(...) is
+# emitted as its own sidecar under <stem>.subgraphs/ and the parent task's
+# componentRef is rewritten from the subpipeline://pending sentinel to a
+# file:// reference at that child.
+
+
+def test_compile_subpipeline_emits_child_sidecar(tmp_path):
+    """A subpipeline child compiles to a sidecar under ``<stem>.subgraphs/``
+    and the parent task's componentRef is rewritten to a ``file://`` URL at
+    that child — the ``subpipeline://pending`` sentinel never survives."""
+    out = tmp_path / "compiled.yaml"
+    result = compile_pipeline(
+        FIXTURES / "subpipeline_pipeline.py", out, pipeline_name="Parent Pipeline"
+    )
+
+    # Exactly one child sidecar, named after the child pipeline (content-hash
+    # suffix), living under the parent's <stem>.subgraphs/ directory.
+    assert len(result.subgraph_paths) == 1
+    child = result.subgraph_paths[0]
+    assert child.exists()
+    assert child.parent.name == "compiled.subgraphs"
+    assert child.name.startswith("child-pipeline-")
+    assert child.name.endswith(".yaml")
+
+    # Parent has a single task whose componentRef points at the child sidecar.
+    parent = yaml.safe_load(out.read_text())
+    tasks = parent["implementation"]["graph"]["tasks"]
+    assert list(tasks) == ["Run Child"]
+    assert (
+        tasks["Run Child"]["componentRef"]["url"]
+        == f"file://./compiled.subgraphs/{child.name}"
+    )
+    assert "subpipeline://pending" not in out.read_text()
+
+    # Both parent and child are valid dehydrated pipelines.
+    validate_dehydrated_data(parent)
+    validate_dehydrated_data(yaml.safe_load(child.read_text()))
+
+
+def test_compile_subpipeline_override_config_wins(tmp_path):
+    """``.override_config`` on a subpipeline edge sets the child's COMPILE-TIME
+    cfg, and the overridden value wins over the child's own config.yaml. The
+    child emits ``cfg.message`` as a task-argument constant, so the override is
+    observable in the child sidecar (the value can only come from the edge
+    override: it is neither the ``@task`` default nor the config.yaml value)."""
+    out = tmp_path / "compiled.yaml"
+    result = compile_pipeline(
+        FIXTURES / "subpipeline_config_pipeline.py", out, pipeline_name="Config Parent"
+    )
+    child = yaml.safe_load(result.subgraph_paths[0].read_text())
+    tasks = child["implementation"]["graph"]["tasks"]
+    (task,) = tasks.values()
+    assert task["arguments"]["message"] == "from-override"
+
+
+# ---------------------------------------------------------------------------
+# @registered gen_config resolution. @registered references an EXISTING
+# gen_config.yaml and generates no sidecar of its own; the task's componentRef
+# is rewritten from the registered://pending sentinel to a resolve:// URL.
+
+_REGISTERED_ZONE = FIXTURES / "registered_zone"
+
+
+def test_compile_registered_omitted_gen_config_uses_nearest(tmp_path):
+    """With ``gen_config`` omitted, resolution falls back to the nearest
+    ancestor ``gen_config.yaml`` — the default OSS path, needing no zone-root
+    marker. The emitted URL is a ``resolve://`` reference at that file with the
+    verbatim ``#fragment``, and @registered generates no sidecar."""
+    out = tmp_path / "compiled.yaml"
+    result = compile_pipeline(
+        _REGISTERED_ZONE / "registered_op_pipeline.py",
+        out,
+        pipeline_name="Registered Pipeline",
+    )
+    assert result.components_path is None
+    assert result.subgraph_paths == []
+
+    data = yaml.safe_load(out.read_text())
+    (task,) = data["implementation"]["graph"]["tasks"].values()
+    url = task["componentRef"]["url"]
+    # The relpath from the tmp output dir to the fixture is environment
+    # dependent; assert the scheme and the target/fragment tail only.
+    assert url.startswith("resolve://")
+    assert url.endswith("registered_zone/gen_config.yaml#run-query")
+    assert "registered://pending" not in out.read_text()
+
+
+def test_compile_registered_relative_gen_config_rejected_without_marker(tmp_path):
+    """A relative ``gen_config`` is rejected in the default OSS build because
+    ``ZONE_ROOT_MARKERS`` is empty, so no zone root can be located."""
+    assert ZONE_ROOT_MARKERS == []  # guard: no marker leaked in from another test
+    with pytest.raises(CompileError) as exc_info:
+        compile_pipeline(
+            _REGISTERED_ZONE / "registered_op_relative_pipeline.py",
+            tmp_path / "compiled.yaml",
+            pipeline_name="Registered Relative Pipeline",
+        )
+    assert "zone-root markers" in str(exc_info.value)
+
+
+def test_compile_registered_relative_gen_config_resolved_with_marker(tmp_path):
+    """A downstream distribution appends its marker filename to the
+    ``ZONE_ROOT_MARKERS`` seam (mutating the list in place) to restore
+    zone-root resolution; a relative ``gen_config`` then resolves against the
+    nearest ancestor holding that marker."""
+    ZONE_ROOT_MARKERS.append("zone_root.marker")
+    try:
+        out = tmp_path / "compiled.yaml"
+        compile_pipeline(
+            _REGISTERED_ZONE / "registered_op_relative_pipeline.py",
+            out,
+            pipeline_name="Registered Relative Pipeline",
+        )
+        data = yaml.safe_load(out.read_text())
+        (task,) = data["implementation"]["graph"]["tasks"].values()
+        url = task["componentRef"]["url"]
+        assert url.startswith("resolve://")
+        assert url.endswith("registered_zone/gen_config.yaml#run-query")
+    finally:
+        # Restore the empty OSS default so ordering never leaks a marker into
+        # test_compile_registered_relative_gen_config_rejected_without_marker
+        # or test_zone_root_markers_empty_by_default.
+        ZONE_ROOT_MARKERS.remove("zone_root.marker")

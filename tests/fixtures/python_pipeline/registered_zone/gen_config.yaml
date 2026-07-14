@@ -1,0 +1,6 @@
+# Minimal gen_config.yaml for @registered compile fixtures. The compiler
+# existence-checks this file and emits a resolve:// URL pointing at it; the
+# #fragment is not validated at compile time (surfaces at hydrate time).
+components:
+  run-query:
+    description: Placeholder component fragment referenced by the @registered op.
