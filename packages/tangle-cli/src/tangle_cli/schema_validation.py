@@ -28,9 +28,7 @@ Public surface:
 
 Everything here is standalone — it never changes ``PipelineHydrator``
 behavior. ``compile_pipeline`` uses :func:`validate_dehydrated_pipeline`
-for its richer pre-write check; an explicit, read-only
-``PipelineHydrator.validate_dehydrated_file`` convenience also delegates
-here.
+for its richer pre-write check.
 """
 from __future__ import annotations
 

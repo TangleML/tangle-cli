@@ -174,7 +174,7 @@ def compile_pipeline(
     try:
         # 2. Load the user pipeline module + select the ROOT PipelineFn. When
         #    the file defines several pipelines, ``pipeline_name``
-        #    (``--pipeline``) chooses which to emit (Decision G). Imported
+        #    (``--pipeline``) chooses which to emit. Imported
         #    child pipelines are reachable to ``subpipeline(child)`` but are
         #    never selectable compile targets; same-file nested children are
         #    compiled via the ``subpipeline`` recursion below.
@@ -188,9 +188,9 @@ def compile_pipeline(
 
         # 4. Build the recursive compile context. ALL artifacts (root + every
         #    nested child sidecar) are traced, emitted, and rewritten IN MEMORY
-        #    first; nothing is written until the whole bundle validates
-        #    (Decision C). ``planned_files`` lets asset-policy validation accept
-        #    refs to sidecars the compiler is about to write (Decision J).
+        #    first; nothing is written until the whole bundle validates.
+        #    ``planned_files`` lets asset-policy validation accept
+        #    refs to sidecars the compiler is about to write.
         ctx = CompileContext(
             root_output_path=output_path,
             subgraph_dir=output_path.with_name(output_path.stem + ".subgraphs"),
@@ -202,7 +202,7 @@ def compile_pipeline(
         # 5. Compile the root (and, recursively, all children) into in-memory
         #    artifacts. The root cfg is resolved relative to the script's own
         #    directory; each child's cfg is resolved relative to ITS OWN source
-        #    directory inside ``_compile_pipeline_fn`` (Decision F).
+        #    directory inside ``_compile_pipeline_fn``.
         root_artifact = _compile_pipeline_fn(
             pipeline_fn,
             output_path,
@@ -214,14 +214,13 @@ def compile_pipeline(
 
         # 6. The full bundle: the root plus every deduped child in the registry.
         #    Keying children by compile key means a child reached twice (or via
-        #    a diamond) appears exactly once (Decision M).
+        #    a diamond) appears exactly once.
         artifacts: list[SubgraphArtifact] = [root_artifact, *ctx.registry.values()]
 
         # 7. Validate EVERY artifact before writing ANY file. Per artifact:
         #    validate_dehydrated_pipeline (top-level guard + schema +
         #    no-template scan + semantic checks) -> dump -> reload -> validate
-        #    again -> asset policy. On any failure nothing is written
-        #    (Decision C / J).
+        #    again -> asset policy. On any failure nothing is written.
         for artifact in artifacts:
             _validate_artifact(artifact, ctx)
 
@@ -238,12 +237,12 @@ def compile_pipeline(
         )
     finally:
         # Purge bundle-local modules so a subsequent in-process compile
-        # re-imports them fresh (P2). Runs on success AND on error.
+        # re-imports them fresh. Runs on success AND on error.
         _purge_bundle_local_modules(purge_dirs)
 
 
 # ---------------------------------------------------------------------------
-# Recursive in-memory compile (Decision C)
+# Recursive in-memory compile
 
 
 @contextmanager
@@ -271,54 +270,25 @@ def _temp_sys_path(directory: Path) -> Iterator[None]:
                 pass
 
 
-def _compile_pipeline_fn(
+def _resolve_cfg_for_pipeline(
     pipeline_fn: PipelineFn,
-    output_path: Path,
-    ctx: CompileContext,
+    base_dir: Path,
     overrides: Mapping[str, Any],
+    ctx: CompileContext,
     *,
     is_root: bool,
-    base_dir: Path,
-    rebroadcast_overrides: Mapping[str, Any] | None = None,
-) -> SubgraphArtifact:
-    """Trace + emit ``pipeline_fn`` into an in-memory :class:`SubgraphArtifact`.
+    output_path: Path,
+) -> tuple[Cfg, dict[str, Any], Path]:
+    """Resolve + load a pipeline's cfg relative to its own source dir.
 
-    Does NOT write any file. The given ``pipeline_fn`` is ALREADY imported
-    (the root via :func:`_load_pipeline_fn`; a child via its parent module's
-    ``import``), so it is traced directly — the module is never reloaded,
-    which sidesteps ``sys.modules`` cache issues with sibling children.
-
-    Steps:
-
-    1. Resolve + load cfg relative to ``base_dir`` (the pipeline's OWN
-       source dir — Decision F config isolation).
-    2. Trace in a fresh ``GraphBuilder`` and emit the dehydrated body.
-    3. Build (do NOT write) this artifact's ``@task`` ``local_from_python``
-       components sidecar and rewrite its ``@task`` refs to pure
-       ``resolve://`` URLs.
-    4. (Phase 4) compile any ``subpipeline(child)`` children recursively and
-       rewrite the parent task refs to pure ``file://`` URLs.
-
-    Returns the planned artifact; validation + writing happen later in
-    :func:`compile_pipeline` once the whole bundle is built.
+    Returns ``(cfg, raw_cfg, cfg_path)``. The config file is loaded when the
+    function takes a ``cfg`` parameter OR the pipeline is flagged
+    ``propagate_config`` (which must read its own config to broadcast it), and
+    otherwise skipped — a pipeline with neither tolerates a missing config.yaml.
+    A ``config=`` declared without a matching use appends an explanatory
+    warning; a root that received ``--override`` values it cannot consume is a
+    hard :class:`CompileError`.
     """
-    # Record this pipeline's source dir so the driver can purge any modules
-    # it imports from there after the compile (P2 sibling-import leak fix).
-    try:
-        ctx.source_dirs.add(base_dir.resolve())
-    except OSError:  # pragma: no cover — defensive
-        pass
-
-    # Evict any stale modules that would shadow THIS pipeline's bundle-local
-    # siblings before tracing, so trace-time sibling imports inside the body
-    # (e.g. cycle-style ``from sibling import ...``) resolve fresh from the
-    # bundle rather than a cached entry pointing elsewhere (P2 fix).
-    _evict_shadowed_bundle_modules(base_dir)
-
-    # 1. cfg is resolved + loaded relative to the pipeline's own source dir.
-    #    The ROOT coerces its CLI ``--override`` strings (yaml.safe_load); a
-    #    CHILD receives already-typed native ``effective`` overrides (broadcast
-    #    + explicit ``.override_config``) that must pass through unchanged.
     cfg_path = _resolve_cfg_path_in_dir(pipeline_fn, base_dir)
     uses_cfg = _pipeline_accepts_cfg(pipeline_fn)
     should_load_config = uses_cfg or pipeline_fn.propagate_config
@@ -345,25 +315,83 @@ def _compile_pipeline_fn(
                 "subpipelines. Add a `cfg` parameter if this pipeline also needs to "
                 "read the config directly."
             )
-    else:
-        if is_root and overrides:
-            keys = sorted(overrides)
-            raise CompileError(
-                f"pipeline {pipeline_fn.name!r} received --override values {keys!r}, "
-                "but its function has no `cfg` parameter and propagate_config is "
-                "not enabled. Add a `cfg` parameter to read compile-time config, "
-                "enable propagate_config=True to broadcast overrides to descendants, "
-                "or remove the unused override(s)."
-            )
-        if pipeline_fn.config_path:
-            ctx.warnings.append(
-                f"pipeline {pipeline_fn.name!r} declares config={pipeline_fn.config_path!r} "
-                "but its function has no `cfg` parameter, so the config file was "
-                "not loaded. Remove `config=` when no compile-time config is needed, "
-                "or add a `cfg` parameter to use it."
-            )
-        cfg = Cfg({})
-        raw_cfg = {}
+        return cfg, raw_cfg, cfg_path
+
+    if is_root and overrides:
+        keys = sorted(overrides)
+        raise CompileError(
+            f"pipeline {pipeline_fn.name!r} received --override values {keys!r}, "
+            "but its function has no `cfg` parameter and propagate_config is "
+            "not enabled. Add a `cfg` parameter to read compile-time config, "
+            "enable propagate_config=True to broadcast overrides to descendants, "
+            "or remove the unused override(s)."
+        )
+    if pipeline_fn.config_path:
+        ctx.warnings.append(
+            f"pipeline {pipeline_fn.name!r} declares config={pipeline_fn.config_path!r} "
+            "but its function has no `cfg` parameter, so the config file was "
+            "not loaded. Remove `config=` when no compile-time config is needed, "
+            "or add a `cfg` parameter to use it."
+        )
+    return Cfg({}), {}, cfg_path
+
+
+def _compile_pipeline_fn(
+    pipeline_fn: PipelineFn,
+    output_path: Path,
+    ctx: CompileContext,
+    overrides: Mapping[str, Any],
+    *,
+    is_root: bool,
+    base_dir: Path,
+    rebroadcast_overrides: Mapping[str, Any] | None = None,
+) -> SubgraphArtifact:
+    """Trace + emit ``pipeline_fn`` into an in-memory :class:`SubgraphArtifact`.
+
+    Does NOT write any file. The given ``pipeline_fn`` is ALREADY imported
+    (the root via :func:`_load_pipeline_fn`; a child via its parent module's
+    ``import``), so it is traced directly — the module is never reloaded,
+    which sidesteps ``sys.modules`` cache issues with sibling children.
+
+    Steps:
+
+    1. Resolve + load cfg relative to ``base_dir`` (the pipeline's OWN
+       source dir — each pipeline loads its own config).
+    2. Trace in a fresh ``GraphBuilder`` and emit the dehydrated body.
+    3. Build (do NOT write) this artifact's ``@task`` ``local_from_python``
+       components sidecar and rewrite its ``@task`` refs to pure
+       ``resolve://`` URLs.
+    4. Compile any ``subpipeline(child)`` children recursively and
+       rewrite the parent task refs to pure ``file://`` URLs.
+
+    Returns the planned artifact; validation + writing happen later in
+    :func:`compile_pipeline` once the whole bundle is built.
+    """
+    # Record this pipeline's source dir so the driver can purge any modules
+    # it imports from there after the compile (P2 sibling-import leak fix).
+    try:
+        ctx.source_dirs.add(base_dir.resolve())
+    except OSError:  # pragma: no cover — defensive
+        pass
+
+    # Evict any stale modules that would shadow THIS pipeline's bundle-local
+    # siblings before tracing, so trace-time sibling imports inside the body
+    # (e.g. cycle-style ``from sibling import ...``) resolve fresh from the
+    # bundle rather than a cached entry pointing elsewhere (P2 fix).
+    _evict_shadowed_bundle_modules(base_dir)
+
+    # 1. cfg is resolved + loaded relative to the pipeline's own source dir.
+    #    The ROOT coerces its CLI ``--override`` strings (yaml.safe_load); a
+    #    CHILD receives already-typed native ``effective`` overrides (broadcast
+    #    + explicit ``.override_config``) that must pass through unchanged.
+    cfg, raw_cfg, cfg_path = _resolve_cfg_for_pipeline(
+        pipeline_fn,
+        base_dir,
+        overrides,
+        ctx,
+        is_root=is_root,
+        output_path=output_path,
+    )
 
     # 2. Trace + emit. The source dir is on sys.path so any trace-time
     #    sibling imports inside the body resolve. ``emit_pipeline`` also
@@ -456,22 +484,23 @@ def _compile_pipeline_fn(
     #    and rewrite this artifact's subpipeline tasks to pure ``file://``
     #    refs. This artifact's key is on the active stack while children are
     #    compiled so a child that reaches back here is detected as a cycle
-    #    (Decision L). Subpipeline children appear only when NM1 recorded
+    #    detected. Subpipeline children appear only when the trace recorded
     #    them; root-only / @task-only compiles skip this entirely.
     #
     #    When ``propagate_config`` is set, push a broadcast layer carrying
-    #    THIS pipeline's OWN config (Decision §4: "broadcast my OWN config").
+    #    THIS pipeline's OWN config — a flagged pipeline broadcasts its own
+    #    config, never a value handed to it from above.
     #    The layer is ``raw_cfg`` overlaid with ``rebroadcast``. ``rebroadcast``
     #    is this pipeline's OWN re-broadcastable overrides:
     #      * ROOT (``rebroadcast_overrides is None``) — its CLI ``--override``
     #        values, COERCED with the same ``yaml.safe_load`` coercion
     #        ``load_cfg(coerce=True)`` applied to the root's own cfg, so the
-    #        broadcast carries the typed value the root itself sees (Finding 2),
+    #        broadcast carries the typed value the root itself sees,
     #        not the raw CLI string.
     #      * flagged CHILD (``rebroadcast_overrides == {}``) — nothing extra:
     #        a flagged child broadcasts ONLY its own ``raw_cfg``. The explicit
     #        ``.override_config`` values set on the edge INTO this child have
-    #        their DEPTH governed by the CALLER's flag (Decision §4 line 122),
+    #        their DEPTH governed by the CALLER's flag,
     #        so the caller — not this child — pushes a per-edge layer for them
     #        (see ``_process_subpipeline_children``). This keeps "nearest
     #        flagged ancestor that DEFINES the key wins": an outer ancestor's
@@ -518,7 +547,7 @@ def _process_subpipeline_children(
 
     * compute the child :class:`PipelineCompileKey`;
     * CYCLE check — if the key is already on ``ctx.active_stack`` raise a
-      :class:`CompileError` naming the full chain (Decision L); this also
+      :class:`CompileError` naming the full chain; this also
       covers self-reference (``A -> A``);
     * MAX-DEPTH guard — refuse chains deeper than ``ctx.max_depth``;
     * DEDUP — if the key is already compiled (``ctx.registry``) reuse that
@@ -553,11 +582,11 @@ def _process_subpipeline_children(
         # entirely and use ``{}``. The fast path does NOT let a config-taking
         # child without a config.yaml compile — that child still raises
         # "config file not found" in its own ``_compile_pipeline_fn``. What it
-        # buys is: one fewer raw-cfg read, and exact preservation of Decision-F
-        # default isolation (empty effective overrides -> empty
+        # buys is: one fewer raw-cfg read, and exact preservation of the
+        # default per-pipeline config isolation (empty effective overrides -> empty
         # ``overrides_fingerprint`` -> the SAME dedup key the child gets with no
         # feature in play) whenever there is nothing to broadcast or override.
-        # Ambient PASS-THROUGH context (Fix B / §7): the resolved
+        # Ambient PASS-THROUGH context: the resolved
         # broadcast/override keys this child does NOT declare and therefore
         # flow PAST it, unchanged, to its descendants. It is folded into the
         # child's compile key so the SAME child reached under two different
@@ -629,7 +658,7 @@ def _process_subpipeline_children(
                 )
             slug = _slugify(child_fn.name)
             child_output_path = ctx.subgraph_dir / f"{slug}-{child_key.hash8()}.yaml"
-            # Per-edge explicit-override depth (Decision §4 line 122-124): an
+            # Per-edge explicit-override depth: an
             # explicit ``.override_config`` set on THIS edge flows deep iff the
             # CALLER (this parent) is flagged. When it is, push a broadcast
             # layer carrying JUST this edge's explicit overrides as the INNERMOST
@@ -650,7 +679,7 @@ def _process_subpipeline_children(
                 # is resolved AFTER the whole broadcast tier in
                 # ``_effective_overrides_for_child`` — so this edge's override
                 # outranks even a NEARER flagged descendant's own-config
-                # broadcast of the same key (PROPAGATE_CONFIG_DESIGN §4).
+                # broadcast of the same key.
                 ctx.broadcast_stack.append(BroadcastLayer(config=dict(sub_ref.config_overrides), explicit=True))
                 pushed_edge_override = True
             try:
@@ -684,7 +713,7 @@ def _process_subpipeline_children(
             )
         parent_tasks[task_id]["componentRef"] = {"url": f"file://{rel}"}
 
-        # INPUT interface validation (Decision E). The compiled child body
+        # INPUT interface validation. The compiled child body
         # is the source of truth for declared inputs; ``wait_for`` /
         # ``depends_on`` are NOT special — they must be declared child
         # In[...] inputs if passed.
@@ -695,7 +724,7 @@ def _process_subpipeline_children(
         )
         subpipeline_output_names[task_id] = _child_output_names(child_artifact.body)
 
-    # OUTPUT cross-file validation (Decision E / K) — a safety net beyond the
+    # OUTPUT cross-file validation — a safety net beyond the
     # strict SubpipelineOutputProxy: every ``taskOutput`` in the parent body
     # that targets a subpipeline task must name an output the child declares.
     _validate_subpipeline_output_refs(parent_artifact.body, subpipeline_output_names)
@@ -741,7 +770,7 @@ def _validate_subpipeline_inputs(
     Rejects an UNKNOWN argument name (not a declared child input) and a
     MISSING REQUIRED child input (declared, non-optional, not supplied).
     Omitted optional/default child inputs are allowed. Raises a clear
-    :class:`CompileError` BEFORE any file is written (Decision E).
+    :class:`CompileError` BEFORE any file is written.
     """
     declared, required = _child_input_specs(child_artifact.body)
     child_name = child_artifact.key.pipeline_name
@@ -773,7 +802,7 @@ def _validate_subpipeline_output_refs(
 
     Scans both task ``arguments`` and graph ``outputValues``. This is the
     compiler-owned cross-file safety net that protects the serialized YAML
-    even if a proxy bug let an undeclared output slip through (Decision K).
+    even if a proxy bug let an undeclared output slip through.
     """
     if not subpipeline_output_names:
         return
@@ -817,7 +846,7 @@ def _pipeline_base_dir(pipeline_fn: PipelineFn, *, fallback: Path) -> Path:
     are relative to.
 
     Prefers the ``@pipeline`` decorator's captured ``caller_dir`` (the
-    child's own source file directory — Decision F), then the decorated
+    child's own source file directory), then the decorated
     function's source file, then ``fallback`` (the root bundle directory)
     for dynamically built pipelines with no on-disk source.
     """
@@ -851,8 +880,8 @@ def _compile_key_for(
 ) -> PipelineCompileKey:
     """Build the canonical :class:`PipelineCompileKey` for ``pipeline_fn``.
 
-    Paths are canonicalised per Decision B (repo-relative POSIX inside a git
-    repo, else resolved absolute POSIX). A dynamically built pipeline whose
+    Paths are canonicalised to repo-relative POSIX inside a git
+    repo, else resolved absolute POSIX. A dynamically built pipeline whose
     source cannot be located falls back to a qualname-derived sentinel so it
     still produces a stable, distinct key.
 
@@ -862,7 +891,7 @@ def _compile_key_for(
     ``.override_config`` value surfaces as an actionable :class:`CompileError`
     rather than a bare ``TypeError``.
 
-    ``ambient_context`` is the AMBIENT PASS-THROUGH context (Fix B / §7): the
+    ``ambient_context`` is the AMBIENT PASS-THROUGH context: the
     active broadcast/override keys this node does NOT declare and therefore
     flow PAST it to its descendants. Folding it into the fingerprint keeps the
     same node distinct when it is reached under two different ancestor-broadcast
@@ -872,7 +901,7 @@ def _compile_key_for(
 
     * **Empty / ``None`` ambient** (always true for the default-isolation
       compile) -> ``overrides_fingerprint(overrides)`` UNCHANGED, byte-for-byte
-      identical to before Fix B.
+      identical to the fingerprint with no ambient envelope.
     * **Non-empty ambient** -> a small envelope keyed by reserved sentinels
       (``"\\x00effective"`` / ``"\\x00ambient"``) that cannot collide with real
       config keys, routed through :func:`overrides_fingerprint` so its
@@ -893,7 +922,7 @@ def _compile_key_for(
             "\x00ambient": dict(sorted(ambient_context.items())),
         }
     else:
-        # Byte-identical to today's key: the default-isolation guarantee (§7).
+        # Byte-identical to today's key: the default-isolation guarantee.
         fingerprint_input = overrides
     return PipelineCompileKey(
         source_path=source_canon,
@@ -942,7 +971,7 @@ def _validate_artifact(artifact: SubgraphArtifact, ctx: CompileContext) -> None:
         prefix = "" if label is None else f"{label}: "
         raise CompileError(f"{prefix}compiled YAML failed re-validation after dump/reload: {e}") from e
 
-    # Asset policy (Decision J, extended to children in Phase 8). EVERY
+    # Asset policy. EVERY
     # artifact's relative local refs are validated relative to THAT
     # artifact's own output directory:
     #   * the ROOT body relative to the root output dir (``label`` is None,
@@ -953,7 +982,7 @@ def _validate_artifact(artifact: SubgraphArtifact, ctx: CompileContext) -> None:
     # sidecars and child ``@task`` components sidecars — are in
     # ``ctx.planned_files`` and count as present, so the compiler-managed
     # parent→child / child→child / child @task refs pass. A child's
-    # author-written relative leaf ref was relocated (NM2) to be relative to
+    # author-written relative leaf ref was relocated to be relative to
     # the child-sidecar dir, so it is validated against the real source-side
     # file via ``../``; a missing external leaf fails clearly here, before
     # any file is written.
@@ -1548,8 +1577,8 @@ def _validate_local_component_refs_for_artifact(
     location, so a relative ``file://./x`` / ``resolve://./x`` ref is only
     resolvable if ``x`` sits next to that artifact. Generated bundle files
     (child sidecars, ``@task`` components sidecars) are passed in
-    ``planned_files`` — they validate as "present" before they are written
-    (Decision J). External relative refs must already exist on disk.
+    ``planned_files`` — they validate as "present" before they are written.
+    External relative refs must already exist on disk.
 
     Args:
         artifact_label: ``None`` for the ROOT (uses the legacy error wording
@@ -1728,7 +1757,7 @@ def _load_pipeline_fn(module_path: Path, pipeline_name: str | None = None) -> Pi
     When the file defines exactly one root pipeline it is returned
     directly. When it defines several, ``pipeline_name`` selects which one
     to compile (matched against the function ``__name__`` first, then the
-    ``@pipeline`` display name — Decision G / ``--pipeline``). The selected
+    ``@pipeline`` display name, selected via ``--pipeline``). The selected
     pipeline's same-file nested children are still reachable to
     ``subpipeline(child)(...)`` and are compiled via the recursion driver,
     never via this candidate list.
@@ -1782,8 +1811,8 @@ def _load_pipeline_fn(module_path: Path, pipeline_name: str | None = None) -> Pi
 
     # Root discovery selects the pipeline(s) DEFINED IN the target file. A
     # parent module that imports child pipelines (so it can wrap them with
-    # ``subpipeline(child)(...)``) must not count those imports as roots
-    # (Decision G). Compare each candidate's source file against
+    # ``subpipeline(child)(...)``) must not count those imports as roots.
+    # Compare each candidate's source file against
     # ``module_path``; imported children resolve to a DIFFERENT file and are
     # ignored as compile targets (they remain reachable to ``subpipeline``).
     # Several pipelines DEFINED in this one file are now allowed: when more
@@ -1815,7 +1844,7 @@ def _load_pipeline_fn(module_path: Path, pipeline_name: str | None = None) -> Pi
     if pipeline_name is not None:
         # Explicit selection (``--pipeline``). Match against the function
         # name then the display name, across local AND undetermined-source
-        # candidates (D4 — an exec'd module still exposes ``fn.__name__``).
+        # candidates (an exec'd module still exposes ``fn.__name__``).
         # Imported children are never selectable as a root.
         searchable = [*local_candidates, *undetermined]
         matches = _select_by_name(searchable, pipeline_name)
@@ -1833,7 +1862,7 @@ def _load_pipeline_fn(module_path: Path, pipeline_name: str | None = None) -> Pi
         )
 
     # No explicit selection. Prefer locals; fall back to undetermined with
-    # the single-candidate dynamic auto-select (Decision G / D4): a single
+    # the single-candidate dynamic auto-select: a single
     # exec-built PipelineFn whose source cannot be resolved is still a valid
     # root, but two undetermined candidates cannot be told apart from
     # imports, so they fall through to the multiple-pipelines error.
@@ -1861,7 +1890,7 @@ def _pipeline_source_path(pipeline_fn: PipelineFn) -> Path | None:
     source is UNDETERMINED — i.e. a dynamically built function whose
     source cannot be located. Used by :func:`_load_pipeline_fn` to
     distinguish locally defined root pipelines from imported child
-    pipelines, and to honour Decision G's single-candidate dynamic
+    pipelines, and to honour the single-candidate dynamic
     fallback.
 
     A source is treated as undetermined (``None``) when:
@@ -1929,7 +1958,7 @@ def _resolve_cfg_path_in_dir(pipeline_fn: PipelineFn, base_dir: Path) -> Path:
 
     ``base_dir`` is the pipeline's OWN source directory — the root script's
     parent for the root, or the child ``PipelineFn``'s source directory for
-    a nested child (Decision F: each pipeline loads its own config relative
+    a nested child (each pipeline loads its own config relative
     to its own file). If the decorator omits ``config=``, defaults to
     ``<base_dir>/config.yaml``.
     """
@@ -2047,7 +2076,7 @@ def _resolve_broadcast_stack(
     key_filter: set[str] | None,
 ) -> dict[str, Any]:
     """Resolve the active broadcast stack into a single key/value map applying
-    the two precedence tiers from PROPAGATE_CONFIG_DESIGN §4 (lines 128-159).
+    the two precedence tiers (broadcast tier, then explicit tier).
 
     Tiers, lowest -> highest:
 
@@ -2101,7 +2130,7 @@ def _effective_overrides_for_child(
     parent_task_id: str,
 ) -> dict[str, Any]:
     """Resolve a child's effective overrides across the two precedence tiers
-    plus the strict direct edge (PROPAGATE_CONFIG_DESIGN §4, lines 128-159).
+    plus the strict direct edge.
 
     Layered lowest -> highest precedence:
 
@@ -2142,7 +2171,7 @@ def _resolve_ambient_context(broadcast_stack: list[BroadcastLayer]) -> dict[str,
     :func:`_effective_overrides_for_child` via the shared
     :func:`_resolve_broadcast_stack` helper, but with NO ``key_filter`` — every
     key present in the stack is folded in, regardless of what any single node
-    declares. Used by Fix B to compute the ambient PASS-THROUGH context (§7):
+    declares. Used to compute the ambient PASS-THROUGH context:
     the keys that flow PAST a node, unchanged, to its descendants.
     """
     return _resolve_broadcast_stack(broadcast_stack, key_filter=None)
