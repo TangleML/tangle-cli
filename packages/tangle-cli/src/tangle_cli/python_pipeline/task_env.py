@@ -9,22 +9,22 @@ YAML anchor.
 ``TaskEnv`` is **authoring-only**. ``@task(env=...)`` expands it at
 decoration time into the existing ``CallableRef._task_image`` /
 ``CallableRef._task_dependencies_from`` metadata. The compiler, hydrator,
-and Oasis runner never see a ``TaskEnv`` object — no downstream component
-learns the word ``env``.
+and downstream runner never see a ``TaskEnv`` object — no downstream
+component learns the word ``env``.
 
 Example::
 
     from pathlib import Path
     from tangle_cli.python_pipeline import TaskEnv, task
 
-    UPI = TaskEnv(
-        image="us-docker.pkg.dev/.../areas-ml-upi:main",
+    TRAINING = TaskEnv(
+        image="python:3.12",
         dependencies_from=Path(__file__).parent / "pyproject.toml",
     )
 
-    @task(env=UPI)
-    def publish_to_comet(...):
-        # docstring carries: Metadata / Name: [UPI Clustering] Publish To Comet
+    @task(env=TRAINING)
+    def train_model(...):
+        # docstring carries: Metadata / Name: Train Model
         ...
 
 The component name comes from the function's docstring ``Metadata: Name:``

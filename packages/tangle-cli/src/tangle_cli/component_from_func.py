@@ -785,11 +785,11 @@ class AuthoringStripError(ValueError):
       authoring alias must be stripped, but line-deletion would take ``os`` with
       it); or
     - a ``@task(env=...)`` env binding entangled with runtime code — e.g. a
-      mixed ``from _envs import UPI, helper`` import whose ``helper`` is used at
+      mixed ``from _envs import TRAINING, helper`` import whose ``helper`` is used at
       runtime, or a collected env name referenced by the kept task body.
 
     Failing fast here is intentional: silently baking a broken ``import os`` /
-    ``from _envs import UPI`` / ``UPI = TaskEnv(...)`` would only surface as a
+    ``from _envs import TRAINING`` / ``TRAINING = TaskEnv(...)`` would only surface as a
     ``NameError`` / ``ImportError`` at container start. The message tells the
     author how to split the import or keep TaskEnv values authoring-only.
     """
@@ -889,9 +889,9 @@ def _env_keyword_binding_name(call: ast.Call) -> str | None:
     returns the name of the module-level binding that must also be stripped so
     the baked runtime program does not crash referencing an authoring-only name:
 
-    - ``env=UPI`` -> ``"UPI"`` (a module-level env *binding* to strip, either an
-      ``UPI = TaskEnv(...)`` assignment or a ``from _envs import UPI`` import);
-    - ``env=_envs.UPI`` -> ``"_envs"`` (the module-alias root, so the
+    - ``env=TRAINING`` -> ``"TRAINING"`` (a module-level env *binding* to strip, either an
+      ``TRAINING = TaskEnv(...)`` assignment or a ``from _envs import TRAINING`` import);
+    - ``env=_envs.TRAINING`` -> ``"_envs"`` (the module-alias root, so the
       ``import _envs`` line can be stripped);
     - ``env=TaskEnv(...)`` / ``env=tp.TaskEnv(...)`` (inline) -> ``None``: the
       whole decorator line range is already deleted, so there is no residual
@@ -917,8 +917,8 @@ def _is_task_env_construction(value: ast.expr | None) -> bool:
 
     Matched by trailing call name (mirroring ``_decorator_called_name``), so
     both ``TaskEnv(image=...)`` and ``tp.TaskEnv(image=...)`` qualify. Used to
-    detect module-level env declarations like ``UPI = TaskEnv(...)`` regardless
-    of whether a ``@task(env=UPI)`` references them.
+    detect module-level env declarations like ``TRAINING = TaskEnv(...)`` regardless
+    of whether a ``@task(env=TRAINING)`` references them.
     """
     return isinstance(value, ast.Call) and _decorator_called_name(value) == _AUTHORING_ENV_CLASS_NAME
 
@@ -926,8 +926,8 @@ def _is_task_env_construction(value: ast.expr | None) -> bool:
 def _import_bound_names(node: ast.Import | ast.ImportFrom) -> dict[str, ast.alias]:
     """Map each name a top-level import binds into the namespace to its alias.
 
-    - ``from m import UPI`` -> ``{"UPI": alias}``
-    - ``from m import UPI as U`` -> ``{"U": alias}``
+    - ``from m import TRAINING`` -> ``{"TRAINING": alias}``
+    - ``from m import TRAINING as U`` -> ``{"U": alias}``
     - ``import _envs`` -> ``{"_envs": alias}`` (root of a dotted module path)
     - ``import a.b.c`` -> ``{"a": alias}``
     - ``import envs as task_envs`` -> ``{"task_envs": alias}``
@@ -951,7 +951,7 @@ def _annotation_name_node_ids(tree: ast.AST) -> set[int]:
     (which runs AFTER ``_strip_authoring_constructs``), so a name that appears
     ONLY in an annotation is NOT a live runtime reference. Excluding these from
     the fail-fast reference scan prevents a false positive where an env name
-    used only as a parameter/return type annotation (``def f(x: UPI) -> UPI:``)
+    used only as a parameter/return type annotation (``def f(x: TRAINING) -> TRAINING:``)
     is mistaken for a kept runtime reference (FIX N1, §3.5).
 
     Annotation slots covered (matching ``_strip_type_hints_ast``):
@@ -1029,17 +1029,17 @@ def _strip_authoring_constructs(source_code: str) -> str:
     TaskEnv authoring-strip hardening (``@task(env=...)``): an env
     declaration that exists ONLY to feed a stripped ``@task(env=...)`` decorator
     would otherwise crash the baked program (``NameError: TaskEnv`` for a
-    co-located ``UPI = TaskEnv(...)`` whose import was stripped, or
-    ``ImportError`` for a ``from _envs import UPI`` whose module is not in the
+    co-located ``TRAINING = TaskEnv(...)`` whose import was stripped, or
+    ``ImportError`` for a ``from _envs import TRAINING`` whose module is not in the
     runtime image). On top of the import/decorator strip this also removes, by
     line range:
 
     - every module-level ``X = TaskEnv(...)`` / ``X: TaskEnv = TaskEnv(...)``
       declaration (direct ``TaskEnv(...)`` construction), and
     - module-level bindings (assignment OR import) of any name a stripped
-      ``@task(env=...)`` referenced — ``env=UPI`` collects ``UPI``
-      (``UPI = TaskEnv(...)`` / ``UPI = make_task_env(...)`` / ``from _envs import
-      UPI``); ``env=_envs.UPI`` collects the module alias ``_envs``
+      ``@task(env=...)`` referenced — ``env=TRAINING`` collects ``TRAINING``
+      (``TRAINING = TaskEnv(...)`` / ``TRAINING = make_task_env(...)`` / ``from _envs import
+      TRAINING``); ``env=_envs.TRAINING`` collects the module alias ``_envs``
       (``import _envs``).
 
     It is deliberately narrow: only names PROVEN to participate in a stripped
@@ -1047,7 +1047,7 @@ def _strip_authoring_constructs(source_code: str) -> str:
     are removed. It is NOT a general unused-import cleaner. It raises
     :class:`AuthoringStripError` (fail-fast) rather than bake a broken program
     when an env binding is entangled with runtime code: a mixed
-    ``from _envs import UPI, helper`` whose ``helper`` is used at runtime, or a
+    ``from _envs import TRAINING, helper`` whose ``helper`` is used at runtime, or a
     collected env name still referenced by the kept task body.
 
     This intentionally operates on ``module_source_stripped`` ONLY. It must never
@@ -1148,10 +1148,10 @@ def _strip_authoring_constructs(source_code: str) -> str:
     # Restricted to module-level statements (``tree.body``) so nested code is
     # never touched. Two kinds of statement are stripped:
     #   1. assignments that construct a TaskEnv directly (``X = TaskEnv(...)``)
-    #      or whose target is a collected env name (``UPI = make_task_env(...)``
-    #      when ``@task(env=UPI)`` was seen), and
+    #      or whose target is a collected env name (``TRAINING = make_task_env(...)``
+    #      when ``@task(env=TRAINING)`` was seen), and
     #   2. imports that bind a collected env name/module (``from _envs import
-    #      UPI`` / ``import _envs``) when that name is env-only.
+    #      TRAINING`` / ``import _envs``) when that name is env-only.
     #
     # We record each candidate's bound name(s) + line range, then verify (after
     # a reference scan) that removing it cannot break kept runtime code.
@@ -1184,12 +1184,12 @@ def _strip_authoring_constructs(source_code: str) -> str:
 
     # Reference scan: every ``Name`` used in a ``Load`` context, mapped to the
     # 1-indexed lines it appears on. Attribute roots (``_envs`` in
-    # ``_envs.UPI``) are plain ``Name`` Load nodes too, so this covers them.
+    # ``_envs.TRAINING``) are plain ``Name`` Load nodes too, so this covers them.
     #
     # FIX N1 (§3.5): exclude ``Name`` nodes that live in a type-annotation slot
     # (param/return/AnnAssign). Annotations are stripped from the baked output by
     # ``_strip_type_hints`` (which runs later), so an env name used ONLY as a
-    # type annotation (``def f(x: UPI) -> UPI:``) is NOT a live runtime
+    # type annotation (``def f(x: TRAINING) -> TRAINING:``) is NOT a live runtime
     # reference and must not trip the body-ref fail-fast. A real body reference
     # (outside annotations) still records a Load and still fails fast.
     if env_assign_bindings or env_import_candidates:
@@ -1234,7 +1234,7 @@ def _strip_authoring_constructs(source_code: str) -> str:
                     "statement with runtime name(s) "
                     + ", ".join(used_others)
                     + ". Split the import so TaskEnv env names are imported on "
-                    "their own line (e.g. `from _envs import UPI` separate from "
+                    "their own line (e.g. `from _envs import TRAINING` separate from "
                     "`from _envs import helper`); env imports are authoring-only "
                     "and stripped from the baked runtime program."
                 )

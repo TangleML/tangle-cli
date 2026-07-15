@@ -88,8 +88,8 @@ def test_sdk_pipelines_help_lists_local_commands(capsys):
     assert "hydrate" in output
     assert "diagram" in output
     assert "layout" in output
+    assert "compile" in output
     assert "pipeline-runs" not in output
-    assert "compile" not in output
 
 
 def test_pipeline_hydrator_generic_local_resolver_priority(tmp_path: Path):

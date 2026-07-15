@@ -19,6 +19,7 @@ from .cli_options import (
 from .logger import logger_for_log_type
 from .pipelines import (
     PipelineValidationError,
+    compile_pipeline_file,
     generate_mermaid,
     hydrate_pipeline_file,
     layout_pipeline_file,
@@ -125,6 +126,18 @@ def _parse_vars(values: list[str] | dict[str, object] | None) -> dict[str, str]:
     return parsed
 
 
+def _parse_overrides(values: list[str] | None) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for value in values or []:
+        if "=" not in value:
+            raise SystemExit("--override entries must use KEY=VALUE syntax")
+        key, parsed_value = value.split("=", 1)
+        if not key:
+            raise SystemExit("--override entries must use KEY=VALUE syntax")
+        parsed[key] = parsed_value
+    return parsed
+
+
 @app.command(name="hydrate")
 def pipelines_hydrate(
     pipeline_path: pathlib.Path,
@@ -221,6 +234,66 @@ def pipelines_hydrate(
             f"Hydrated {pipeline_path} -> {result.output_path} "
             f"({result.resolved_components} component(s) resolved)."
         )
+
+
+@app.command(name="compile")
+def pipelines_compile(
+    pipeline_path: pathlib.Path,
+    *,
+    output: Annotated[
+        pathlib.Path,
+        Parameter(
+            name="--output",
+            alias="-o",
+            help="Output path for the compiled dehydrated pipeline YAML.",
+        ),
+    ],
+    pipeline: Annotated[
+        str | None,
+        Parameter(
+            name="--pipeline",
+            help=(
+                "Select the root @pipeline function by name when the file "
+                "defines several."
+            ),
+        ),
+    ] = None,
+    override: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--override",
+            help="Compile-time config override as KEY=VALUE. Repeat for multiple.",
+            negative_iterable=(),
+        ),
+    ] = None,
+    log_type: LogTypeOption = "console",
+) -> None:
+    """Compile a Python-authored pipeline to a dehydrated YAML bundle."""
+
+    logger, finalize_logs = logger_for_log_type(log_type)
+    try:
+        result = compile_pipeline_file(
+            pipeline_path,
+            output,
+            overrides=_parse_overrides(override),
+            pipeline_name=pipeline,
+            logger=logger,
+        )
+    except PipelineValidationError as exc:
+        raise SystemExit(str(exc)) from exc
+    finally:
+        finalize_logs()
+
+    print(
+        f"Compiled {pipeline_path} -> {result.pipeline_path} "
+        f"({result.task_count} task(s))."
+    )
+    if result.components_path is not None:
+        print(f"Wrote component sidecar: {result.components_path}")
+    for subgraph_path in result.subgraph_paths:
+        print(f"Wrote subgraph: {subgraph_path}")
+    for warning in result.warnings:
+        print(f"warning: {warning}")
 
 
 @app.command(name="layout")

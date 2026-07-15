@@ -280,7 +280,7 @@ def trace_pipeline(
             raise CompileError(
                 "@pipeline declared -> Out[T] but the function did not return a "
                 "TaskOutputProxy. Return the result of the final task call (e.g. "
-                "`return publish_to_comet`)."
+                "`return train_model`)."
             )
         inner = _annotation_inner_type(return_anno)
         type_str = _python_type_to_tangle_type(inner)

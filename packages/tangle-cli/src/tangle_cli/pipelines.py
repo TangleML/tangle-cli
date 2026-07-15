@@ -13,7 +13,7 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 import yaml
 
@@ -27,6 +27,9 @@ from .pipeline_validation import (
     validate_pipeline_spec,
 )
 from .utils import dump_yaml
+
+if TYPE_CHECKING:
+    from .pipeline_compiler import CompileResult
 
 POSITION_ANNOTATION = "editor.position"
 
@@ -241,6 +244,49 @@ def hydrate_pipeline_file(
         output_path=output_path,
         resolved_components=hydrated.resolved_count,
     )
+
+
+# ---------------------------------------------------------------------------
+# Compile
+# ---------------------------------------------------------------------------
+
+
+def compile_pipeline_file(
+    script: str | Path,
+    output: str | Path,
+    *,
+    overrides: Mapping[str, str] | None = None,
+    pipeline_name: str | None = None,
+    emit_components_sidecar: bool = True,
+    logger: Any | None = None,
+) -> CompileResult:
+    """Compile a Python-authored pipeline to a dehydrated YAML bundle.
+
+    Instantiates the ported :class:`~tangle_cli.pipeline_compiler.PipelineCompiler`
+    handler and delegates to its ``compile_file`` method, translating the
+    compiler's domain errors into :class:`PipelineValidationError` for a uniform
+    CLI failure contract. Mirrors :func:`hydrate_pipeline_file`.
+
+    The :class:`~tangle_cli.pipeline_compiler.CompileResult` is returned as-is —
+    unlike hydrate, the compiler already exposes its public result type, so there
+    is nothing to repackage.
+    """
+
+    from .pipeline_compiler import PipelineCompiler
+    from .python_pipeline.errors import CompileError
+    from .schema_validation import SchemaValidationError
+
+    compiler = PipelineCompiler(logger=logger)
+    try:
+        return compiler.compile_file(
+            Path(script),
+            Path(output),
+            overrides=dict(overrides) if overrides else None,
+            pipeline_name=pipeline_name,
+            emit_components_sidecar=emit_components_sidecar,
+        )
+    except (CompileError, SchemaValidationError) as exc:
+        raise PipelineValidationError(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

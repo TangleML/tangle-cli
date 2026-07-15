@@ -126,8 +126,10 @@ def registered(
               hydrate).
             - An explicit relative path is resolved against the nearest
               ancestor directory of the operation's source file that
-              contains the ``oasis.pipeline_component_root.yaml`` zone-root
-              marker.
+              contains a registered zone-root marker (see
+              ``pipeline_compiler.ZONE_ROOT_MARKERS``). The open-source
+              build registers no markers by default, so a relative path is
+              rejected unless a downstream distribution adds one.
             - When omitted, defaults to the NEAREST ancestor
               ``gen_config.yaml`` of the operation's source file.
 
