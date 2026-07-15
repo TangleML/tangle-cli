@@ -6,6 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Alexey Volkov", email = "alexey.volkov@ark-kun.com" },
     { name = "Tangle authors" },
+    { name = "Volv Grebennikov", email = "volv.grebennikov@shopify.com" },
 ]
 requires-python = ">=3.10"
 dependencies = [
