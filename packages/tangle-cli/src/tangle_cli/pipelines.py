@@ -89,8 +89,8 @@ def validate_pipeline_file(path: str | Path) -> dict[str, Any]:
     return pipeline
 
 
-def validate_pipeline_spec(pipeline: Mapping[str, Any]) -> None:
-    """Validate the OSS-compatible local pipeline shape.
+def collect_pipeline_spec_errors(pipeline: Mapping[str, Any]) -> list[str]:
+    """Return OSS-compatible local pipeline shape validation errors.
 
     This is a pragmatic validator for local authoring workflows. It focuses on
     the graph structure that the CLI commands consume rather than provider-specific
@@ -99,6 +99,13 @@ def validate_pipeline_spec(pipeline: Mapping[str, Any]) -> None:
 
     errors: list[str] = []
     _validate_root_pipeline(pipeline, errors)
+    return errors
+
+
+def validate_pipeline_spec(pipeline: Mapping[str, Any]) -> None:
+    """Validate the OSS-compatible local pipeline shape."""
+
+    errors = collect_pipeline_spec_errors(pipeline)
     if errors:
         details = "\n".join(f"- {error}" for error in errors)
         raise PipelineValidationError(f"Pipeline validation failed:\n{details}")

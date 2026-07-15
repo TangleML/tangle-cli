@@ -109,24 +109,6 @@ class PipelineRunnerHooks(PipelineRunHooks):
 
         return pipeline_spec
 
-    def validate_pipeline_for_run(
-        self,
-        pipeline_spec: dict[str, Any],
-        *,
-        pipeline_path: str | Path,
-        effective_path: str | Path | None,
-        skip_validation: bool,
-    ) -> list[str]:
-        """Return validation errors for a prepared pipeline spec.
-
-        The OSS default intentionally does not enforce the local authoring
-        validator here: submit-time API validation remains the source of truth,
-        while downstreams can plug in stricter schema/input validators.
-        """
-
-        del pipeline_spec, pipeline_path, effective_path, skip_validation
-        return []
-
     def has_layout(self, pipeline_spec: Mapping[str, Any]) -> bool:
         """Return True when a pipeline graph already has non-zero coordinates."""
 
@@ -547,6 +529,7 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
                 pipeline_path=pipeline_path,
                 run_as=run_as,
                 hydrate=False,
+                skip_validation=skip_validation,
             )
             submit_payloads[attempt] = submit_payload
             return submit_payload.to_body()
