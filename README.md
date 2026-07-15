@@ -293,6 +293,8 @@ uv run tangle sdk pipeline-runs export RUN_ID --output pipeline.yaml
 
 `submit` hydrates refs by default and builds an API submit payload with `root_task.componentRef.spec`. Use `--no-hydrate` to submit the local YAML structure as-is. Use `--dry-run` to print the payload without creating a run.
 
+Before creating a run—or printing a `--dry-run` payload—`submit` runs the same authoring validation as `tangle sdk pipelines validate` on the hydrated/resolved pipeline spec (or on the as-is spec when `--no-hydrate` is used). Invalid specs fail locally with `Pipeline validation failed` errors before the run-submission API call. For example, the pipeline root must be a graph (`implementation.graph`), so a bare `implementation.container` root is rejected before the run is submitted.
+
 ## Programmatic client
 
 The stable public wrapper for downstream Python tools is:

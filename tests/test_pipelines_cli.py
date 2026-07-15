@@ -206,6 +206,23 @@ def test_pipelines_validate_rejects_non_string_task_ids(tmp_path: Path):
     assert "task ids must be strings" in str(exc_info.value)
 
 
+def test_pipelines_validate_rejects_bare_container_root(tmp_path: Path):
+    pipeline_path = _write_pipeline(
+        tmp_path / "pipeline.yaml",
+        {
+            "name": "Bare Container",
+            "implementation": {"container": {"image": "busybox"}},
+        },
+    )
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipelines", "validate", str(pipeline_path)])
+
+    assert exc_info.value.code != 0
+    assert "implementation.graph must be an object" in str(exc_info.value)
+
+
 def test_pipelines_diagram_outputs_small_dependency_graph(tmp_path: Path, capsys):
     pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml", _minimal_valid_pipeline())
     app = cli.build_app()
