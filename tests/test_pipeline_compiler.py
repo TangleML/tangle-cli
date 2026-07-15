@@ -786,6 +786,73 @@ def test_compile_propagate_config_broadcasts_through_configless_intermediate(tmp
 
 
 # ---------------------------------------------------------------------------
+# Cycle detection. A subpipeline that (transitively) reaches back to itself is
+# a recursive Python pipeline, which cannot be compiled to a finite graph. It
+# must be rejected with a precise "cycle detected" diagnostic — NOT allowed to
+# recurse until the max-depth guard trips, whose "reduce nesting depth" advice
+# is misleading for what is actually a cycle.
+
+_LOOP_SRC = (
+    "from tangle_cli.python_pipeline import In, Out, pipeline, subpipeline\n"
+    "\n"
+    "@pipeline('Loop')\n"
+    "def loop(seed: In[str]) -> Out[str]:\n"
+    "    # Self-reference => a 1-node cycle.\n"
+    "    return subpipeline(loop).named('Recurse')(seed=seed)\n"
+)
+
+
+def test_compile_detects_self_referencing_cycle(tmp_path):
+    """A self-referencing subpipeline is reported as a cycle, precisely."""
+    src = tmp_path / "loop_pipeline.py"
+    src.write_text(_LOOP_SRC)
+
+    with pytest.raises(CompileError) as exc_info:
+        compile_pipeline(src, tmp_path / "compiled.yaml", pipeline_name="loop")
+
+    msg = str(exc_info.value)
+    assert "nested pipeline cycle detected" in msg
+    assert "Loop" in msg
+    assert "max depth" not in msg  # must not degrade to the depth guard
+
+
+def test_compile_detects_cycle_under_propagate_config_passthrough(tmp_path):
+    """A cycle must still be caught precisely when the cyclic pipeline is
+    reached under a ``propagate_config`` ancestor that broadcasts a key the
+    cyclic pipeline does not declare (an ambient PASS-THROUGH key).
+
+    Regression guard: the cycle-check key is built by the parent WITH the
+    ambient pass-through folded in, while a child used to push its OWN key
+    (ambient-less) onto ``active_stack``. Under a pass-through broadcast the two
+    keys diverged, so ``child_key in active_stack`` never matched and the SAME
+    cycle that is caught in isolation instead degraded to the max-depth guard
+    after 32 redundant levels. The fix threads the parent-computed key into the
+    child compile so the stacked, registry, and cycle-check keys are identical.
+    """
+    src = tmp_path / "loop_pipeline.py"
+    src.write_text(
+        _LOOP_SRC
+        + "\n"
+        "@pipeline('Broadcast Root', config='root_config.yaml', propagate_config=True)\n"
+        "def broadcast_root(parent_wait_token: In[str], cfg) -> Out[str]:\n"
+        "    # Broadcasts shared_key; `loop` doesn't declare it, so it flows\n"
+        "    # PAST loop as ambient context at every self-edge.\n"
+        "    return subpipeline(loop).named('Run Loop')(seed=parent_wait_token)\n"
+    )
+    (tmp_path / "root_config.yaml").write_text("shared_key: broadcast-value\n")
+
+    with pytest.raises(CompileError) as exc_info:
+        compile_pipeline(
+            src, tmp_path / "compiled.yaml", pipeline_name="broadcast_root"
+        )
+
+    msg = str(exc_info.value)
+    assert "nested pipeline cycle detected" in msg
+    assert "Broadcast Root" in msg and "Loop" in msg
+    assert "max depth" not in msg  # the bug: cycle degraded to the depth guard
+
+
+# ---------------------------------------------------------------------------
 # @registered gen_config resolution. @registered references an EXISTING
 # gen_config.yaml and generates no sidecar of its own; the task's componentRef
 # is rewritten from the registered://pending sentinel to a resolve:// URL.

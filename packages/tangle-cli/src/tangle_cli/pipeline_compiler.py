@@ -345,6 +345,7 @@ def _compile_pipeline_fn(
     is_root: bool,
     base_dir: Path,
     rebroadcast_overrides: Mapping[str, Any] | None = None,
+    precomputed_key: PipelineCompileKey | None = None,
 ) -> SubgraphArtifact:
     """Trace + emit ``pipeline_fn`` into an in-memory :class:`SubgraphArtifact`.
 
@@ -402,8 +403,20 @@ def _compile_pipeline_fn(
         builder = trace_pipeline(pipeline_fn, cfg=cfg, inputs={})
     body_dict, exempt_paths = emit_pipeline(builder)
 
-    # 3. Compute the canonical compile key for dedup / cycle detection.
-    key = _compile_key_for(pipeline_fn, cfg_path, overrides)
+    # 3. The canonical compile key for dedup / cycle detection. A child is
+    #    compiled with the SAME key its parent already built for the cycle
+    #    check and registry lookup (``precomputed_key``) — critically, that key
+    #    folds in the ambient PASS-THROUGH context (broadcast keys the child
+    #    does not declare). Recomputing it here would drop that ambient
+    #    envelope, so the key pushed onto ``active_stack`` would no longer equal
+    #    the key the parent tests with ``child_key in active_stack`` — a real
+    #    cycle under ``propagate_config`` would then escape precise detection
+    #    and degrade to the max-depth guard. The root has no parent (and no
+    #    ambient), so it builds its own key from its own overrides.
+    if precomputed_key is not None:
+        key = precomputed_key
+    else:
+        key = _compile_key_for(pipeline_fn, cfg_path, overrides)
 
     # 4. @task local_from_python sidecar for THIS artifact (built, not
     #    written). Each @task ref is rewritten to a pure
@@ -691,6 +704,7 @@ def _process_subpipeline_children(
                     is_root=False,
                     base_dir=child_base_dir,
                     rebroadcast_overrides={},
+                    precomputed_key=child_key,
                 )
             finally:
                 if pushed_edge_override:
