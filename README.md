@@ -291,9 +291,11 @@ uv run tangle sdk pipeline-runs annotations set RUN_ID key value
 uv run tangle sdk pipeline-runs export RUN_ID --output pipeline.yaml
 ```
 
+`pipelines validate` checks local graph shape, the packaged Tangle pipeline JSON schema, and component input wiring when component specs are present. It does not hydrate refs; validate a hydrated file when you need fully resolved component-input checks for remote refs.
+
 `submit` hydrates refs by default and builds an API submit payload with `root_task.componentRef.spec`. Use `--no-hydrate` to submit the local YAML structure as-is. Use `--dry-run` to print the payload without creating a run.
 
-Before creating a run—or printing a `--dry-run` payload—`submit` runs the same authoring validation as `tangle sdk pipelines validate` on the hydrated/resolved pipeline spec (or on the as-is spec when `--no-hydrate` is used). Invalid specs fail locally with `Pipeline validation failed` errors before the run-submission API call. For example, the pipeline root must be a graph (`implementation.graph`), so a bare `implementation.container` root is rejected before the run is submitted.
+Before creating a run—or printing a `--dry-run` payload—`submit` runs the same authoring validation as `tangle sdk pipelines validate` on the hydrated/resolved pipeline spec (or on the as-is spec when `--no-hydrate` is used). Invalid specs fail locally with `Pipeline validation failed` errors before the run-submission API call. For example, the pipeline root must be a graph (`implementation.graph`), so a bare `implementation.container` root is rejected before the run is submitted; missing required component inputs and invalid task output references are rejected when component specs are available.
 
 ## Programmatic client
 

@@ -2529,10 +2529,44 @@ def test_pipeline_runner_orchestrates_load_validate_submit_wait(tmp_path: Path) 
     assert result["status"] == "SUCCEEDED"
     assert result["pipeline_name"] == "Run value"
     assert result["run_id"] == "run-1"
-    assert calls == ["validate:Demo Pipeline:False", "before_submit", "validate:Run value:False"]
+    assert calls == ["validate:Demo Pipeline:False", "before_submit"]
     assert client.created[0]["annotations"]["team"] == "oss"
     assert client.created[0]["annotations"]["tangle-cli/submission-id"]
     assert client.created[0]["root_task"]["componentRef"]["spec"]["name"] == "Run value"
+
+
+def test_pipeline_run_manager_submit_and_dry_run_validate_once_at_choke_point(tmp_path: Path) -> None:
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    calls: list[str] = []
+
+    class Hooks(PipelineRunHooks):
+        def validate_pipeline_for_run(self, pipeline_spec, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append(f"validate:{pipeline_spec['name']}:{kwargs['skip_validation']}")
+            return super().validate_pipeline_for_run(pipeline_spec, **kwargs)
+
+    manager = PipelineRunManager(client=FakeClient(), hooks=Hooks())
+
+    manager.run_pipeline(pipeline_path, run_args={"required": "value"}, hydrate=False)
+    assert calls == ["validate:Demo Pipeline:False"]
+
+    calls.clear()
+    manager.build_submit_body(pipeline_path, run_args={"required": "value"}, hydrate=False)
+    assert calls == ["validate:Demo Pipeline:False"]
+
+
+def test_pipeline_runner_inherited_dry_run_validates_once_at_choke_point(tmp_path: Path) -> None:
+    pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml")
+    calls: list[str] = []
+
+    class Hooks(PipelineRunnerHooks):
+        def validate_pipeline_for_run(self, pipeline_spec, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append(f"validate:{pipeline_spec['name']}:{kwargs['skip_validation']}")
+            return super().validate_pipeline_for_run(pipeline_spec, **kwargs)
+
+    runner = PipelineRunner(client=FakeClient(), hooks=Hooks())
+
+    runner.build_submit_body(pipeline_path, run_args={"required": "value"}, hydrate=False)
+    assert calls == ["validate:Demo Pipeline:False"]
 
 
 def test_pipeline_runner_maps_non_mapping_yaml_to_run_error(tmp_path: Path) -> None:
