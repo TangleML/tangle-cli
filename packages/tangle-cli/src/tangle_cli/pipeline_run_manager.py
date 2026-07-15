@@ -954,13 +954,14 @@ class PipelineRunManager(TangleCliHandler):
         )
         prepared_run_args = self.hooks.prepare_run_arguments(prepared_spec, run_args)
         prepared_spec = self.apply_run_name_template(prepared_spec, prepared_run_args)
-        validation_errors = self.hooks.validate_pipeline_for_run(
-            prepared_spec,
-            pipeline_path=pipeline_path,
-            effective_path=None,
-            skip_validation=skip_validation,
-        )
-        self._raise_pipeline_validation_error(validation_errors)
+        if not skip_validation:
+            validation_errors = self.hooks.validate_pipeline_for_run(
+                prepared_spec,
+                pipeline_path=pipeline_path,
+                effective_path=None,
+                skip_validation=False,
+            )
+            self._raise_pipeline_validation_error(validation_errors)
         payload = self.convert_yaml_to_payload(copy.deepcopy(prepared_spec), prepared_run_args)
         payload = self.sanitize_submit_payload(payload)
         root_task = payload["root_task"]

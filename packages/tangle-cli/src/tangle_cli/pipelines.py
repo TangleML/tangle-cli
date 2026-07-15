@@ -1,7 +1,9 @@
 """Local helpers for working with Tangle pipeline component specs.
 
-This module intentionally stays API-free: it validates, diagrams, and lays out
-pipeline YAML files that are already present on disk.
+This module intentionally stays API-free: it loads, hydrates, diagrams, and lays
+out pipeline YAML files that are already present on disk. Pipeline validation
+lives in :mod:`tangle_cli.pipeline_validation` and is re-exported here for
+backward compatibility.
 """
 
 from __future__ import annotations
@@ -15,15 +17,35 @@ from typing import Any, Iterable, Mapping
 
 import yaml
 
+from .pipeline_spec_utils import _extract_task_output_refs
+from .pipeline_validation import (
+    PipelineValidationError,
+    collect_pipeline_spec_errors,
+    load_pipeline_schema,
+    validate_component_inputs,
+    validate_pipeline_schema,
+    validate_pipeline_spec,
+)
 from .utils import dump_yaml
 
-PIPELINE_GRAPH_PATH = "implementation.graph"
-TASKS_PATH = f"{PIPELINE_GRAPH_PATH}.tasks"
 POSITION_ANNOTATION = "editor.position"
 
-
-class PipelineValidationError(ValueError):
-    """Raised when a local pipeline spec cannot be parsed or validated."""
+__all__ = [
+    "HydrateResult",
+    "LayoutResult",
+    "PipelineValidationError",
+    "collect_pipeline_spec_errors",
+    "generate_mermaid",
+    "hydrate_pipeline_file",
+    "layout_pipeline_file",
+    "layout_pipeline_spec",
+    "load_pipeline_file",
+    "load_pipeline_schema",
+    "validate_component_inputs",
+    "validate_pipeline_file",
+    "validate_pipeline_schema",
+    "validate_pipeline_spec",
+]
 
 
 @dataclass(frozen=True)
@@ -87,211 +109,6 @@ def validate_pipeline_file(path: str | Path) -> dict[str, Any]:
     pipeline = load_pipeline_file(path)
     validate_pipeline_spec(pipeline)
     return pipeline
-
-
-def collect_pipeline_spec_errors(pipeline: Mapping[str, Any]) -> list[str]:
-    """Return OSS-compatible local pipeline shape validation errors.
-
-    This is a pragmatic validator for local authoring workflows. It focuses on
-    the graph structure that the CLI commands consume rather than provider-specific
-    deployment extensions or remote API fields.
-    """
-
-    errors: list[str] = []
-    _validate_root_pipeline(pipeline, errors)
-    return errors
-
-
-def validate_pipeline_spec(pipeline: Mapping[str, Any]) -> None:
-    """Validate the OSS-compatible local pipeline shape."""
-
-    errors = collect_pipeline_spec_errors(pipeline)
-    if errors:
-        details = "\n".join(f"- {error}" for error in errors)
-        raise PipelineValidationError(f"Pipeline validation failed:\n{details}")
-
-
-def _validate_root_pipeline(pipeline: Mapping[str, Any], errors: list[str]) -> None:
-    name = pipeline.get("name")
-    if not isinstance(name, str) or not name.strip():
-        errors.append("name must be a non-empty string")
-
-    implementation = pipeline.get("implementation")
-    if not isinstance(implementation, Mapping):
-        errors.append("implementation must be an object")
-        return
-
-    graph = implementation.get("graph")
-    if not isinstance(graph, Mapping):
-        errors.append(f"{PIPELINE_GRAPH_PATH} must be an object")
-        return
-
-    _validate_graph_spec(pipeline, "pipeline", errors, require_tasks=True)
-
-
-def _validate_graph_spec(
-    spec: Mapping[str, Any],
-    path: str,
-    errors: list[str],
-    *,
-    require_tasks: bool,
-) -> None:
-    implementation = spec.get("implementation")
-    if not isinstance(implementation, Mapping):
-        if require_tasks:
-            errors.append(f"{path}.implementation must be an object")
-        return
-
-    graph = implementation.get("graph")
-    if not isinstance(graph, Mapping):
-        if require_tasks:
-            errors.append(f"{path}.{PIPELINE_GRAPH_PATH} must be an object")
-        return
-
-    tasks = graph.get("tasks")
-    if tasks is None and not require_tasks:
-        return
-    if not isinstance(tasks, Mapping):
-        errors.append(f"{path}.{TASKS_PATH} must be an object")
-        return
-
-    task_names: set[str] = set()
-    for name in tasks.keys():
-        if not isinstance(name, str):
-            errors.append(f"{path}.{TASKS_PATH} task ids must be strings")
-            continue
-        task_names.add(name)
-    edges: set[tuple[str, str]] = set()
-
-    for task_name, raw_task in tasks.items():
-        task_path = f"{path}.{TASKS_PATH}.{task_name}"
-        if not isinstance(task_name, str):
-            continue
-        if not isinstance(raw_task, Mapping):
-            errors.append(f"{task_path} must be an object")
-            continue
-
-        component_ref = raw_task.get("componentRef")
-        if not isinstance(component_ref, Mapping):
-            errors.append(f"{task_path}.componentRef must be an object")
-        else:
-            _validate_component_ref(component_ref, f"{task_path}.componentRef", errors)
-
-        dependencies = raw_task.get("dependencies", [])
-        if dependencies is None:
-            dependencies = []
-        if not isinstance(dependencies, list):
-            errors.append(f"{task_path}.dependencies must be a list of task ids")
-        else:
-            for dep in dependencies:
-                if not isinstance(dep, str):
-                    errors.append(f"{task_path}.dependencies entries must be strings")
-                    continue
-                if dep not in task_names:
-                    errors.append(f"{task_path}.dependencies references unknown task {dep!r}")
-                else:
-                    edges.add((dep, str(task_name)))
-
-        arguments = raw_task.get("arguments", {})
-        if arguments is not None and not isinstance(arguments, Mapping):
-            errors.append(f"{task_path}.arguments must be an object")
-        else:
-            for referenced_task in _extract_task_output_refs(arguments or {}):
-                if referenced_task not in task_names:
-                    errors.append(
-                        f"{task_path}.arguments references unknown task {referenced_task!r}"
-                    )
-                else:
-                    edges.add((referenced_task, str(task_name)))
-
-        if isinstance(component_ref, Mapping):
-            nested_spec = component_ref.get("spec")
-            if isinstance(nested_spec, Mapping):
-                _validate_graph_spec(
-                    nested_spec,
-                    f"{task_path}.componentRef.spec",
-                    errors,
-                    require_tasks=False,
-                )
-
-    output_values = graph.get("outputValues", {})
-    if output_values is not None and not isinstance(output_values, Mapping):
-        errors.append(f"{path}.{PIPELINE_GRAPH_PATH}.outputValues must be an object")
-    else:
-        for referenced_task in _extract_task_output_refs(output_values or {}):
-            if referenced_task not in task_names:
-                errors.append(
-                    f"{path}.{PIPELINE_GRAPH_PATH}.outputValues references unknown task "
-                    f"{referenced_task!r}"
-                )
-
-    cycle = _find_cycle(task_names, edges)
-    if cycle:
-        errors.append(f"{path}.{TASKS_PATH} contains a dependency cycle: {' -> '.join(cycle)}")
-
-
-def _validate_component_ref(ref: Mapping[str, Any], path: str, errors: list[str]) -> None:
-    has_selector = any(ref.get(key) for key in ("name", "digest", "tag", "url", "text"))
-    nested_spec = ref.get("spec")
-    if nested_spec is not None and not isinstance(nested_spec, Mapping):
-        errors.append(f"{path}.spec must be an object when provided")
-    if isinstance(nested_spec, Mapping):
-        has_selector = True
-    if not has_selector:
-        errors.append(
-            f"{path} must include at least one of name, digest, tag, url, text, or spec"
-        )
-
-
-def _extract_task_output_refs(value: Any) -> set[str]:
-    refs: set[str] = set()
-    if isinstance(value, Mapping):
-        task_output = value.get("taskOutput")
-        if isinstance(task_output, Mapping) and isinstance(task_output.get("taskId"), str):
-            refs.add(task_output["taskId"])
-        for nested in value.values():
-            refs.update(_extract_task_output_refs(nested))
-    elif isinstance(value, list):
-        for item in value:
-            refs.update(_extract_task_output_refs(item))
-    return refs
-
-
-def _find_cycle(nodes: Iterable[str], edges: Iterable[tuple[str, str]]) -> list[str]:
-    adjacency: dict[str, list[str]] = {node: [] for node in nodes}
-    for source, target in edges:
-        adjacency.setdefault(source, []).append(target)
-
-    visiting: set[str] = set()
-    visited: set[str] = set()
-    stack: list[str] = []
-
-    def visit(node: str) -> list[str] | None:
-        if node in visited:
-            return None
-        if node in visiting:
-            try:
-                start = stack.index(node)
-            except ValueError:
-                return [node, node]
-            return stack[start:] + [node]
-
-        visiting.add(node)
-        stack.append(node)
-        for neighbor in sorted(adjacency.get(node, [])):
-            cycle = visit(neighbor)
-            if cycle:
-                return cycle
-        stack.pop()
-        visiting.remove(node)
-        visited.add(node)
-        return None
-
-    for node in sorted(adjacency):
-        cycle = visit(node)
-        if cycle:
-            return cycle
-    return []
 
 
 # ---------------------------------------------------------------------------

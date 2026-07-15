@@ -11,6 +11,12 @@ import yaml
 
 from tangle_cli import cli
 from tangle_cli.pipeline_hydrator import PipelineHydrator
+from tangle_cli.pipelines import (
+    collect_pipeline_spec_errors,
+    load_pipeline_schema,
+    validate_component_inputs,
+    validate_pipeline_schema,
+)
 
 
 def run_app(app, args: list[str]) -> None:
@@ -223,6 +229,238 @@ def test_pipelines_validate_rejects_bare_container_root(tmp_path: Path):
     assert "implementation.graph must be an object" in str(exc_info.value)
 
 
+def test_vendored_pipeline_schema_loads_and_accepts_minimal_fixture():
+    schema = load_pipeline_schema()
+
+    assert schema["title"] == "Tangle Pipeline Schema (generated from TangleML)"
+    assert schema["x-tangle-source"]["path"] == "cloud_pipelines_backend/component_structures.py"
+    assert validate_pipeline_schema(_minimal_valid_pipeline()) == []
+
+
+def test_pipeline_schema_validation_rejects_wrong_root_input_type():
+    pipeline = _minimal_valid_pipeline()
+    pipeline["inputs"] = "not-a-list"
+
+    errors = validate_pipeline_schema(pipeline)
+
+    assert any("'inputs' must be array, got str" in error for error in errors)
+
+
+def _component_spec(
+    *,
+    inputs: list[dict] | None = None,
+    outputs: list[dict] | None = None,
+    implementation: dict | None = None,
+) -> dict:
+    return {
+        "name": "Component",
+        "inputs": inputs or [],
+        "outputs": outputs or [],
+        "implementation": implementation or {"container": {"image": "busybox"}},
+    }
+
+
+def _single_task_pipeline(task: dict, *, inputs: list[dict] | None = None) -> dict:
+    return {
+        "name": "Pipeline",
+        "inputs": inputs or [],
+        "implementation": {"graph": {"tasks": {"task": task}}},
+    }
+
+
+def test_component_input_validation_rejects_missing_required_input():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(inputs=[{"name": "query", "type": "String"}])
+            }
+        }
+    )
+
+    assert validate_component_inputs(pipeline) == [
+        "Task 'task': required input 'query' has no value or connection"
+    ]
+
+
+def test_component_input_validation_allows_optional_and_default_inputs():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(
+                    inputs=[
+                        {"name": "optional", "type": "String", "optional": True},
+                        {"name": "with_default", "type": "String", "default": "value"},
+                    ]
+                )
+            }
+        }
+    )
+
+    assert validate_component_inputs(pipeline) == []
+
+
+def test_component_input_validation_allows_null_default_without_argument():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(
+                    inputs=[{"name": "nullable", "type": "String", "default": None}]
+                )
+            }
+        }
+    )
+
+    assert validate_component_inputs(pipeline) == []
+
+
+def test_component_input_validation_allows_unknown_producer_outputs():
+    pipeline = {
+        "name": "Pipeline",
+        "implementation": {
+            "graph": {
+                "tasks": {
+                    "producer": {"componentRef": {"name": "RemoteProducer"}},
+                    "consumer": {
+                        "componentRef": {
+                            "spec": _component_spec(inputs=[{"name": "rows", "type": "String"}])
+                        },
+                        "arguments": {
+                            "rows": {"taskOutput": {"taskId": "producer", "outputName": "rows"}}
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+    assert validate_component_inputs(pipeline) == []
+
+
+def test_component_input_validation_rejects_known_empty_producer_outputs():
+    pipeline = {
+        "name": "Pipeline",
+        "implementation": {
+            "graph": {
+                "tasks": {
+                    "producer": {"componentRef": {"spec": _component_spec(outputs=[])}},
+                    "consumer": {
+                        "componentRef": {
+                            "spec": _component_spec(inputs=[{"name": "rows", "type": "String"}])
+                        },
+                        "arguments": {
+                            "rows": {"taskOutput": {"taskId": "producer", "outputName": "rows"}}
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+    assert validate_component_inputs(pipeline) == [
+        "Task 'consumer': input 'rows' references non-existent output 'rows' on task 'producer'"
+    ]
+
+
+def test_component_input_validation_rejects_bad_refs_on_supplied_optional_inputs():
+    pipeline = {
+        "name": "Pipeline",
+        "inputs": [{"name": "existing", "type": "String"}],
+        "implementation": {
+            "graph": {
+                "tasks": {
+                    "producer": {
+                        "componentRef": {
+                            "spec": _component_spec(outputs=[{"name": "rows", "type": "String"}])
+                        }
+                    },
+                    "consumer": {
+                        "componentRef": {
+                            "spec": _component_spec(
+                                inputs=[
+                                    {"name": "optional", "type": "String", "optional": True},
+                                    {"name": "with_default", "type": "String", "default": "value"},
+                                ]
+                            )
+                        },
+                        "arguments": {
+                            "optional": {"graphInput": {"inputName": "missing"}},
+                            "with_default": {
+                                "taskOutput": {"taskId": "producer", "outputName": "missing"}
+                            },
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+    assert validate_component_inputs(pipeline) == [
+        "Task 'consumer': input 'optional' references non-existent graph input 'missing'",
+        "Task 'consumer': input 'with_default' references non-existent output 'missing' on task 'producer'",
+    ]
+
+
+def test_component_input_validation_rejects_bad_task_output_name():
+    pipeline = {
+        "name": "Pipeline",
+        "implementation": {
+            "graph": {
+                "tasks": {
+                    "producer": {
+                        "componentRef": {
+                            "spec": _component_spec(outputs=[{"name": "rows", "type": "String"}])
+                        }
+                    },
+                    "consumer": {
+                        "componentRef": {
+                            "spec": _component_spec(inputs=[{"name": "rows", "type": "String"}])
+                        },
+                        "arguments": {
+                            "rows": {"taskOutput": {"taskId": "producer", "outputName": "missing"}}
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+    assert validate_component_inputs(pipeline) == [
+        "Task 'consumer': input 'rows' references non-existent output 'missing' on task 'producer'"
+    ]
+
+
+def test_component_input_validation_rejects_bad_graph_input_ref():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(inputs=[{"name": "query", "type": "String"}])
+            },
+            "arguments": {"query": {"graphInput": {"inputName": "missing"}}},
+        },
+        inputs=[{"name": "existing", "type": "String"}],
+    )
+
+    assert validate_component_inputs(pipeline) == [
+        "Task 'task': input 'query' references non-existent graph input 'missing'"
+    ]
+
+
+def test_collect_pipeline_errors_combines_shape_schema_and_input_wiring():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(inputs=[{"name": "query", "type": "String"}])
+            }
+        }
+    )
+    pipeline["inputs"] = "not-a-list"
+
+    errors = collect_pipeline_spec_errors(pipeline)
+
+    assert any("'inputs' must be array, got str" in error for error in errors)
+    assert "Task 'task': required input 'query' has no value or connection" in errors
+
+
 def test_pipelines_diagram_outputs_small_dependency_graph(tmp_path: Path, capsys):
     pipeline_path = _write_pipeline(tmp_path / "pipeline.yaml", _minimal_valid_pipeline())
     app = cli.build_app()
@@ -254,12 +492,19 @@ def test_pipelines_hydrate_renders_template_and_resolves_local_file_refs(
     )
     (tmp_path / "pipeline.yaml.j2").write_text(
         "name: {{ pipeline_name }}\n"
+        "inputs:\n"
+        "  - name: message\n"
+        "    type: String\n"
         "implementation:\n"
         "  graph:\n"
         "    tasks:\n"
         "      echo:\n"
         "        componentRef:\n"
-        "          url: file://{{ component_file }}\n",
+        "          url: file://{{ component_file }}\n"
+        "        arguments:\n"
+        "          message:\n"
+        "            graphInput:\n"
+        "              inputName: message\n",
         encoding="utf-8",
     )
     config_path = _write_pipeline(

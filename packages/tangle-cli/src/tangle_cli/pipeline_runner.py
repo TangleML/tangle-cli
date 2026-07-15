@@ -529,7 +529,7 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
                 pipeline_path=pipeline_path,
                 run_as=run_as,
                 hydrate=False,
-                skip_validation=skip_validation,
+                skip_validation=True,
             )
             submit_payloads[attempt] = submit_payload
             return submit_payload.to_body()
