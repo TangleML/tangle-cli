@@ -391,6 +391,14 @@ class PipelineRunner(PipelineRunnerHooks, PipelineRunManager):
                 if isinstance(spec_name, str) and spec_name:
                     pipeline_name = spec_name
 
+            # Resolve the fallback run name into the spec before validation.
+            # ``pipeline_name`` has already fallen back to ``initial_pipeline_name``
+            # (the path stem) whenever the spec omits a usable ``name``; mirror
+            # that into the spec so a file-based submit with no declared name
+            # still validates and runs under the fallback. A declared name has
+            # already won above, so only the genuinely-nameless case is filled.
+            pipeline_spec = self._resolve_fallback_pipeline_name(pipeline_spec, pipeline_name)
+
             validation_errors = hooks.validate_pipeline_for_run(
                 pipeline_spec,
                 pipeline_path=pipeline_path,
