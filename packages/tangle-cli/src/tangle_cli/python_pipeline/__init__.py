@@ -20,6 +20,7 @@ and lowered to the dehydrated dict shape by :mod:`.emit`.
 """
 from __future__ import annotations
 
+from .dynamic_data import dynamic_secret
 from .pipeline import pipeline
 from .raw import raw
 from .ref import ref
@@ -35,6 +36,7 @@ __all__ = [
     "registered",
     "ref",
     "raw",
+    "dynamic_secret",
     "subpipeline",
     "TaskEnv",
     "In",

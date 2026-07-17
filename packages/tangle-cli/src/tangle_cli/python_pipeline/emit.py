@@ -20,11 +20,14 @@ value decides the shape:
   also recorded in the returned exempt-paths set so the no-template-delimiter
   output guard skips that one location (it is a legitimate RUNTIME
   placeholder, e.g. a run-query ``{{input_1}}`` sentinel).
+* a :class:`DynamicData` value    → ``{"dynamicData": value}`` for runtime-
+  resolved arguments such as secrets.
 
 Non-string constants are rejected: the runnable Tangle argument contract
-only supports string constants, ``graphInput``, or ``taskOutput``.
-Structured/non-string values must be stringified explicitly in pipeline
-code (e.g. ``json.dumps(...)``) before they reach the compiler.
+only supports string constants, ``graphInput``, ``taskOutput``, or explicit
+``dynamicData`` wrappers. Structured/non-string values must be stringified
+explicitly in pipeline code (e.g. ``json.dumps(...)``) before they reach the
+compiler.
 
 The literal key the user wrote (``wait_for``, ``depends_on``,
 ``project``, ``payload``, ...) is preserved verbatim as the dict key.
@@ -33,6 +36,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .dynamic_data import DynamicData
 from .errors import CompileError, InvalidArgumentTypeError
 from .graph import EdgeRef, GraphBuilder, TaskNode
 from .placeholders import GraphInputPlaceholder, TaskOutputProxy
@@ -219,7 +223,8 @@ def _emit_argument_value(
     Dispatch is purely on the VALUE's runtime type — the argument *key*
     is never inspected. Produces a ``taskOutput`` / ``graphInput`` wrapper
     for edges, or the RAW string for a constant (matching the runnable
-    Tangle argument contract). Non-string constants are rejected.
+    Tangle argument contract). Non-string constants are rejected unless they
+    are explicit dynamic-data wrappers.
 
     A :class:`Raw` value is emitted as its inner string verbatim — exactly
     like a plain ``str`` constant — and ``arg_path`` (this argument's
@@ -244,6 +249,8 @@ def _emit_argument_value(
         # recorded here, at the only point the Raw wrapper is still visible.
         exempt_paths.add(arg_path)
         return value.value
+    if isinstance(value, DynamicData):
+        return {"dynamicData": value.value}
     # Everything else is a constant. The runnable schema only accepts raw
     # string constants, so validate and emit the string verbatim.
     _validate_constant(value, key)
@@ -254,10 +261,10 @@ def _validate_constant(value: Any, key: str) -> None:
     """Assert ``value`` is a runnable string constant.
 
     Runnable Tangle pipeline arguments only support raw ``str`` constants
-    (alongside the ``graphInput`` / ``taskOutput`` wrappers). A non-string
-    constant (``int``, ``float``, ``bool``, ``None``, ``list``, ``dict``,
-    a tuple/set, a leftover helper object, a callable, ...) cannot be
-    represented under the runnable schema, so it is rejected with a
+    (alongside the ``graphInput`` / ``taskOutput`` / explicit ``dynamicData``
+    wrappers). A non-string constant (``int``, ``float``, ``bool``, ``None``,
+    ``list``, ``dict``, a tuple/set, a leftover helper object, a callable, ...)
+    cannot be represented under the runnable schema, so it is rejected with a
     GENERIC, operation-agnostic message — the compiler has no
     operation-specific knowledge (no SQL, BigQuery, or other domain
     awareness). Authors must stringify structured/non-string values
@@ -268,7 +275,8 @@ def _validate_constant(value: Any, key: str) -> None:
     raise InvalidArgumentTypeError(
         f"unsupported constant type {type(value).__name__!r} for "
         f"argument {key!r}. Runnable Tangle pipeline arguments only support "
-        "string constants, graphInput, or taskOutput. Convert structured or "
+        "string constants, graphInput, or taskOutput; dynamicData wrappers are also supported. "
+        "Convert structured or "
         "non-string values to a string explicitly in your pipeline code "
         "(for example json.dumps(...) or str(...)) before passing them as "
         "task arguments."
