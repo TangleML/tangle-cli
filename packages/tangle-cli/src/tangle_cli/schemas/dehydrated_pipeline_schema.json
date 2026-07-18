@@ -169,11 +169,12 @@
     },
 
     "ArgumentValue": {
-      "description": "Source of a task argument or graph output. Each argument has EXACTLY ONE source: a raw string constant, a `graphInput` wrapper, or a `taskOutput` wrapper (mixing sources in one object is rejected). The `graphInput` / `taskOutput` wrappers use the same shapes as runnable Tangle pipelines. The ONLY dehydrated-vs-runnable difference is `componentRef` (a lightweight ref) vs an inline `componentSpec`; argument values are identical to the runnable contract.",
+      "description": "Source of a task argument or graph output. Each argument has EXACTLY ONE source: a raw string constant, a `graphInput` wrapper, a `taskOutput` wrapper, or a `dynamicData` wrapper (mixing sources in one object is rejected). The `graphInput` / `taskOutput` / `dynamicData` wrappers use the same shapes as runnable Tangle pipelines. The ONLY dehydrated-vs-runnable difference is `componentRef` (a lightweight ref) vs an inline `componentSpec`; argument values are identical to the runnable contract.",
       "oneOf": [
         { "type": "string" },
         { "$ref": "#/$defs/GraphInputArgument" },
-        { "$ref": "#/$defs/TaskOutputArgument" }
+        { "$ref": "#/$defs/TaskOutputArgument" },
+        { "$ref": "#/$defs/DynamicDataArgument" }
       ]
     },
 
@@ -218,6 +219,33 @@
       "properties": {
         "outputName": { "type": "string" },
         "taskId":     { "type": "string" }
+      }
+    },
+
+    "DynamicDataArgument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dynamicData"],
+      "properties": {
+        "dynamicData": { "$ref": "#/$defs/DynamicSecretData" }
+      }
+    },
+
+    "DynamicSecretData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secret"],
+      "properties": {
+        "secret": { "$ref": "#/$defs/DynamicSecretReference" }
+      }
+    },
+
+    "DynamicSecretReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 }
       }
     },
 

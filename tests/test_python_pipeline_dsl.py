@@ -56,6 +56,7 @@ class TestPublicSurface:
             "registered",
             "ref",
             "raw",
+            "dynamic_secret",
             "subpipeline",
             "TaskEnv",
             "In",

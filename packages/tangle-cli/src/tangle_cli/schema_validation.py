@@ -19,7 +19,7 @@ Public surface:
 * :func:`is_dehydrated_pipeline` — shape detector (no raise): top-level
   ``name`` + ``implementation.graph.tasks``, no ``template_file``, and
   task ``arguments`` values that are raw string constants or ``graphInput``
-  / ``taskOutput`` wrappers.
+  / ``taskOutput`` / ``dynamicData`` wrappers.
 * :func:`validate_dehydrated_pipeline` — JSON-Schema validation PLUS the
   deeper semantic checks jsonschema cannot express cleanly (dangling
   ``taskOutput.taskId``, undeclared ``graphInput.inputName``,
@@ -207,25 +207,25 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset(
     {"name", "description", "metadata", "inputs", "outputs", "implementation"}
 )
 
-# The reference-only ArgumentValue wrappers. A constant is NOT a wrapper —
-# it is a raw string (matching the runnable Tangle argument contract).
-_REFERENCE_ARGUMENT_KEYS = ("graphInput", "taskOutput")
+# ArgumentValue wrappers. A constant is NOT a wrapper — it is a raw string
+# (matching the runnable Tangle argument contract).
+_ARGUMENT_WRAPPER_KEYS = ("graphInput", "taskOutput", "dynamicData")
 
 
 def _is_argument_value(value: Any) -> bool:
     """True when ``value`` looks like a runnable ArgumentValue — a raw
-    string constant, or a mapping carrying a ``graphInput`` / ``taskOutput``
-    wrapper.
+    string constant, or a mapping carrying a ``graphInput`` / ``taskOutput`` /
+    ``dynamicData`` wrapper.
 
     There is no ambiguity: a raw string constant (even one whose text is
     ``"graphInput"`` or JSON like ``'{"graphInput": ...}'``) is a string,
     never the object wrapper shapes — so it can never collide with a
-    ``graphInput`` / ``taskOutput`` mapping.
+    ``graphInput`` / ``taskOutput`` / ``dynamicData`` mapping.
     """
     if isinstance(value, str):
         return True
     return isinstance(value, Mapping) and any(
-        key in value for key in _REFERENCE_ARGUMENT_KEYS
+        key in value for key in _ARGUMENT_WRAPPER_KEYS
     )
 
 
@@ -238,7 +238,7 @@ def is_dehydrated_pipeline(data: Any) -> bool:
     * NO ``template_file`` (it is the final rendered form, not a wrapper);
     * task ``arguments`` values AND graph ``outputValues`` values (when
       present) that are raw string constants or ``graphInput`` /
-      ``taskOutput`` wrappers — a non-string raw value (a bare
+      ``taskOutput`` / ``dynamicData`` wrappers — a non-string raw value (a bare
       number/list/object) or a legacy ``{constantValue: ...}`` wrapper is
       not a runnable argument value, so it means the input is not yet
       dehydrated.
