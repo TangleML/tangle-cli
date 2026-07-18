@@ -935,15 +935,16 @@ class PipelineRunManager(TangleCliHandler):
 
         A file-based submit whose spec omits a usable ``name`` still validates
         and runs under a fallback (historically the source-file stem), matching
-        the long-standing downstream behavior. A declared non-empty ``name``
-        always wins, and the fallback is applied only to the genuinely-nameless
-        case, so other structural errors still surface at validation. A no-op
-        when the spec is not a mapping or no fallback name is available.
+        the long-standing downstream behavior. A declared non-blank ``name``
+        always wins; a missing, non-string, or whitespace-only ``name`` is
+        treated as genuinely nameless and takes the fallback, so other
+        structural errors still surface at validation. A no-op when the spec is
+        not a mapping or no fallback name is available.
         """
         if not isinstance(pipeline_spec, dict):
             return pipeline_spec
         name = pipeline_spec.get("name")
-        if isinstance(name, str) and name:
+        if isinstance(name, str) and name.strip():
             return pipeline_spec
         if not (isinstance(fallback_name, str) and fallback_name):
             return pipeline_spec
