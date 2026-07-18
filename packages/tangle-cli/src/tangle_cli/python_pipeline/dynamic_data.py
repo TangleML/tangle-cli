@@ -13,7 +13,18 @@ from typing import Any, Mapping
 
 @dataclass(frozen=True)
 class DynamicData:
-    """A task argument value emitted as ``{"dynamicData": ...}``."""
+    """A task argument value emitted as ``{"dynamicData": value}``.
+
+    Internal emit primitive — not part of the public authoring surface (see
+    ``__init__.__all__``). ``value`` is a general mapping because the runtime
+    resolves several dynamic-data kinds (secrets, run IDs, loop indices), but
+    the only public producer today is :func:`dynamic_secret`, which always
+    builds the ``{"secret": {"name": ...}}`` shape that the strict dehydrated
+    schema accepts. Any other shape emits but fails closed at compile
+    validation until a new kind is added to both the constructor surface and
+    the schema together — so the public API never promises more than the
+    schema enforces.
+    """
 
     value: Mapping[str, Any]
 
