@@ -203,6 +203,73 @@ def test_pipeline_runs_submit_builds_create_payload(monkeypatch, tmp_path: Path,
     assert root_task["arguments"] == {"query": "default", "required": "value"}
 
 
+def test_pipeline_runs_submit_falls_back_to_file_stem_when_spec_has_no_name(
+    monkeypatch, tmp_path: Path, capsys
+):
+    # A file-based submit whose spec omits ``name`` still validates and runs,
+    # taking the source-file stem as the run name (the long-standing downstream
+    # fallback, now honored natively in OSS rather than rejected at submit).
+    pipeline_path = tmp_path / "my_pipeline.yaml"
+    pipeline_path.write_text(
+        yaml.safe_dump({"implementation": {"graph": {"tasks": {}}}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit", str(pipeline_path), "--no-hydrate"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"id": "run-1", "root_execution_id": "exec-1"}
+    assert fake_client.created[0]["root_task"]["componentRef"]["spec"]["name"] == "my_pipeline"
+
+
+def test_pipeline_runs_submit_prefers_declared_name_over_file_stem(
+    monkeypatch, tmp_path: Path, capsys
+):
+    # A declared non-empty ``name`` always wins over the file-stem fallback,
+    # even when the file stem (here ``config``) differs from the declared name.
+    pipeline_path = tmp_path / "config.yaml"
+    pipeline_path.write_text(
+        yaml.safe_dump(
+            {"name": "Demo Pipeline", "implementation": {"graph": {"tasks": {}}}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit", str(pipeline_path), "--no-hydrate"])
+
+    assert fake_client.created[0]["root_task"]["componentRef"]["spec"]["name"] == "Demo Pipeline"
+
+
+def test_pipeline_runs_submit_falls_back_to_file_stem_for_whitespace_only_name(
+    monkeypatch, tmp_path: Path, capsys
+):
+    # A whitespace-only ``name`` is not a usable declared name, so it is treated
+    # as nameless and takes the file-stem fallback rather than being submitted
+    # verbatim as a blank run name.
+    pipeline_path = tmp_path / "my_pipeline.yaml"
+    pipeline_path.write_text(
+        yaml.safe_dump(
+            {"name": "   ", "implementation": {"graph": {"tasks": {}}}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit", str(pipeline_path), "--no-hydrate"])
+
+    assert fake_client.created[0]["root_task"]["componentRef"]["spec"]["name"] == "my_pipeline"
+
+
 def test_pipeline_runs_submit_rejects_authoring_validation_errors(monkeypatch, tmp_path: Path):
     pipeline_path = _write_invalid_authoring_pipeline(tmp_path / "pipeline.yaml")
     fake_client = FakeClient()

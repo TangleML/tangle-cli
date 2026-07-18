@@ -926,6 +926,30 @@ class PipelineRunManager(TangleCliHandler):
             hydrate=hydrate,
         )
 
+    @staticmethod
+    def _resolve_fallback_pipeline_name(
+        pipeline_spec: dict[str, Any],
+        fallback_name: str | None,
+    ) -> dict[str, Any]:
+        """Fill a missing pipeline ``name`` from a caller-resolved fallback.
+
+        A file-based submit whose spec omits a usable ``name`` still validates
+        and runs under a fallback (historically the source-file stem), matching
+        the long-standing downstream behavior. A declared non-blank ``name``
+        always wins; a missing, non-string, or whitespace-only ``name`` is
+        treated as genuinely nameless and takes the fallback, so other
+        structural errors still surface at validation. A no-op when the spec is
+        not a mapping or no fallback name is available.
+        """
+        if not isinstance(pipeline_spec, dict):
+            return pipeline_spec
+        name = pipeline_spec.get("name")
+        if isinstance(name, str) and name.strip():
+            return pipeline_spec
+        if not (isinstance(fallback_name, str) and fallback_name):
+            return pipeline_spec
+        return {**pipeline_spec, "name": fallback_name}
+
     def prepare_submit_payload_from_spec(
         self,
         pipeline_spec: dict[str, Any],
@@ -954,6 +978,10 @@ class PipelineRunManager(TangleCliHandler):
         )
         prepared_run_args = self.hooks.prepare_run_arguments(prepared_spec, run_args)
         prepared_spec = self.apply_run_name_template(prepared_spec, prepared_run_args)
+        prepared_spec = self._resolve_fallback_pipeline_name(
+            prepared_spec,
+            Path(str(pipeline_path)).stem if pipeline_path is not None else None,
+        )
         if not skip_validation:
             validation_errors = self.hooks.validate_pipeline_for_run(
                 prepared_spec,
