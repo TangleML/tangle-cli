@@ -1432,7 +1432,7 @@ def _build_local_from_python_components(
     """Build the ``<stem>.components.yaml`` content for @task refs.
 
     Returns an ordered map ``{fragment: {name?, local_from_python:
-    {image?, function, dependencies_from?, file}}}``, DEDUPED by FUNCTION
+    {image?, function, mode?, resolve_root?, dependencies_from?, file}}}``, DEDUPED by FUNCTION
     (the fragment = hyphenated function name). The SAME @task function
     called from multiple task sites collapses to one entry; TWO DISTINCT
     @task functions defined in ONE file each get their own entry (they
@@ -1496,6 +1496,16 @@ def _build_local_from_python_components(
         # to the file stem and extracts the wrong symbol.
         assert ref._task_function_name is not None
         local_from_python["function"] = ref._task_function_name
+        if ref._task_mode is not None:
+            local_from_python["mode"] = ref._task_mode
+        if ref._task_resolve_root is not None:
+            resolve_root = ref._task_resolve_root
+            if not resolve_root.exists():
+                raise CompileError(
+                    f"@task resolve_root is unreachable: {resolve_root}. "
+                    "Point resolve_root at an existing directory or drop it."
+                )
+            local_from_python["resolve_root"] = _relpath_posix(resolve_root, components_yaml_dir)
         if ref._task_dependencies_from is not None:
             deps = ref._task_dependencies_from
             if not deps.exists():

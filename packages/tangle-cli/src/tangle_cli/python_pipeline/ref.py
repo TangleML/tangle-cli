@@ -50,6 +50,8 @@ class CallableRef:
     _task_function_name: str | None = None
     _task_image: str | None = None
     _task_dependencies_from: Path | None = None
+    _task_mode: str | None = None
+    _task_resolve_root: Path | None = None
     _task_custom_annotations: dict[str, str] | None = None
     # ``@registered`` metadata. ``None`` for ``ref()``/``@task`` refs;
     # populated by the ``@registered`` decorator. Drives the compile-time
@@ -154,6 +156,8 @@ class CallableRef:
                 function_name=self._task_function_name,
                 dependencies_from=deps,
                 custom_annotations=self._task_custom_annotations,
+                mode=self._task_mode or "inline",
+                resolve_root=self._task_resolve_root,
             )
         else:
             generator.regenerate_yaml(
@@ -162,6 +166,8 @@ class CallableRef:
                 function_name=self._task_function_name,
                 image=self._task_image,
                 dependencies_from=self._task_dependencies_from,
+                mode=self._task_mode or "inline",
+                resolve_root=self._task_resolve_root,
             )
         return output_path
 
