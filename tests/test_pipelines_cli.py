@@ -958,12 +958,15 @@ def _write_local_from_python_pipeline(
     project_dir: Path,
     python_file: str,
     *,
+    mode: str | None = None,
     resolve_root: str | None = None,
 ) -> Path:
     gen_config = {
         "file": python_file,
         "output_folder": "./generated",
     }
+    if mode is not None:
+        gen_config["mode"] = mode
     if resolve_root is not None:
         gen_config["resolve_root"] = resolve_root
     _write_pipeline(
@@ -1018,6 +1021,44 @@ def test_pipelines_hydrate_local_from_python_trusts_project_paths(
     ref = hydrated["implementation"]["graph"]["tasks"]["generated"]["componentRef"]
     assert ref["name"] == "Generated Component"
     assert regenerated == [python_file.resolve()]
+
+
+def test_pipelines_hydrate_local_from_python_forwards_bundle_mode_and_resolve_root(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from tangle_cli import pipeline_hydrator as hydrator_module
+    from tangle_cli.pipelines import hydrate_pipeline_file
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    src_dir = project_dir / "src"
+    src_dir.mkdir()
+    python_file = src_dir / "component.py"
+    python_file.write_text("# trusted project component\n", encoding="utf-8")
+    pipeline_path = _write_local_from_python_pipeline(
+        project_dir,
+        "./src/component.py",
+        mode="bundle",
+        resolve_root="./src",
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_regenerate_yaml(**kwargs):
+        calls.append(kwargs)
+        kwargs["output_path"].write_text(
+            "name: Generated Component\nimplementation:\n  container:\n    image: busybox\n",
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+
+    hydrate_pipeline_file(pipeline_path)
+
+    assert calls[0]["python_file"] == python_file.resolve()
+    assert calls[0]["mode"] == "bundle"
+    assert calls[0]["resolve_root"] == src_dir.resolve()
 
 
 def test_pipelines_hydrate_local_from_python_refuses_untrusted_absolute_path(

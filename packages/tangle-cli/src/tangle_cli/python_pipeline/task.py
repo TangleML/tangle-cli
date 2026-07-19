@@ -1,7 +1,7 @@
 """``@task`` decorator.
 
 The decorator captures metadata about a Python function (source path,
-function name, container image, dependencies, custom name, annotations)
+function name, container image, dependencies, generation mode, resolve root, custom name, annotations)
 and returns a :class:`CallableRef` with NO componentRef URL set.
 
 At compile time the driver collects every ``@task`` ref that gets called
@@ -66,6 +66,8 @@ def task(
     env: TaskEnv | None = None,
     image: str | None = None,
     dependencies_from: str | Path | None = None,
+    mode: str | None = None,
+    resolve_root: str | Path | None = None,
     annotations: dict[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], CallableRef]:
     """Decorator: turn a Python function into a Tangle component ref.
@@ -99,6 +101,14 @@ def task(
             file when given as a string. Emitted into
             ``components.yaml#local_from_python.dependencies_from``.
             Overrides ``env.dependencies_from`` when both are given.
+        mode: Optional local-from-python generation mode. ``None``
+            preserves the hydrator default (currently ``inline``).
+            Use ``"bundle"`` to ask hydrate-time codegen to embed
+            first-party imports using the existing module bundler.
+        resolve_root: Optional module resolution root for bundle mode.
+            Relative strings are resolved relative to the task source
+            file, then emitted into
+            ``components.yaml#local_from_python.resolve_root``.
         annotations: Extra annotations to merge into the emitted
             component's ``metadata.annotations`` block.
 
@@ -143,6 +153,9 @@ def task(
     # the normalisation below unchanged; an explicit relative string is
     # still resolved relative to the @task source file.
     raw_dependencies_from = effective_deps_raw
+    raw_resolve_root = resolve_root
+    if mode is not None and mode not in {"inline", "bundle"}:
+        raise ValueError("@task(mode=...) must be 'inline', 'bundle', or None")
 
     def decorator(fn: Callable[..., Any]) -> CallableRef:
         # Capture the absolute path of the source file the user wrote
@@ -161,9 +174,8 @@ def task(
 
         function_name = fn.__name__
 
-        # Resolve dependencies_from relative to the source file when
-        # the user gave a string. Absolute paths and explicit Path
-        # objects pass through unchanged.
+        # Resolve local paths relative to the source file when the user
+        # gave a relative value. Absolute paths pass through unchanged.
         deps_path: Path | None
         if raw_dependencies_from is None:
             deps_path = None
@@ -171,6 +183,14 @@ def task(
             deps_path = Path(raw_dependencies_from)
             if not deps_path.is_absolute():
                 deps_path = (source_path.parent / deps_path).resolve()
+
+        resolve_root_path: Path | None
+        if raw_resolve_root is None:
+            resolve_root_path = None
+        else:
+            resolve_root_path = Path(raw_resolve_root)
+            if not resolve_root_path.is_absolute():
+                resolve_root_path = (source_path.parent / resolve_root_path).resolve()
 
         # No URL set at decoration time -- the compile driver rewrites
         # componentRef.url for @task-derived refs to
@@ -183,6 +203,8 @@ def task(
             _task_function_name=function_name,
             _task_image=effective_image,
             _task_dependencies_from=deps_path,
+            _task_mode=mode,
+            _task_resolve_root=resolve_root_path,
             _task_custom_annotations=dict(annotations) if annotations else None,
         )
 

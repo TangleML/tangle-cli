@@ -344,6 +344,37 @@ def test_compile_task_decorator_emits_sidecar(tmp_path):
     validate_dehydrated_data(yaml.safe_load(out.read_text()))
 
 
+def test_compile_task_decorator_emits_bundle_mode_and_resolve_root(tmp_path):
+    """@task(mode="bundle") is carried into the auto-emitted sidecar."""
+    project = tmp_path / "project"
+    src = project / "src"
+    pipeline_path = src / "pipeline.py"
+    src.mkdir(parents=True)
+    (src / "helpers.py").write_text("MESSAGE = 'hello'\n", encoding="utf-8")
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from helpers import MESSAGE\n\n"
+        "@task(image='python:3.12', mode='bundle', resolve_root='.')\n"
+        "def bundled_task() -> str:\n"
+        "    return MESSAGE\n\n"
+        "@pipeline('Bundle Pipeline')\n"
+        "def bundle_pipeline() -> Out[str]:\n"
+        "    bundled = bundled_task()\n"
+        "    return bundled\n",
+        encoding="utf-8",
+    )
+
+    out = project / "compiled.yaml"
+    result = compile_pipeline(pipeline_path, out)
+
+    sidecar = yaml.safe_load(result.components_path.read_text())
+    local_from_python = sidecar["bundled-task"]["local_from_python"]
+    assert local_from_python["mode"] == "bundle"
+    assert local_from_python["resolve_root"] == "./src"
+    assert local_from_python["file"] == "./src/pipeline.py"
+    assert local_from_python["function"] == "bundled_task"
+
+
 # ---------------------------------------------------------------------------
 # Runnable argument-value emission (raw string constant / graphInput /
 # taskOutput). Dispatch is on the VALUE's type, never the argument KEY.
