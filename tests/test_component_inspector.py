@@ -97,6 +97,27 @@ class TestTransparencyCheck:
         assert transparent is False
         assert "no inline source" in reason
 
+    def test_git_source_reason_does_not_leak_credentials(self):
+        spec = ComponentSpec.from_dict({
+            "spec": {
+                "name": "demo",
+                "implementation": {"container": {"image": "registry.example.com/private/demo:latest"}},
+                "metadata": {
+                    "annotations": {
+                        "git_remote_url": "https://user:s3cr3tTOKEN@github.com/Org/repo.git",
+                        "component_yaml_path": "comp.yaml",
+                    },
+                },
+            },
+        })
+
+        transparent, reason = ComponentInspector.transparency_check(spec)
+
+        assert transparent is True
+        assert "s3cr3tTOKEN" not in reason
+        assert "@github.com" not in reason
+        assert "https://github.com/Org/repo" in reason
+
 
 class TestComponentLibrary:
     def test_standard_library_does_not_fetch_cross_origin_component_urls(self):

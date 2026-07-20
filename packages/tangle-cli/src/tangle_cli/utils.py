@@ -870,31 +870,143 @@ _CI_BRANCH_VARS: tuple[str, ...] = ("BUILDKITE_BRANCH", "GITHUB_REF_NAME", "CI_C
 _CI_REPO_URL_VARS: tuple[str, ...] = ("BUILDKITE_REPO", "GITHUB_SERVER_URL", "CI_REPOSITORY_URL")
 
 
-def _normalize_git_url(url: str) -> str:
-    """Normalize a git remote URL to a browsable HTTPS URL.
+# Query-string parameter names that carry authentication material.  Exact
+# matches for short/ambiguous keys that must not be caught by the substring
+# rules below (e.g. ``sig``, ``key``, ``auth``).
+_SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset({
+    "access_token", "personal_access_token", "private_token", "token",
+    "api_key", "apikey", "key", "auth", "authorization",
+    "password", "passwd", "pwd", "secret",
+    "sig", "signature", "x-access-token",
+})
 
-    Handles common formats:
-    - ``git@github.com:Org/repo.git``   -> ``https://github.com/Org/repo``
-    - ``ssh://git@github.com/Org/repo.git`` -> ``https://github.com/Org/repo``
-    - ``https://github.com/Org/repo.git`` -> ``https://github.com/Org/repo``
-    - ``https://github.com/Org/repo``     -> unchanged
+# Fail-closed substrings: any query key containing one of these (case-folded)
+# is treated as credential-bearing even when it is not an exact known key.  This
+# catches provider-specific and future keys such as ``oauth_token``,
+# ``X-Amz-Signature``, ``X-Amz-Credential`` or ``X-Amz-Security-Token`` without
+# over-matching benign params like ``ref``/``path`` — which is why bare
+# ``key``/``sig``/``auth`` stay exact-match only above.
+_SENSITIVE_QUERY_SUBSTRINGS: tuple[str, ...] = (
+    "token", "secret", "password", "passwd", "credential",
+    "signature", "apikey", "api_key", "oauth", "x-amz-", "x-access",
+)
 
-    The ``.git`` suffix is stripped so the result can be used directly to
-    build ``/blob/{ref}/{path}`` links without an extra ``.removesuffix``.
+
+def _is_sensitive_query_key(key: str) -> bool:
+    """Return whether a URL query parameter name carries authentication material."""
+    folded = key.lower()
+    if folded in _SENSITIVE_QUERY_KEYS:
+        return True
+    return any(token in folded for token in _SENSITIVE_QUERY_SUBSTRINGS)
+
+
+def _redact_sensitive_query(query: str) -> str:
+    """Drop credential-bearing parameters from a URL query string.
+
+    Uses a fail-closed predicate (:func:`_is_sensitive_query_key`) so unknown
+    credential-shaped keys are dropped rather than allowed through.  A query
+    with no sensitive keys is returned byte-for-byte unchanged so that ordinary
+    URLs are not silently re-encoded.
     """
-    import re
+    if not query:
+        return query
 
-    # SCP-style: git@host:path
-    m = re.match(r"^git@([^:]+):(.+)$", url)
-    if m:
-        url = f"https://{m.group(1)}/{m.group(2)}"
-    else:
-        # ssh://git@host/path
-        m = re.match(r"^ssh://(?:[^@]+@)?([^/]+)/(.+)$", url)
-        if m:
-            url = f"https://{m.group(1)}/{m.group(2)}"
+    from urllib.parse import parse_qsl, urlencode
 
-    return url.removesuffix(".git")
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if not any(_is_sensitive_query_key(key) for key, _ in pairs):
+        return query
+    kept = [(key, value) for key, value in pairs if not _is_sensitive_query_key(key)]
+    return urlencode(kept)
+
+
+# Placeholder emitted when a URL-like remote carries credentials but cannot be
+# parsed into a clean host (malformed authority, missing host with userinfo,
+# malformed IPv6).  Returning this rather than the raw input keeps credential
+# material out of persisted annotations, CLI output, logs, and browse links, and
+# stops the parser from raising into callers.
+_REDACTED_GIT_URL: str = "[redacted-invalid-git-url]"
+
+
+def _normalize_git_url(url: str) -> str:
+    """Normalize a git remote URL to a browsable, credential-free HTTPS URL.
+
+    Converts SSH/SCP forms to HTTPS and strips the ``.git`` suffix so the
+    result can build ``/blob/{ref}/{path}`` links directly:
+
+    - ``git@github.com:Org/repo.git``        -> ``https://github.com/Org/repo``
+    - ``ssh://git@github.com/Org/repo.git``  -> ``https://github.com/Org/repo``
+    - ``https://github.com/Org/repo.git``    -> ``https://github.com/Org/repo``
+    - ``https://github.com/Org/repo``        -> unchanged
+
+    Any embedded credentials are removed: ``user:password@`` / ``token@``
+    userinfo is stripped from URL-form and scheme-relative remotes and dropped
+    entirely from SCP-style remotes, and sensitive query parameters are redacted.
+    This guarantees secrets never reach persisted annotations, CLI output, logs,
+    or error messages.  Host, port, path, and fragment are preserved.
+
+    Parsing fails closed: a URL-like input whose credential-bearing authority
+    cannot be parsed into a clean host (missing host with userinfo, malformed
+    IPv6, and similar) yields ``_REDACTED_GIT_URL`` rather than leaking the raw
+    ``user:secret@`` text or raising; a malformed textual port is dropped while
+    the credential-free host is kept.  Local filesystem paths and hostless
+    schemes (e.g. ``file:///path``) are returned unchanged (aside from ``.git``
+    stripping).  The function is idempotent.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    if not url:
+        return url
+
+    stripped = url.strip()
+
+    # SCP-style syntax: ``[user@]host:path`` (no scheme).  We drop any userinfo
+    # since it is authentication material, and rewrite to https so the result
+    # is browsable.  Guard against Windows drive paths (``C:\...``) and against
+    # anything that already carries an explicit scheme.
+    if "://" not in stripped and not re.match(r"^[A-Za-z]:[\\/]", stripped):
+        scp = re.match(r"^(?:[^@/]+@)?([^/:]+):(?!//)(.+)$", stripped)
+        if scp:
+            stripped = f"https://{scp.group(1)}/{scp.group(2)}"
+
+    # URL-like inputs (explicit scheme or scheme-relative ``//authority``) must
+    # fail closed; a bare local path never leaks userinfo, so it is exempt.
+    url_like = "://" in stripped or stripped.startswith("//")
+
+    try:
+        parts = urlsplit(stripped)
+        host = parts.hostname
+        try:
+            port = parts.port
+        except ValueError:
+            # Malformed textual port (e.g. ``host:notaport``): drop the port but
+            # keep the credential-free host so the link stays browsable.
+            port = None
+    except ValueError:
+        # Malformed authority (e.g. unterminated IPv6 ``[::1``).
+        return _REDACTED_GIT_URL if url_like else stripped.removesuffix(".git")
+
+    if parts.scheme or parts.netloc:
+        if host is None:
+            # URL-form/scheme-relative with no parseable host.  If the authority
+            # carried userinfo, returning the raw text would leak it — fail
+            # closed.  Otherwise it is a legitimately hostless scheme (file://).
+            if "@" in parts.netloc:
+                return _REDACTED_GIT_URL
+            return stripped.removesuffix(".git")
+        # Re-bracket IPv6 literals, which ``hostname`` returns without brackets.
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = host if port is None else f"{host}:{port}"
+        out_scheme = "https" if parts.scheme.lower() == "ssh" else parts.scheme.lower()
+        query = _redact_sensitive_query(parts.query)
+        # Strip ``.git`` from the path itself so it is removed even when a query
+        # or fragment follows it.
+        path = parts.path.removesuffix(".git")
+        return urlunsplit((out_scheme, netloc, path, query, parts.fragment))
+
+    # No scheme and no authority: a bare local path.
+    return stripped.removesuffix(".git")
 
 
 def _fill_from_ci_env(info: dict[str, str]) -> None:

@@ -396,6 +396,20 @@ def test_publish_components_passes_structured_context_to_context_aware_hooks(tmp
     assert kwargs_hook.contexts == [after_context]
 
 
+def test_publisher_strips_credentials_from_supplied_git_remote_url(tmp_path: Path) -> None:
+    # A caller-supplied --git-remote-url bypasses get_git_info's normalization,
+    # so the publisher itself must sanitize it before it reaches annotations.
+    publisher = ComponentPublisher(
+        dry_run=True,
+        git_remote_url="https://gitlab-ci-token:glcbt-SECRETVALUE@gitlab.com/Org/repo.git",
+        git_root=tmp_path,
+    )
+
+    assert publisher.git_remote_url == "https://gitlab.com/Org/repo"
+    assert "glcbt-SECRETVALUE" not in (publisher.git_remote_url or "")
+    assert "@" not in (publisher.git_remote_url or "")
+
+
 def test_publish_components_batches_configs_and_runs_hooks(tmp_path: Path) -> None:
     first = write_component(tmp_path / "one.yaml", name="one", version="1.0")
     second = write_component(tmp_path / "two.yaml", name="two", version="2.0")
