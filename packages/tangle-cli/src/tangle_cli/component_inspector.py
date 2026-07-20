@@ -33,7 +33,7 @@ def _request_path(client: TangleApiClient, path: str) -> Any:
     if callable(custom_request_path):
         response = custom_request_path(path)
     else:
-        response = client._make_request("GET", path)
+        response = client._send_request("GET", path)
     response.raise_for_status()
     return response
 
