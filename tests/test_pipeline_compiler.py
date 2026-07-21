@@ -16,10 +16,12 @@ import yaml
 
 from tangle_cli import cli
 from tangle_cli.pipeline_compiler import (
+    IMAGE_IDS,
     ZONE_ROOT_MARKERS,
     CompileResult,
     PipelineCompiler,
     compile_pipeline,
+    register_image_id,
 )
 from tangle_cli.pipelines import PipelineValidationError, compile_pipeline_file
 from tangle_cli.python_pipeline.errors import CompileError
@@ -375,6 +377,85 @@ def test_compile_task_decorator_emits_bundle_mode_and_resolve_root(tmp_path):
     assert local_from_python["function"] == "bundled_task"
 
 
+def _write_image_id_pipeline(project: Path, decorator: str) -> Path:
+    src = project / "src"
+    src.mkdir(parents=True)
+    pipeline_path = src / "pipeline.py"
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        f"@task({decorator})\n"
+        "def image_task() -> str:\n"
+        "    return 'ok'\n\n"
+        "@pipeline('Image Pipeline')\n"
+        "def image_pipeline() -> Out[str]:\n"
+        "    result = image_task()\n"
+        "    return result\n",
+        encoding="utf-8",
+    )
+    return pipeline_path
+
+
+def test_compile_task_image_id_uses_registered_default(tmp_path):
+    original = dict(IMAGE_IDS)
+    try:
+        IMAGE_IDS.clear()
+        register_image_id("eval-slim", "registry.example/eval-slim:latest")
+        pipeline_path = _write_image_id_pipeline(tmp_path / "project", "image_id='eval-slim'")
+
+        result = compile_pipeline(pipeline_path, tmp_path / "project" / "compiled.yaml")
+
+        sidecar = yaml.safe_load(result.components_path.read_text())
+        local_from_python = sidecar["image-task"]["local_from_python"]
+        assert local_from_python["image"] == "registry.example/eval-slim:latest"
+    finally:
+        IMAGE_IDS.clear()
+        IMAGE_IDS.update(original)
+
+
+def test_compile_task_image_id_uses_compile_time_override(tmp_path):
+    pipeline_path = _write_image_id_pipeline(tmp_path / "project", "image_id='eval-slim'")
+
+    result = compile_pipeline(
+        pipeline_path,
+        tmp_path / "project" / "compiled.yaml",
+        image_overrides={"eval-slim": "registry.example/eval-slim@sha256:abc"},
+    )
+
+    sidecar = yaml.safe_load(result.components_path.read_text())
+    local_from_python = sidecar["image-task"]["local_from_python"]
+    assert local_from_python["image"] == "registry.example/eval-slim@sha256:abc"
+
+
+def test_compile_task_explicit_image_precedes_image_id_override(tmp_path):
+    pipeline_path = _write_image_id_pipeline(
+        tmp_path / "project",
+        "image='python:3.12', image_id='eval-slim'",
+    )
+
+    result = compile_pipeline(
+        pipeline_path,
+        tmp_path / "project" / "compiled.yaml",
+        image_overrides={"eval-slim": "registry.example/eval-slim@sha256:abc"},
+    )
+
+    sidecar = yaml.safe_load(result.components_path.read_text())
+    local_from_python = sidecar["image-task"]["local_from_python"]
+    assert local_from_python["image"] == "python:3.12"
+
+
+def test_compile_task_image_id_without_default_or_override_fails(tmp_path):
+    original = dict(IMAGE_IDS)
+    try:
+        IMAGE_IDS.clear()
+        pipeline_path = _write_image_id_pipeline(tmp_path / "project", "image_id='eval-slim'")
+
+        with pytest.raises(CompileError, match="image_id='eval-slim'.*did not resolve"):
+            compile_pipeline(pipeline_path, tmp_path / "project" / "compiled.yaml")
+    finally:
+        IMAGE_IDS.clear()
+        IMAGE_IDS.update(original)
+
+
 # ---------------------------------------------------------------------------
 # Runnable argument-value emission (raw string constant / graphInput /
 # taskOutput). Dispatch is on the VALUE's type, never the argument KEY.
@@ -521,6 +602,30 @@ def test_compile_cli_writes_output(tmp_path, capsys):
     assert out.exists()
     assert yaml.safe_load(out.read_text())["name"] == "Noop Pipeline"
     assert "Compiled" in capsys.readouterr().out
+
+
+def test_compile_cli_image_override_writes_resolved_image(tmp_path):
+    project = tmp_path / "project"
+    out = project / "compiled.yaml"
+    pipeline_path = _write_image_id_pipeline(project, "image_id='eval-slim'")
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipelines",
+            "compile",
+            str(pipeline_path),
+            "-o",
+            str(out),
+            "--image",
+            "eval-slim=registry.example/eval-slim@sha256:abc",
+        ],
+    )
+
+    sidecar = yaml.safe_load(out.with_name("compiled.components.yaml").read_text())
+    assert sidecar["image-task"]["local_from_python"]["image"] == "registry.example/eval-slim@sha256:abc"
 
 
 def test_compile_cli_help_exits_zero(capsys):

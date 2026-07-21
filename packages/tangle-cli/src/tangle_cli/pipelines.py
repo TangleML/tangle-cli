@@ -258,6 +258,7 @@ def compile_pipeline_file(
     overrides: Mapping[str, str] | None = None,
     pipeline_name: str | None = None,
     emit_components_sidecar: bool = True,
+    image_overrides: Mapping[str, str] | None = None,
     logger: Any | None = None,
 ) -> CompileResult:
     """Compile a Python-authored pipeline to a dehydrated YAML bundle.
@@ -284,6 +285,7 @@ def compile_pipeline_file(
             overrides=dict(overrides) if overrides else None,
             pipeline_name=pipeline_name,
             emit_components_sidecar=emit_components_sidecar,
+            image_overrides=dict(image_overrides) if image_overrides else None,
         )
     except (CompileError, SchemaValidationError) as exc:
         raise PipelineValidationError(str(exc)) from exc

@@ -49,6 +49,7 @@ class CallableRef:
     _task_source_path: Path | None = None
     _task_function_name: str | None = None
     _task_image: str | None = None
+    _task_image_id: str | None = None
     _task_dependencies_from: Path | None = None
     _task_mode: str | None = None
     _task_resolve_root: Path | None = None

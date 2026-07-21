@@ -65,6 +65,7 @@ def task(
     *,
     env: TaskEnv | None = None,
     image: str | None = None,
+    image_id: str | None = None,
     dependencies_from: str | Path | None = None,
     mode: str | None = None,
     resolve_root: str | Path | None = None,
@@ -95,6 +96,10 @@ def task(
             written verbatim into the emitted
             ``components.yaml#local_from_python.image`` field. Overrides
             ``env.image`` when both are given.
+        image_id: Logical image identifier resolved at compile time via
+            registered defaults or ``tangle sdk pipelines compile --image
+            ID=REF`` overrides. Ignored when explicit ``image=`` supplies
+            an image; otherwise it also overrides ``env.image``.
         dependencies_from: Path to a ``pyproject.toml`` (or any file
             the hydrator understands) that declares pip
             dependencies. Resolved relative to the caller's source
@@ -138,7 +143,11 @@ def task(
     # overrides the corresponding ``env`` field; otherwise the env value
     # (if any) is used. This mirrors YAML anchor semantics: start from the
     # declared-once defaults, override locally where needed.
-    effective_image = image if image is not None else (env.image if env else None)
+    effective_image = (
+        image
+        if image is not None
+        else (None if image_id is not None else (env.image if env else None))
+    )
     effective_deps_raw = (
         dependencies_from
         if dependencies_from is not None
@@ -202,6 +211,7 @@ def task(
             _task_source_path=source_path,
             _task_function_name=function_name,
             _task_image=effective_image,
+            _task_image_id=image_id,
             _task_dependencies_from=deps_path,
             _task_mode=mode,
             _task_resolve_root=resolve_root_path,
