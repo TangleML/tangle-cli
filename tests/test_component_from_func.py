@@ -51,6 +51,22 @@ _PIPELINE_FIXTURES = Path(__file__).parent / "fixtures" / "python_pipeline"
 # ``downstream_authoring_surface`` fixture in ``tests/conftest.py``.
 
 # ============================================================================
+# @task image-id authoring metadata
+# ============================================================================
+
+
+def test_task_decorator_records_image_id_without_explicit_image():
+    from tangle_cli.python_pipeline import task
+
+    @task(image_id="eval-slim")
+    def uses_image_id() -> str:
+        return "ok"
+
+    assert uses_image_id._task_image is None
+    assert uses_image_id._task_image_id == "eval-slim"
+
+
+# ============================================================================
 # Type resolution tests
 # ============================================================================
 

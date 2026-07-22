@@ -78,6 +78,16 @@ def test_sdk_help_includes_pipelines(capsys):
     assert "secrets" in output
 
 
+def test_pipelines_compile_help_includes_image_override(capsys):
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipelines", "compile", "--help"])
+
+    output = capsys.readouterr().out
+    assert "--image" in output
+    assert "ID=REF" in output
+
+
 def test_sdk_pipelines_help_lists_local_commands(capsys):
     app = cli.build_app()
 

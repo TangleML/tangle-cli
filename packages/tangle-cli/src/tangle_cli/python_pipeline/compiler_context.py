@@ -252,6 +252,7 @@ class CompileContext:
     subgraph_dir: Path
     root_overrides: dict[str, str] = field(default_factory=dict)
     emit_components_sidecar: bool = True
+    image_overrides: dict[str, str] = field(default_factory=dict)
     max_depth: int = 32
     # Compiled CHILD artifacts keyed by compile key (Decision M dedup).
     # The root is NOT stored here; it is returned directly.

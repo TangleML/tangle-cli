@@ -72,6 +72,40 @@ from .schema_validation import SchemaValidationError, validate_dehydrated_pipeli
 from .utils import dump_yaml
 
 
+IMAGE_IDS: dict[str, str] = {}
+"""Logical image-id registry used by ``@task(image_id=...)``.
+
+OSS ships this empty. Downstream distributions may register environment-specific
+image defaults without hard-coding their image literals into the open-source
+package; CLI ``--image ID=REF`` overrides still win over registered defaults.
+"""
+
+
+def register_image_id(image_id: str, image: str) -> None:
+    """Register a default image reference for ``@task(image_id=...)``."""
+    if not image_id:
+        raise ValueError("image_id must be a non-empty string")
+    if not image:
+        raise ValueError("image must be a non-empty string")
+    IMAGE_IDS[image_id] = image
+
+
+def get_image_id(image_id: str) -> str | None:
+    """Return the registered default image for ``image_id``, if any."""
+    return IMAGE_IDS.get(image_id)
+
+
+def resolve_image_id(
+    image_id: str,
+    image_overrides: Mapping[str, str] | None = None,
+) -> str | None:
+    """Resolve ``image_id`` using compile-time overrides, then registered defaults."""
+    overrides = image_overrides or {}
+    if image_id in overrides:
+        return overrides[image_id]
+    return get_image_id(image_id)
+
+
 @dataclass
 class CompileResult:
     """Outcome of a :func:`compile_pipeline` call.
@@ -102,6 +136,7 @@ def compile_pipeline(
     *,
     pipeline_name: str | None = None,
     emit_components_sidecar: bool = True,
+    image_overrides: Mapping[str, str] | None = None,
 ) -> CompileResult:
     """Compile ``script`` to a single pipeline YAML at ``output``.
 
@@ -132,6 +167,9 @@ def compile_pipeline(
             compilation fails with a :class:`CompileError` (a valid
             dehydrated pipeline cannot be produced without the sidecar).
             Pipelines that use only ``ref(url=...)`` are unaffected.
+        image_overrides: Compile-time image-id overrides from ``--image
+            ID=REF``. They apply only to ``@task(image_id=...)`` refs that do
+            not also set an explicit ``image=``.
 
     Returns:
         A :class:`CompileResult`. ``components_path`` is the sidecar path
@@ -143,6 +181,7 @@ def compile_pipeline(
             unreachable ``@task`` source/dependency files).
     """
     overrides = dict(overrides or {})
+    image_overrides = dict(image_overrides or {})
 
     # 1. Validate the script path.
     script_path = Path(script).resolve()
@@ -197,6 +236,7 @@ def compile_pipeline(
             root_overrides=overrides,
             emit_components_sidecar=emit_components_sidecar,
             source_dirs=purge_dirs,
+            image_overrides=image_overrides,
         )
 
         # 5. Compile the root (and, recursively, all children) into in-memory
@@ -436,7 +476,11 @@ def _compile_pipeline_fn(
         )
     if task_refs:
         components_path = output_path.with_name(output_path.stem + ".components.yaml")
-        components_entries = _build_local_from_python_components(task_refs, components_yaml_dir=components_path.parent)
+        components_entries = _build_local_from_python_components(
+            task_refs,
+            components_yaml_dir=components_path.parent,
+            image_overrides=ctx.image_overrides,
+        )
         _rewrite_task_componentref_urls(
             body_dict=body_dict,
             task_refs=task_refs,
@@ -1427,7 +1471,10 @@ def _relocate_relative_local_url(url: str, source_dir: Path, sidecar_dir: Path) 
 
 
 def _build_local_from_python_components(
-    task_refs: list[tuple[str, CallableRef]], *, components_yaml_dir: Path
+    task_refs: list[tuple[str, CallableRef]],
+    *,
+    components_yaml_dir: Path,
+    image_overrides: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build the ``<stem>.components.yaml`` content for @task refs.
 
@@ -1492,6 +1539,16 @@ def _build_local_from_python_components(
         local_from_python: dict[str, Any] = {}
         if ref._task_image is not None:
             local_from_python["image"] = ref._task_image
+        elif ref._task_image_id is not None:
+            resolved_image = resolve_image_id(ref._task_image_id, image_overrides)
+            if resolved_image is None:
+                raise CompileError(
+                    f"@task image_id={ref._task_image_id!r} on function "
+                    f"{ref._task_function_name!r} did not resolve to an image. "
+                    f"Pass --image {ref._task_image_id}=IMAGE to `tangle sdk pipelines compile`, "
+                    f"or register a default with register_image_id({ref._task_image_id!r}, IMAGE)."
+                )
+            local_from_python["image"] = resolved_image
         # Always pin the function name. Without it the hydrator defaults
         # to the file stem and extracts the wrong symbol.
         assert ref._task_function_name is not None
@@ -2233,6 +2290,7 @@ class PipelineCompiler(TangleCliHandler):
         overrides: Mapping[str, str] | None = None,
         pipeline_name: str | None = None,
         emit_components_sidecar: bool = True,
+        image_overrides: Mapping[str, str] | None = None,
     ) -> CompileResult:
         """Compile ``script`` to a single dehydrated pipeline YAML at ``output``.
 
@@ -2251,6 +2309,7 @@ class PipelineCompiler(TangleCliHandler):
             overrides,
             pipeline_name=pipeline_name,
             emit_components_sidecar=emit_components_sidecar,
+            image_overrides=image_overrides,
         )
         self.log.info(f"wrote {result.pipeline_path}")
         if result.components_path is not None:
