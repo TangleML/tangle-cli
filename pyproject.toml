@@ -1,6 +1,6 @@
 [project]
 name = "tangle-cli"
-version = "0.1.6"
+version = "0.1.7"
 description = "CLI for Tangle, the open-source ML pipeline orchestration platform"
 readme = "README.md"
 authors = [

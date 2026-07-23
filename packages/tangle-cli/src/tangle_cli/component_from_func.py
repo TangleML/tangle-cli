@@ -143,6 +143,8 @@ class ParamInfo:
     default: Any = inspect.Parameter.empty
     optional: bool = False
     deserializer: str = "str"  # argparse type= expression
+    source_param: str | None = None  # original dict parameter for unwrapped inputs
+    source_key: str | None = None  # original dict key for unwrapped inputs
 
 
 @dataclass
@@ -316,6 +318,184 @@ def _resolve_annotation(annotation: Any) -> tuple[str | None, str, Literal["inpu
 
     # ForwardRef or other annotation — use string representation
     return str(getattr(annotation, "__forward_arg__", annotation)), "str", "input"
+
+
+def _dict_value_annotation(annotation: Any) -> Any:
+    """Return the value annotation for a dict-like unwrap parameter.
+
+    Args:
+        annotation: The resolved function parameter annotation for a
+            ``@task(unwrap=...)`` target.
+
+    Returns:
+        The ``V`` annotation from ``dict[K, V]``. Plain ``dict`` and missing
+        annotations return ``Any`` so callers can fall back to a string input
+        type. Non-dict annotations return ``None`` so unwrap validation can
+        reject them before the normal ``dict[...] -> JsonObject`` mapping runs.
+    """
+    origin = typing.get_origin(annotation)
+    if origin is dict:
+        args = typing.get_args(annotation)
+        if len(args) >= 2:
+            return args[1]
+        return Any
+    if annotation is dict or annotation is inspect.Parameter.empty:
+        return Any
+    return None
+
+
+def _unwrapped_value_type(annotation: Any) -> tuple[str, str]:
+    """Infer the Tangle scalar type/deserializer for unwrapped dict values.
+
+    Args:
+        annotation: The resolved annotation for the original dict parameter.
+
+    Returns:
+        ``(tangle_type, deserializer)`` for each synthetic flattened input.
+        Unknown ``Any`` values default to ``String``/``str`` to match existing
+        unannotated input behavior.
+
+    Raises:
+        ValueError: If the unwrap target is not annotated as ``dict`` or
+            ``dict[..., ...]``.
+    """
+    value_annotation = _dict_value_annotation(annotation)
+    if value_annotation is None:
+        raise ValueError("@task unwrap parameters must be annotated as dict[...] or dict")
+    if value_annotation is Any:
+        return "String", "str"
+    tangle_type, deserializer, kind = _resolve_annotation(value_annotation)
+    if kind != "input" or not tangle_type:
+        return "String", "str"
+    return tangle_type, deserializer
+
+
+def _normalize_unwrapped_input_keys(
+    unwrapped_input_keys: dict[str, list[str]] | None,
+) -> dict[str, list[str]]:
+    """Normalize trace-captured unwrap keys into a mutable ordered mapping.
+
+    Args:
+        unwrapped_input_keys: Mapping from original dict parameter name to the
+            call-site key order captured during pipeline tracing.
+
+    Returns:
+        A shallow-copied ``dict[param_name, keys]``. ``None`` is normalized to
+        an empty dict so compile-time and hydrate-time callers can share helper
+        logic.
+    """
+    if not unwrapped_input_keys:
+        return {}
+    normalized: dict[str, list[str]] = {}
+    for param_name, keys in unwrapped_input_keys.items():
+        normalized[param_name] = list(keys)
+    return normalized
+
+
+def build_unwrapped_inputs_schema(
+    func: Callable,
+    unwrapped_input_keys: dict[str, list[str]] | None,
+) -> dict[str, Any]:
+    """Build the persisted schema for flattened ``@task(unwrap=...)`` inputs.
+
+    Args:
+        func: The decorated task function or function-like ``CallableRef`` used
+            for signature/type introspection.
+        unwrapped_input_keys: Trace-captured mapping from original dict
+            parameter name to call-site key order.
+
+    Returns:
+        A ``local_from_python.unwrapped_inputs`` schema. The compile driver
+        writes this into the resolver sidecar so hydrate can regenerate the
+        identical component interface without access to the original call-site
+        dict. Each key entry records the original key, synthetic input name,
+        inferred Tangle type, and optional flag.
+
+    Raises:
+        ValueError: If an unwrap parameter is absent from the function
+            signature or is not dict-annotated.
+    """
+    keys_by_param = _normalize_unwrapped_input_keys(unwrapped_input_keys)
+    if not keys_by_param:
+        return {}
+
+    signature = inspect.signature(func)
+    try:
+        resolved_hints = typing.get_type_hints(func, include_extras=True)
+    except Exception:
+        resolved_hints = {}
+
+    schema: dict[str, Any] = {}
+    for param_name, keys in keys_by_param.items():
+        if param_name not in signature.parameters:
+            raise ValueError(f"@task unwrap parameter {param_name!r} is not in the function signature")
+        annotation = resolved_hints.get(param_name, signature.parameters[param_name].annotation)
+        tangle_type, _deserializer = _unwrapped_value_type(annotation)
+        input_prefix = f"{param_name}__"
+        schema[param_name] = {
+            "input_prefix": input_prefix,
+            "value_type": tangle_type,
+            "keys": [
+                {
+                    "key": key,
+                    "input_name": f"{input_prefix}{key}",
+                    "type": tangle_type,
+                    "optional": False,
+                }
+                for key in keys
+            ],
+        }
+    return schema
+
+
+def _expand_unwrapped_param(
+    *,
+    param: inspect.Parameter,
+    schema: dict[str, Any],
+    annotation: Any,
+    doc_dict: dict[str, str],
+) -> list[ParamInfo]:
+    """Expand one original dict parameter into synthetic component inputs.
+
+    Args:
+        param: The original function parameter marked by ``@task(unwrap=...)``.
+        schema: The persisted ``local_from_python.unwrapped_inputs`` entry for
+            this parameter.
+        annotation: The resolved annotation for ``param``.
+        doc_dict: Parsed docstring parameter descriptions keyed by original
+            parameter name.
+
+    Returns:
+        A ``ParamInfo`` for each flattened key, using names like
+        ``run_data__shop``. The returned params retain ``source_param`` and
+        ``source_key`` so generated runtime code can re-wrap CLI arguments into
+        the original dict before invoking the function.
+
+    Raises:
+        ValueError: If ``annotation`` is not dict-like.
+    """
+    _unwrapped_value_type(annotation)  # validates dict-like annotation
+    expanded: list[ParamInfo] = []
+    for key_spec in schema.get("keys", []) or []:
+        key = str(key_spec["key"])
+        input_name = str(key_spec.get("input_name") or f"{param.name}__{key}")
+        tangle_type = str(key_spec.get("type") or schema.get("value_type") or "String")
+        expanded.append(
+            ParamInfo(
+                name=input_name,
+                yaml_name=input_name,
+                python_type=str(annotation) if annotation is not inspect.Parameter.empty else None,
+                tangle_type=tangle_type,
+                kind="input",
+                description=doc_dict.get(param.name),
+                default=inspect.Parameter.empty,
+                optional=bool(key_spec.get("optional", False)),
+                deserializer=_TYPE_TO_DESERIALIZER.get(tangle_type, "str"),
+                source_param=param.name,
+                source_key=key,
+            )
+        )
+    return expanded
 
 
 def _make_return_param(name: str, annotation: type) -> ParamInfo:
@@ -544,6 +724,7 @@ def extract_file_metadata(file_path: Path, function_name: str | None = None) -> 
 def extract_interface(
     func: Callable,
     docstring_metadata: dict[str, str],
+    unwrapped_inputs: dict[str, Any] | None = None,
 ) -> FunctionSpec:
     """Extract component interface from a Python function.
 
@@ -552,15 +733,43 @@ def extract_interface(
     Args:
         func: The Python function to introspect.
         docstring_metadata: Metadata from extract_file_metadata or extract_docstring_metadata.
+        unwrapped_inputs: Optional persisted ``local_from_python.unwrapped_inputs``
+            schema. When present, matching dict parameters are expanded into
+            the same synthetic inputs during both initial compile and later
+            hydrate-time regeneration.
+
+    Returns:
+        A ``FunctionSpec`` whose params reflect the generated component inputs
+        and outputs.
     """
     signature = inspect.signature(func)
     parsed_docstring = docstring_parser.parse(inspect.getdoc(func) or "")
     doc_dict = {p.arg_name: p.description for p in parsed_docstring.params}
 
     params: list[ParamInfo] = []
+    used_yaml_names: set[str] = set()
+    unwrapped_inputs = unwrapped_inputs or {}
+    try:
+        resolved_hints = typing.get_type_hints(func, include_extras=True)
+    except Exception:
+        resolved_hints = {}
 
     for param in signature.parameters.values():
-        annotation = param.annotation
+        annotation = resolved_hints.get(param.name, param.annotation)
+        if param.name in unwrapped_inputs:
+            expanded = _expand_unwrapped_param(
+                param=param,
+                schema=unwrapped_inputs[param.name],
+                annotation=annotation,
+                doc_dict=doc_dict,
+            )
+            for expanded_param in expanded:
+                if expanded_param.yaml_name in used_yaml_names:
+                    raise ValueError(f"duplicate component input name {expanded_param.yaml_name!r}")
+                used_yaml_names.add(expanded_param.yaml_name)
+            params.extend(expanded)
+            continue
+
         tangle_type, deserializer, kind = _resolve_annotation(annotation)
 
         # Determine the YAML name (strip _path/_file suffixes for InputPath/OutputPath)
@@ -580,6 +789,10 @@ def extract_interface(
                 default = param.default
             elif kind == "input_path" and param.default is None:
                 optional = True
+
+        if yaml_name in used_yaml_names:
+            raise ValueError(f"duplicate component input/output name {yaml_name!r}")
+        used_yaml_names.add(yaml_name)
 
         params.append(
             ParamInfo(
@@ -1452,6 +1665,18 @@ def _build_argparse_code(spec: FunctionSpec) -> str:
     if has_return_outputs:
         lines.append('_output_files = _parsed_args.pop("_output_paths", [])')
 
+    unwrapped_groups: dict[str, list[ParamInfo]] = {}
+    for param in spec.inputs:
+        if param.source_param and param.source_key is not None:
+            unwrapped_groups.setdefault(param.source_param, []).append(param)
+    for idx, (source_param, group) in enumerate(unwrapped_groups.items()):
+        var_name = f"_unwrapped_{idx}"
+        lines.append(f"{var_name} = {{}}")
+        for param in group:
+            lines.append(f"if {param.name!r} in _parsed_args:")
+            lines.append(f"    {var_name}[{param.source_key!r}] = _parsed_args.pop({param.name!r})")
+        lines.append(f"_parsed_args[{source_param!r}] = {var_name}")
+
     lines.append("")
     lines.append(f"_outputs = {spec.name}(**_parsed_args)")
 
@@ -1717,6 +1942,7 @@ def generate_component_yaml(
     resolve_root: Path | None = None,
     emit_generation_annotations: bool = True,
     path_annotation_mode: Literal["oss", "td_legacy"] = "oss",
+    unwrapped_inputs: dict[str, Any] | None = None,
 ) -> bool:
     """Generate a component YAML file from a Python function.
 
@@ -1741,6 +1967,10 @@ def generate_component_yaml(
             common-root behavior inside a git checkout; outside git it records
             ``file_path.name`` / ``output_path.name`` to preserve the legacy
             downstream driver's historical basename-only snapshots.
+        unwrapped_inputs: Persisted ``local_from_python.unwrapped_inputs`` schema
+            used to expand unwrap-marked dict params into synthetic component
+            inputs. The compile driver writes this schema and hydrate passes it
+            back here so both phases generate an identical interface.
 
     Returns:
         True on success, False on failure.
@@ -1763,7 +1993,11 @@ def generate_component_yaml(
         func = get_function_from_module(module, resolved_func_name)
 
         # 3. Extract interface, passing pre-computed metadata
-        spec = extract_interface(func, docstring_metadata=file_metadata)
+        spec = extract_interface(
+            func,
+            docstring_metadata=file_metadata,
+            unwrapped_inputs=unwrapped_inputs,
+        )
         if custom_name:
             spec.component_name = custom_name
 

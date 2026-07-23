@@ -970,6 +970,7 @@ def _write_local_from_python_pipeline(
     *,
     mode: str | None = None,
     resolve_root: str | None = None,
+    unwrapped_inputs: dict[str, object] | None = None,
 ) -> Path:
     gen_config = {
         "file": python_file,
@@ -979,6 +980,8 @@ def _write_local_from_python_pipeline(
         gen_config["mode"] = mode
     if resolve_root is not None:
         gen_config["resolve_root"] = resolve_root
+    if unwrapped_inputs is not None:
+        gen_config["unwrapped_inputs"] = unwrapped_inputs
     _write_pipeline(
         project_dir / "components.resolve.yaml",
         {"generated": {"local_from_python": gen_config}},
@@ -1069,6 +1072,48 @@ def test_pipelines_hydrate_local_from_python_forwards_bundle_mode_and_resolve_ro
     assert calls[0]["python_file"] == python_file.resolve()
     assert calls[0]["mode"] == "bundle"
     assert calls[0]["resolve_root"] == src_dir.resolve()
+
+
+def test_pipelines_hydrate_local_from_python_forwards_unwrapped_inputs(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from tangle_cli import pipeline_hydrator as hydrator_module
+    from tangle_cli.pipelines import hydrate_pipeline_file
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    python_file = project_dir / "component.py"
+    python_file.write_text("# trusted project component\n", encoding="utf-8")
+    unwrapped_inputs = {
+        "run_data": {
+            "input_prefix": "run_data__",
+            "value_type": "String",
+            "keys": [
+                {"key": "shop", "input_name": "run_data__shop", "type": "String"},
+            ],
+        }
+    }
+    pipeline_path = _write_local_from_python_pipeline(
+        project_dir,
+        "./component.py",
+        unwrapped_inputs=unwrapped_inputs,
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_regenerate_yaml(**kwargs):
+        calls.append(kwargs)
+        kwargs["output_path"].write_text(
+            "name: Generated Component\nimplementation:\n  container:\n    image: busybox\n",
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+
+    hydrate_pipeline_file(pipeline_path)
+
+    assert calls[0]["unwrapped_inputs"] == unwrapped_inputs
 
 
 def test_pipelines_hydrate_local_from_python_refuses_untrusted_absolute_path(

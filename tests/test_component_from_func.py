@@ -66,6 +66,33 @@ def test_task_decorator_records_image_id_without_explicit_image():
     assert uses_image_id._task_image_id == "eval-slim"
 
 
+def test_task_decorator_records_unwrap_names():
+    from tangle_cli.python_pipeline import task
+
+    @task(unwrap=["run_data", "metadata"])
+    def uses_unwrap(run_data: dict[str, str], metadata: dict[str, int]) -> str:
+        return "ok"
+
+    assert uses_unwrap._task_unwrap == ("run_data", "metadata")
+
+
+def test_task_decorator_rejects_invalid_unwrap_name():
+    from tangle_cli.python_pipeline import task
+
+    with pytest.raises(ValueError, match="valid Python parameter names"):
+        task(unwrap="run-data")
+
+
+def test_unwrapped_input_schema_infers_dict_value_type():
+    def uses_int_values(metrics: dict[str, int]) -> str:
+        return "ok"
+
+    schema = cff.build_unwrapped_inputs_schema(uses_int_values, {"metrics": ["shop", "catalog"]})
+
+    assert schema["metrics"]["value_type"] == "Integer"
+    assert [item["type"] for item in schema["metrics"]["keys"]] == ["Integer", "Integer"]
+
+
 # ============================================================================
 # Type resolution tests
 # ============================================================================
@@ -455,6 +482,43 @@ class TestCodeGeneration:
         assert "dGVzdA==" in source
         # Main function source still present
         assert "import argparse" in source
+
+    def test_unwrapped_inputs_are_rewrapped_before_function_call(self):
+        spec = FunctionSpec(
+            name="combine",
+            component_name="Combine",
+            description="Test unwrapped inputs.",
+            params=[
+                ParamInfo(
+                    name="run_data__left",
+                    yaml_name="run_data__left",
+                    python_type="dict[str, str]",
+                    tangle_type="String",
+                    kind="input",
+                    deserializer="str",
+                    source_param="run_data",
+                    source_key="left",
+                ),
+                ParamInfo(
+                    name="run_data__right",
+                    yaml_name="run_data__right",
+                    python_type="dict[str, str]",
+                    tangle_type="String",
+                    kind="input",
+                    deserializer="str",
+                    source_param="run_data",
+                    source_key="right",
+                ),
+            ],
+            source_code_stripped="def combine(run_data):\n    return run_data['left']\n",
+        )
+
+        code = _build_argparse_code(spec)
+
+        assert '"--run-data--left"' in code
+        assert "_unwrapped_0['left'] = _parsed_args.pop('run_data__left')" in code
+        assert "_parsed_args['run_data'] = _unwrapped_0" in code
+        assert "_outputs = combine(**_parsed_args)" in code
 
 
 # ============================================================================
@@ -2374,6 +2438,63 @@ class TestGeneratorStripsAuthoring:
 # ============================================================================
 # Generator-level TaskEnv env-only strip tests (Phase 3, §3.5)
 # ============================================================================
+
+
+def test_generate_component_yaml_with_unwrapped_inputs_runs_rewrapped_program(tmp_path):
+    source = tmp_path / "combine_component.py"
+    source.write_text(
+        textwrap.dedent(
+            '''
+            from cloud_pipelines import components
+
+            def combine_component(out: components.OutputPath("Text"), run_data: dict[str, str]):
+                with open(out, "w") as fh:
+                    fh.write(run_data["left"] + "|" + run_data["right"])
+            '''
+        ).lstrip()
+    )
+    output_file = tmp_path / "component.yaml"
+
+    assert generate_component_yaml(
+        source,
+        output_file,
+        container_image="python:3.12",
+        function_name="combine_component",
+        unwrapped_inputs={
+            "run_data": {
+                "input_prefix": "run_data__",
+                "value_type": "String",
+                "keys": [
+                    {"key": "left", "input_name": "run_data__left", "type": "String"},
+                    {"key": "right", "input_name": "run_data__right", "type": "String"},
+                ],
+            }
+        },
+    ) is True
+
+    component = yaml.safe_load(output_file.read_text())
+    assert {item["name"] for item in component["inputs"]} == {"run_data__left", "run_data__right"}
+    program = component["implementation"]["container"]["command"][-1]
+    program_path = tmp_path / "program.py"
+    program_path.write_text(program)
+    out_path = tmp_path / "combined.txt"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(program_path),
+            "--out",
+            str(out_path),
+            "--run-data--left",
+            "a",
+            "--run-data--right",
+            "b",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert out_path.read_text() == "a|b"
 
 
 def test_generate_component_yaml_shim_supports_outputs_import(tmp_path):

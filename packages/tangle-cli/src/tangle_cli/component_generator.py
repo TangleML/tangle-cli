@@ -127,8 +127,30 @@ class ComponentGenerator:
         strip_source_path: bool = False,
         resolve_root: Path | None = None,
         emit_generation_annotations: bool = True,
+        unwrapped_inputs: dict[str, Any] | None = None,
     ) -> bool:
-        """Generate component YAML from a Python function source file."""
+        """Generate component YAML from a Python function source file.
+
+        Args:
+            file_path: Python source file containing the component function.
+            output_path: YAML file to write.
+            container_image: Container image to place in the component spec.
+            function_name: Function to generate, or ``None`` to auto-detect.
+            dependencies_from: Optional dependency file for pip installs.
+            mode: ``"inline"`` or ``"bundle"`` generation mode.
+            custom_name: Optional component name override.
+            custom_annotations: Optional metadata annotations to merge.
+            strip_code: Omit original source annotations when true.
+            strip_source_path: Omit source-path annotations when true.
+            resolve_root: Optional bundle import root.
+            emit_generation_annotations: Whether to emit regeneration metadata.
+            unwrapped_inputs: Optional persisted unwrap schema. Hydrate forwards
+                this ``local_from_python.unwrapped_inputs`` payload so component
+                generation expands dict parameters exactly as compile did.
+
+        Returns:
+            True when generation succeeds, otherwise False.
+        """
 
         from tangle_cli.component_from_func import generate_component_yaml
 
@@ -145,6 +167,7 @@ class ComponentGenerator:
             strip_source_path=strip_source_path,
             resolve_root=resolve_root,
             emit_generation_annotations=emit_generation_annotations,
+            unwrapped_inputs=unwrapped_inputs,
         )
 
     def regenerate_yaml(
@@ -160,8 +183,29 @@ class ComponentGenerator:
         mode: str = "inline",
         resolve_root: Path | None = None,
         emit_generation_annotations: bool = True,
+        unwrapped_inputs: dict[str, Any] | None = None,
     ) -> bool:
-        """Regenerate a YAML component from a Python function source file."""
+        """Regenerate a YAML component from a Python function source file.
+
+        Args:
+            python_file: Source file to regenerate from.
+            output_path: Optional target YAML path.
+            function_name: Optional function name within ``python_file``.
+            custom_name: Optional component name override.
+            image: Optional image override; existing YAML/default image is used
+                when omitted.
+            dependencies_from: Optional dependency file.
+            strip_code: Omit original source annotations when true.
+            strip_source_path: Omit source-path annotations when true.
+            mode: ``local_from_python`` generation mode.
+            resolve_root: Optional bundle import root.
+            emit_generation_annotations: Whether to emit regeneration metadata.
+            unwrapped_inputs: Optional ``local_from_python.unwrapped_inputs``
+                schema to preserve compile-time unwrap expansion at hydrate time.
+
+        Returns:
+            True when regeneration succeeds, otherwise False.
+        """
 
         if not python_file.exists():
             self._log(f"  ❌ File not found: {python_file}", err=True)
@@ -186,6 +230,7 @@ class ComponentGenerator:
             mode=mode,
             resolve_root=resolve_root,
             emit_generation_annotations=emit_generation_annotations,
+            unwrapped_inputs=unwrapped_inputs,
         )
 
     def run_generation(
@@ -202,8 +247,29 @@ class ComponentGenerator:
         mode: str = "inline",
         resolve_root: Path | None = None,
         emit_generation_annotations: bool = True,
+        unwrapped_inputs: dict[str, Any] | None = None,
     ) -> bool:
-        """Execute component generation and clean up partial output on failure."""
+        """Execute component generation and clean up partial output on failure.
+
+        Args:
+            python_file: Source file to generate from.
+            final_output: YAML path to write.
+            image: Resolved component container image.
+            func_name: Optional function name within ``python_file``.
+            deps_file: Optional dependency file.
+            custom_name: Optional component name override.
+            strip_code: Omit original source annotations when true.
+            strip_source_path: Omit source-path annotations when true.
+            mode: ``local_from_python`` generation mode.
+            resolve_root: Optional bundle import root.
+            emit_generation_annotations: Whether to emit regeneration metadata.
+            unwrapped_inputs: Optional persisted unwrap schema forwarded to the
+                low-level generator for compile/hydrate interface parity.
+
+        Returns:
+            True when generation succeeds, otherwise False. On failure, any
+            partial output file is removed.
+        """
 
         try:
             function_detail = f" function {func_name!r}" if func_name else ""
@@ -220,6 +286,7 @@ class ComponentGenerator:
                 strip_source_path=strip_source_path,
                 resolve_root=resolve_root,
                 emit_generation_annotations=emit_generation_annotations,
+                unwrapped_inputs=unwrapped_inputs,
             )
             if not success:
                 self._log("  ❌ Failed to generate component", err=True)
@@ -272,8 +339,29 @@ def regenerate_yaml(
     mode: str = "inline",
     resolve_root: Path | None = None,
     logger: Any | None = None,
+    unwrapped_inputs: dict[str, Any] | None = None,
 ) -> bool:
-    """Regenerate a YAML component from a Python function source file."""
+    """Regenerate component YAML through the default generator.
+
+    Args:
+        python_file: Source file to regenerate from.
+        output_path: Optional target YAML path.
+        function_name: Optional function name within ``python_file``.
+        custom_name: Optional component name override.
+        image: Optional image override.
+        dependencies_from: Optional dependency file.
+        strip_code: Omit original source annotations when true.
+        strip_source_path: Omit source-path annotations when true.
+        verbose: Whether to emit verbose generator logs.
+        mode: ``local_from_python`` generation mode.
+        resolve_root: Optional bundle import root.
+        logger: Optional logger object used by the generator.
+        unwrapped_inputs: Optional persisted unwrap schema from
+            ``local_from_python.unwrapped_inputs``.
+
+    Returns:
+        True when regeneration succeeds, otherwise False.
+    """
 
     return ComponentGenerator(logger=logger, verbose=verbose).regenerate_yaml(
         python_file=python_file,
@@ -286,6 +374,7 @@ def regenerate_yaml(
         strip_source_path=strip_source_path,
         mode=mode,
         resolve_root=resolve_root,
+        unwrapped_inputs=unwrapped_inputs,
     )
 
 
