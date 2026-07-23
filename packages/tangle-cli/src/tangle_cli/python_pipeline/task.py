@@ -70,6 +70,7 @@ def task(
     mode: str | None = None,
     resolve_root: str | Path | None = None,
     annotations: dict[str, Any] | None = None,
+    unwrap: str | list[str] | tuple[str, ...] | None = None,
 ) -> Callable[[Callable[..., Any]], CallableRef]:
     """Decorator: turn a Python function into a Tangle component ref.
 
@@ -116,6 +117,12 @@ def task(
             ``components.yaml#local_from_python.resolve_root``.
         annotations: Extra annotations to merge into the emitted
             component's ``metadata.annotations`` block.
+        unwrap: Optional dict parameter name (or names) whose call-site
+            ``dict`` value should be flattened into explicit component inputs.
+            For example ``unwrap="run_data"`` turns
+            ``run_data={"run_id_1": task.output}`` into a component input
+            named ``run_data__run_id_1`` and reconstructs the original dict in
+            the generated runtime wrapper.
 
     Returns:
         A decorator that, given the user's function, returns a
@@ -166,7 +173,35 @@ def task(
     if mode is not None and mode not in {"inline", "bundle"}:
         raise ValueError("@task(mode=...) must be 'inline', 'bundle', or None")
 
+    if unwrap is None:
+        unwrap_names: tuple[str, ...] = ()
+    elif isinstance(unwrap, str):
+        unwrap_names = (unwrap,)
+    elif isinstance(unwrap, (list, tuple)) and all(isinstance(name, str) for name in unwrap):
+        unwrap_names = tuple(unwrap)
+    else:
+        raise TypeError("@task(unwrap=...) expects a string, a list/tuple of strings, or None")
+    if len(set(unwrap_names)) != len(unwrap_names):
+        raise ValueError("@task(unwrap=...) contains duplicate parameter names")
+    for name in unwrap_names:
+        if not name.isidentifier():
+            raise ValueError(
+                "@task(unwrap=...) names must be valid Python parameter names; "
+                f"got {name!r}"
+            )
+
     def decorator(fn: Callable[..., Any]) -> CallableRef:
+        """Capture a task function as a traceable ``CallableRef``.
+
+        Args:
+            fn: The user-authored Python function being decorated.
+
+        Returns:
+            A ``CallableRef`` carrying source, image, dependency, generation,
+            annotation, and unwrap metadata. The unwrap names are stored on the
+            ref so trace-time calls can flatten matching dict arguments and the
+            compiler can persist ``local_from_python.unwrapped_inputs``.
+        """
         # Capture the absolute path of the source file the user wrote
         # the function in. ``inspect.getfile`` raises TypeError for
         # builtins / dynamically-built functions; the @task path
@@ -216,6 +251,7 @@ def task(
             _task_mode=mode,
             _task_resolve_root=resolve_root_path,
             _task_custom_annotations=dict(annotations) if annotations else None,
+            _task_unwrap=unwrap_names,
         )
 
         # Expose function-like introspection so ``tangle_cli``'s

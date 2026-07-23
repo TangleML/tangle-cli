@@ -291,7 +291,132 @@ uv run tangle sdk pipeline-runs annotations set RUN_ID key value
 uv run tangle sdk pipeline-runs export RUN_ID --output pipeline.yaml
 ```
 
-`pipelines validate` checks local graph shape, the packaged Tangle pipeline JSON schema, and component input wiring when component specs are present. It does not hydrate refs; validate a hydrated file when you need fully resolved component-input checks for remote refs.
+#### Python pipeline authoring
+
+Python-authored pipelines live in normal `.py` files and compile with:
+
+```bash
+uv run tangle sdk pipelines compile pipeline.py -o pipeline.yaml
+uv run tangle sdk pipelines compile pipeline.py -o pipeline.yaml --pipeline pipeline_fn_name
+```
+
+A minimal graph uses `@pipeline` for the graph and `@task` for local Python components. `@task` functions are not executed at compile time; the compiler records call sites, emits a sibling `<output>.components.yaml` with `local_from_python` entries, and rewrites task component refs to that sidecar. Hydrate later regenerates the same component YAML from the Python source.
+
+```python
+from cloud_pipelines import components
+from tangle_cli.python_pipeline import In, Out, pipeline, task
+
+
+@task(image="python:3.12")
+def write_greeting(out: components.OutputPath("Text"), who: str, greeting: str = "hello"):
+    with open(out, "w") as fh:
+        fh.write(f"{greeting} {who}")
+
+
+@pipeline("Greeting pipeline", output_name="greeting_file")
+def greeting_pipeline(who: In[str], cfg) -> Out[str]:
+    greeting = write_greeting(who=who, greeting=cfg.greeting)
+    return greeting.out
+```
+
+`In[T]` parameters become runtime graph inputs. A single `-> Out[T]` return exposes one graph output; use `@pipeline(output_name=...)` to name that output. For multiple outputs, define a frozen dataclass subclass of `Outputs` with `Out[T]` fields and return an instance. A pipeline that accepts a `cfg` parameter reads `config.yaml` (or the path passed via `@pipeline(config="...")`) at compile time, with `--override key=value` values overlaid by the compile command.
+
+Task IDs default from the left-hand variable name at the call site, converted to title case. If there is no simple left-hand variable, or if you want a stable explicit label, call `.named("Task Id")` before invoking the task. Use `.bind(...)` to pre-fill task arguments and `.with_annotations({...})` to add per-task annotations.
+
+##### Task images, dependencies, and image IDs
+
+Use `@task(image="...")` to write the component image directly. Use `dependencies_from="pyproject.toml"` when generated components need to install Python dependencies. Several tasks can share one authoring-only `TaskEnv`:
+
+```python
+from tangle_cli.python_pipeline import TaskEnv, task
+
+EVAL = TaskEnv(image="python:3.12", dependencies_from="pyproject.toml")
+
+@task(env=EVAL)
+def score(...):
+    ...
+```
+
+Use `@task(image_id="eval-slim")` when source should carry a logical image name instead of a concrete registry reference. Downstream code can register defaults with `register_image_id(...)`, and callers can override at compile time with repeatable `--image ID=REF`:
+
+```bash
+uv run tangle sdk pipelines compile pipeline.py -o pipeline.yaml \
+  --image eval-slim=registry.example/eval-slim@sha256:...
+```
+
+An explicit `image="..."` wins over `image_id=...`. If an `image_id` has neither a registered default nor a `--image` override, compile fails.
+
+##### Subpipelines and existing components
+
+Use `subpipeline(child_pipeline)(...)` to call another Python `@pipeline` as one task in a parent graph. The child compiles to a subgraph sidecar under `<output>.subgraphs/`, and the returned handle exposes the child pipeline's declared outputs.
+
+```python
+from tangle_cli.python_pipeline import In, Out, pipeline, subpipeline
+
+@pipeline("Child")
+def child(seed: In[str]) -> Out[str]:
+    ...
+
+@pipeline("Parent")
+def parent(seed: In[str]) -> Out[str]:
+    child_result = subpipeline(child).named("Run child")(seed=seed)
+    return child_result.wait_for_output
+```
+
+Use `ref(url=...)`, `ref(name=...)`, or `ref(digest=...)` to call an existing component YAML or published component instead of authoring a local `@task`. Use `@registered(fragment=..., gen_config=...)` for operation wrappers that are already present in an existing `gen_config.yaml`; the compiler rewrites those calls to `resolve://...#fragment` without generating a new sidecar.
+
+##### Dynamic arguments and runtime placeholders
+
+Task argument values can be literals, graph inputs, task outputs, or supported dynamic data. Use `dynamic_secret("NAME")` to emit a runtime secret reference:
+
+```python
+from tangle_cli.python_pipeline import dynamic_secret
+
+call_api(api_key=dynamic_secret("OPENAI_API_KEY"))
+```
+
+Use `raw("...")` only for string values that intentionally contain a `{{name}}` runtime placeholder substituted by the component itself. `raw()` is not a compile-time Jinja escape hatch; `{% ... %}` and `{# ... #}` are rejected.
+
+##### Unwrapped dict task inputs
+
+Python-authored pipelines can mark one or more `dict[str, T]` task parameters for unwrapping:
+
+```python
+from cloud_pipelines import components
+from tangle_cli.python_pipeline import Out, pipeline, task
+
+
+@task(image="python:3.12")
+def make_greeting(name: str) -> str:
+    return f"hello {name}"
+
+
+@task(image="python:3.12", unwrap="items")
+def join_greetings(out: components.OutputPath("Text"), items: dict[str, str], prefix: str = "joined"):
+    with open(out, "w") as fh:
+        fh.write(f"{prefix}: " + " | ".join(items[key] for key in sorted(items)))
+
+
+@pipeline("Greeting pipeline")
+def greeting_pipeline() -> Out[str]:
+    world = make_greeting.named("world_source")(name="world")
+    tangle = make_greeting.named("tangle_source")(name="tangle")
+    joined = join_greetings.named("join")(
+        prefix="demo",
+        items={
+            "who_1": world.Output,
+            "who_2": tangle.Output,
+            "literal": "plain value",
+        },
+    )
+    return joined.out
+```
+
+`unwrap="items"` tells the compiler that the caller-provided entries in `items` should become explicit component inputs. The call above compiles the consumer task arguments as `items__who_1`, `items__who_2`, and `items__literal`; task-output values remain normal graph edges and literal values remain literals. The generated components sidecar persists the exact flattened schema under `local_from_python.unwrapped_inputs`, including the generated input names and inferred value type. Hydrate passes that schema back into Python component generation so the regenerated component has the same flattened inputs even though hydrate no longer has access to the original Python call-site dict. The generated runtime wrapper then re-wraps those CLI arguments back into the original `items` dict before calling `join_greetings(...)`.
+
+Use `unwrap=["items", "metadata"]` to unwrap multiple dict parameters. The caller owns the key names; keys may contain letters, numbers, `_`, and `-`, and become `param__<key>` component inputs. Empty dicts are rejected because they do not define a component interface. If a generated name would collide with a fixed parameter or another generated name, compile fails before writing artifacts. Equivalent key sets are canonicalized for schema hashing, so two call sites with the same keys in different insertion orders dedupe to the same component fragment.
+
+#### Pipeline run submission and validation
 
 `submit` hydrates refs by default and builds an API submit payload with `root_task.componentRef.spec`. Use `--no-hydrate` to submit the local YAML structure as-is. Use `--dry-run` to print the payload without creating a run.
 

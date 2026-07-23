@@ -91,6 +91,15 @@ URI_WRITERS: dict[str, UriWriter] = {}
 def regenerate_yaml(**kwargs: Any) -> bool:
     """Generate a local Python component YAML.
 
+    Args:
+        **kwargs: Keyword arguments forwarded to
+            ``ComponentGenerator.regenerate_yaml``. For dict-unwrapped tasks,
+            this may include the persisted ``unwrapped_inputs`` schema from
+            ``local_from_python``.
+
+    Returns:
+        True when regeneration succeeds, otherwise False.
+
     Kept as a module-level seam for callers/tests that patch this operation.
     """
 
@@ -1243,7 +1252,24 @@ class PipelineHydrator(TangleCliHandler):
         path: str,
         base_dir: Path | None = None,
     ) -> tuple[str, dict[str, Any]] | None:
-        """Generate a component YAML from a Python source file and resolve it."""
+        """Generate a component YAML from a Python source file and resolve it.
+
+        Args:
+            gen_config: The ``local_from_python`` resolver config. It may carry
+                ``unwrapped_inputs`` persisted by the compile driver for
+                ``@task(unwrap=...)`` call sites.
+            path: Reference path currently being resolved, used for diagnostics
+                and recursive resolution context.
+            base_dir: Directory used to resolve relative local paths.
+
+        Returns:
+            The resolved component ``(digest, spec)`` pair, or ``None`` if local
+            generation fails or the config is incomplete.
+
+        The ``unwrapped_inputs`` payload is forwarded unchanged to the component
+        generator so hydrate expands dict parameters exactly as compile did,
+        despite no longer having the original Python call-site dict.
+        """
         if not isinstance(gen_config, dict):
             self.log.warn("   ⚠️ 'local_from_python' must be a dict")
             return None
@@ -1294,6 +1320,7 @@ class PipelineHydrator(TangleCliHandler):
             "strip_code": bool(gen_config.get("strip_code", False)),
             "mode": str(gen_config.get("mode", "inline")),
             "resolve_root": resolve_root,
+            "unwrapped_inputs": gen_config.get("unwrapped_inputs"),
         }
         if self.component_generator is not None:
             success = self.component_generator.regenerate_yaml(**generation_kwargs)
