@@ -377,19 +377,44 @@ def _normalize_unwrapped_input_keys(
 
     Args:
         unwrapped_input_keys: Mapping from original dict parameter name to the
-            call-site key order captured during pipeline tracing.
+            call-site key set captured during pipeline tracing.
 
     Returns:
-        A shallow-copied ``dict[param_name, keys]``. ``None`` is normalized to
-        an empty dict so compile-time and hydrate-time callers can share helper
-        logic.
+        A shallow-copied ``dict[param_name, keys]`` with keys sorted
+        lexicographically. ``None`` is normalized to an empty dict so
+        compile-time and hydrate-time callers can share helper logic. Sorting
+        makes key order schema-insignificant: two call sites with the same keys
+        produce the same component fragment and generated interface.
     """
     if not unwrapped_input_keys:
         return {}
     normalized: dict[str, list[str]] = {}
     for param_name, keys in unwrapped_input_keys.items():
-        normalized[param_name] = list(keys)
+        normalized[param_name] = sorted(keys)
     return normalized
+
+
+def _yaml_name_for_param(param: inspect.Parameter, annotation: Any) -> str:
+    """Return the component YAML name that would be generated for a parameter.
+
+    Args:
+        param: The function parameter to name.
+        annotation: The resolved annotation for ``param``.
+
+    Returns:
+        The YAML input/output name, including the existing ``_path``/``_file``
+        suffix stripping for ``InputPath``/``OutputPath`` parameters. The unwrap
+        schema builder uses this to reject synthetic names that would collide
+        with fixed parameters before hydrate-time component generation.
+    """
+    _tangle_type, _deserializer, kind = _resolve_annotation(annotation)
+    yaml_name = param.name
+    if kind in ("output", "input_path"):
+        if yaml_name.endswith("_path"):
+            yaml_name = yaml_name[: -len("_path")]
+        elif yaml_name.endswith("_file"):
+            yaml_name = yaml_name[: -len("_file")]
+    return yaml_name
 
 
 def build_unwrapped_inputs_schema(
@@ -425,25 +450,47 @@ def build_unwrapped_inputs_schema(
     except Exception:
         resolved_hints = {}
 
+    reserved_yaml_names: dict[str, str] = {}
+    for sig_param in signature.parameters.values():
+        if sig_param.name in keys_by_param:
+            continue
+        annotation = resolved_hints.get(sig_param.name, sig_param.annotation)
+        reserved_yaml_names[_yaml_name_for_param(sig_param, annotation)] = sig_param.name
+
     schema: dict[str, Any] = {}
+    seen_synthetic_names: dict[str, str] = {}
     for param_name, keys in keys_by_param.items():
         if param_name not in signature.parameters:
             raise ValueError(f"@task unwrap parameter {param_name!r} is not in the function signature")
         annotation = resolved_hints.get(param_name, signature.parameters[param_name].annotation)
         tangle_type, _deserializer = _unwrapped_value_type(annotation)
         input_prefix = f"{param_name}__"
-        schema[param_name] = {
-            "input_prefix": input_prefix,
-            "value_type": tangle_type,
-            "keys": [
+        key_specs = []
+        for key in keys:
+            input_name = f"{input_prefix}{key}"
+            if input_name in reserved_yaml_names:
+                raise ValueError(
+                    f"@task unwrap parameter {param_name!r} produces input {input_name!r}, "
+                    f"which collides with parameter {reserved_yaml_names[input_name]!r}"
+                )
+            if input_name in seen_synthetic_names:
+                raise ValueError(
+                    f"@task unwrap parameter {param_name!r} produces input {input_name!r}, "
+                    f"which collides with unwrap parameter {seen_synthetic_names[input_name]!r}"
+                )
+            seen_synthetic_names[input_name] = param_name
+            key_specs.append(
                 {
                     "key": key,
-                    "input_name": f"{input_prefix}{key}",
+                    "input_name": input_name,
                     "type": tangle_type,
                     "optional": False,
                 }
-                for key in keys
-            ],
+            )
+        schema[param_name] = {
+            "input_prefix": input_prefix,
+            "value_type": tangle_type,
+            "keys": key_specs,
         }
     return schema
 
@@ -1614,6 +1661,44 @@ def read_dependencies(toml_path: Path) -> list[str]:
 # ============================================================================
 
 
+def _argparse_flag_for_param(param: ParamInfo) -> str:
+    """Return a CLI flag for one generated component parameter.
+
+    Args:
+        param: Component parameter metadata.
+
+    Returns:
+        The flag string used in both generated argparse code and the component
+        ``args`` section. Existing non-unwrapped parameters keep the historical
+        underscore-to-hyphen spelling. Unwrapped synthetic inputs preserve their
+        exact ``yaml_name`` so keys such as ``who-1`` and ``who_1`` remain
+        injective instead of both becoming ``--items--who-1``.
+    """
+    if param.source_param and param.source_key is not None:
+        return "--" + param.yaml_name
+    return "--" + param.yaml_name.replace("_", "-")
+
+
+def _assert_unique_argparse_flags(params: list[ParamInfo]) -> None:
+    """Reject generated component parameters that would share one CLI flag.
+
+    Args:
+        params: Input and output parameters that will become argparse options.
+
+    Raises:
+        ValueError: If two different component parameters map to the same flag.
+    """
+    flags: dict[str, str] = {}
+    for param in params:
+        flag = _argparse_flag_for_param(param)
+        if flag in flags:
+            raise ValueError(
+                f"component parameters {flags[flag]!r} and {param.yaml_name!r} "
+                f"both generate CLI flag {flag!r}"
+            )
+        flags[flag] = param.yaml_name
+
+
 def _build_argparse_code(spec: FunctionSpec) -> str:
     """Generate argparse wrapper code for the component function.
 
@@ -1645,8 +1730,9 @@ def _build_argparse_code(spec: FunctionSpec) -> str:
 
     # Add arguments for all inputs and file-based outputs (OutputPath params)
     all_params = spec.inputs + spec.outputs
+    _assert_unique_argparse_flags(all_params)
     for param in all_params:
-        flag = "--" + param.yaml_name.replace("_", "-")
+        flag = _argparse_flag_for_param(param)
         is_required = param.kind == "output" or not param.optional
         line = (
             f'_parser.add_argument("{flag}", dest="{param.name}", '
@@ -1713,8 +1799,9 @@ def _build_args_section(spec: FunctionSpec) -> list[Any]:
     args: list[Any] = []
 
     all_params = spec.inputs + spec.outputs
+    _assert_unique_argparse_flags(all_params)
     for param in all_params:
-        flag = "--" + param.yaml_name.replace("_", "-")
+        flag = _argparse_flag_for_param(param)
 
         # Determine the placeholder type
         if param.kind == "output":

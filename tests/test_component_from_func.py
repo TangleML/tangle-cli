@@ -515,7 +515,7 @@ class TestCodeGeneration:
 
         code = _build_argparse_code(spec)
 
-        assert '"--run-data--left"' in code
+        assert '"--run_data__left"' in code
         assert "_unwrapped_0['left'] = _parsed_args.pop('run_data__left')" in code
         assert "_parsed_args['run_data'] = _unwrapped_0" in code
         assert "_outputs = combine(**_parsed_args)" in code
@@ -2484,9 +2484,9 @@ def test_generate_component_yaml_with_unwrapped_inputs_runs_rewrapped_program(tm
             str(program_path),
             "--out",
             str(out_path),
-            "--run-data--left",
+            "--run_data__left",
             "a",
-            "--run-data--right",
+            "--run_data__right",
             "b",
         ],
         capture_output=True,
@@ -2495,6 +2495,67 @@ def test_generate_component_yaml_with_unwrapped_inputs_runs_rewrapped_program(tm
     )
     assert completed.returncode == 0, completed.stderr
     assert out_path.read_text() == "a|b"
+
+
+def test_generate_component_yaml_unwrapped_flags_are_injective(tmp_path):
+    source = tmp_path / "hyphen_component.py"
+    source.write_text(
+        textwrap.dedent(
+            '''
+            from cloud_pipelines import components
+
+            def hyphen_component(out: components.OutputPath("Text"), items: dict[str, str]):
+                with open(out, "w") as fh:
+                    fh.write(items["who-1"] + "|" + items["who_1"])
+            '''
+        ).lstrip()
+    )
+    output_file = tmp_path / "component.yaml"
+
+    assert generate_component_yaml(
+        source,
+        output_file,
+        container_image="python:3.12",
+        function_name="hyphen_component",
+        unwrapped_inputs={
+            "items": {
+                "input_prefix": "items__",
+                "value_type": "String",
+                "keys": [
+                    {"key": "who-1", "input_name": "items__who-1", "type": "String"},
+                    {"key": "who_1", "input_name": "items__who_1", "type": "String"},
+                ],
+            }
+        },
+    ) is True
+
+    component = yaml.safe_load(output_file.read_text())
+    args = component["implementation"]["container"]["args"]
+    assert "--items__who-1" in args
+    assert "--items__who_1" in args
+    assert "--items--who-1" not in args
+
+    program = component["implementation"]["container"]["command"][-1]
+    program_path = tmp_path / "program.py"
+    program_path.write_text(program)
+    out_path = tmp_path / "combined.txt"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(program_path),
+            "--out",
+            str(out_path),
+            "--items__who-1",
+            "hyphen",
+            "--items__who_1",
+            "underscore",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert out_path.read_text() == "hyphen|underscore"
 
 
 def test_generate_component_yaml_shim_supports_outputs_import(tmp_path):

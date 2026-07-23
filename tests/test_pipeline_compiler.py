@@ -387,13 +387,13 @@ def test_compile_task_decorator_emits_unwrapped_input_schema_and_flat_edges(tmp_
     schema = local_from_python["unwrapped_inputs"]["run_data"]
     assert schema["value_type"] == "String"
     assert schema["keys"] == [
-        {"key": "shop", "input_name": "run_data__shop", "type": "String", "optional": False},
         {
             "key": "catalog",
             "input_name": "run_data__catalog",
             "type": "String",
             "optional": False,
         },
+        {"key": "shop", "input_name": "run_data__shop", "type": "String", "optional": False},
     ]
 
 
@@ -430,6 +430,73 @@ def test_compile_task_decorator_uses_schema_hash_for_unwrapped_fragment_collisio
         for name in fragments
     }
     assert key_sets == {("first",), ("second",), ("a", "b")}
+
+
+def test_compile_task_decorator_dedupes_reordered_unwrapped_key_sets(tmp_path):
+    project = tmp_path / "project"
+    src = project / "src"
+    pipeline_path = src / "pipeline.py"
+    src.mkdir(parents=True)
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        "@task(image='python:3.12')\n"
+        "def produce() -> str:\n"
+        "    return 'ok'\n\n"
+        "@task(image='python:3.12', unwrap='run_data')\n"
+        "def combine(run_data: dict[str, str]) -> str:\n"
+        "    return ','.join(sorted(run_data))\n\n"
+        "@pipeline('Unwrap Stable Hash Pipeline')\n"
+        "def unwrap_stable_hash_pipeline() -> Out[str]:\n"
+        "    x = produce.named('x')()\n"
+        "    y = produce.named('y')()\n"
+        "    a = combine.named('combine_a')(run_data={'x': x, 'y': y})\n"
+        "    b = combine.named('combine_b')(run_data={'y': y, 'x': x})\n"
+        "    return combine.named('combine_c')(run_data={'a': a, 'b': b})\n",
+        encoding="utf-8",
+    )
+
+    result = compile_pipeline(pipeline_path, project / "compiled.yaml")
+    compiled = yaml.safe_load((project / "compiled.yaml").read_text())
+    sidecar = yaml.safe_load(result.components_path.read_text())
+
+    combine_a_url = compiled["implementation"]["graph"]["tasks"]["combine_a"]["componentRef"]["url"]
+    combine_b_url = compiled["implementation"]["graph"]["tasks"]["combine_b"]["componentRef"]["url"]
+    assert combine_a_url == combine_b_url
+
+    fragments = sorted(name for name in sidecar if name.startswith("combine--"))
+    assert len(fragments) == 2
+    xy_fragment = next(
+        name
+        for name in fragments
+        if [
+            key["key"]
+            for key in sidecar[name]["local_from_python"]["unwrapped_inputs"]["run_data"]["keys"]
+        ]
+        == ["x", "y"]
+    )
+    assert combine_a_url.endswith(f"#{xy_fragment}")
+
+
+def test_compile_task_decorator_rejects_unwrapped_input_colliding_with_fixed_param(tmp_path):
+    project = tmp_path / "project"
+    src = project / "src"
+    pipeline_path = src / "pipeline.py"
+    src.mkdir(parents=True)
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        "@task(image='python:3.12', unwrap='items')\n"
+        "def greet(items: dict[str, str], items__who: str = 'default') -> str:\n"
+        "    return items['who'] + items__who\n\n"
+        "@pipeline('Bad Collision Pipeline')\n"
+        "def bad_collision_pipeline() -> Out[str]:\n"
+        "    return greet.named('greet')(items={'who': 'Ada'})\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CompileError, match="collides with parameter 'items__who'"):
+        compile_pipeline(pipeline_path, project / "compiled.yaml")
+    assert not (project / "compiled.yaml").exists()
+    assert not (project / "compiled.components.yaml").exists()
 
 
 def test_compile_task_decorator_rejects_empty_unwrapped_dict(tmp_path):
