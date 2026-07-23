@@ -293,6 +293,45 @@ uv run tangle sdk pipeline-runs export RUN_ID --output pipeline.yaml
 
 `pipelines validate` checks local graph shape, the packaged Tangle pipeline JSON schema, and component input wiring when component specs are present. It does not hydrate refs; validate a hydrated file when you need fully resolved component-input checks for remote refs.
 
+#### Python-authored `@task(unwrap=...)` dict inputs
+
+Python-authored pipelines can mark one or more `dict[str, T]` task parameters for unwrapping:
+
+```python
+from cloud_pipelines import components
+from tangle_cli.python_pipeline import Out, pipeline, task
+
+
+@task(image="python:3.12")
+def make_greeting(name: str) -> str:
+    return f"hello {name}"
+
+
+@task(image="python:3.12", unwrap="items")
+def join_greetings(out: components.OutputPath("Text"), items: dict[str, str], prefix: str = "joined"):
+    with open(out, "w") as fh:
+        fh.write(f"{prefix}: " + " | ".join(items[key] for key in sorted(items)))
+
+
+@pipeline("Greeting pipeline")
+def greeting_pipeline() -> Out[str]:
+    world = make_greeting.named("world_source")(name="world")
+    tangle = make_greeting.named("tangle_source")(name="tangle")
+    joined = join_greetings.named("join")(
+        prefix="demo",
+        items={
+            "who_1": world.Output,
+            "who_2": tangle.Output,
+            "literal": "plain value",
+        },
+    )
+    return joined.out
+```
+
+`unwrap="items"` tells the compiler that the caller-provided entries in `items` should become explicit component inputs. The call above compiles the consumer task arguments as `items__who_1`, `items__who_2`, and `items__literal`; task-output values remain normal graph edges and literal values remain literals. The generated components sidecar persists the exact flattened schema under `local_from_python.unwrapped_inputs`, including the generated input names and inferred value type. Hydrate passes that schema back into Python component generation so the regenerated component has the same flattened inputs even though hydrate no longer has access to the original Python call-site dict. The generated runtime wrapper then re-wraps those CLI arguments back into the original `items` dict before calling `join_greetings(...)`.
+
+Use `unwrap=["items", "metadata"]` to unwrap multiple dict parameters. The caller owns the key names; keys may contain letters, numbers, `_`, and `-`, and become `param__<key>` component inputs. Empty dicts are rejected because they do not define a component interface. If a generated name would collide with a fixed parameter or another generated name, compile fails before writing artifacts. Equivalent key sets are canonicalized for schema hashing, so two call sites with the same keys in different insertion orders dedupe to the same component fragment.
+
 `submit` hydrates refs by default and builds an API submit payload with `root_task.componentRef.spec`. Use `--no-hydrate` to submit the local YAML structure as-is. Use `--dry-run` to print the payload without creating a run.
 
 Before creating a run—or printing a `--dry-run` payload—`submit` runs the same authoring validation as `tangle sdk pipelines validate` on the hydrated/resolved pipeline spec (or on the as-is spec when `--no-hydrate` is used). Invalid specs fail locally with `Pipeline validation failed` errors before the run-submission API call. For example, the pipeline root must be a graph (`implementation.graph`), so a bare `implementation.container` root is rejected before the run is submitted; missing required component inputs and invalid task output references are rejected when component specs are available.
