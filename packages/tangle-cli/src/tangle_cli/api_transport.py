@@ -18,9 +18,23 @@ _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _MISSING = object()
 _SENSITIVE_HEADER_NAMES = {"authorization", "cloud-auth", "cookie", "x-api-key"}
 _SENSITIVE_KEY_RE = re.compile(
-    r"(authorization|authentication|(^|[-_])auth($|[-_])|cloud[-_]?auth|cookie|x[-_]?api[-_]?key|token|secret|password|credential|pre[-_]?signed[-_]?url|signed[-_]?url)",
+    r"(authorization|authentication|(^|[-_])auth($|[-_])|cloud[-_]?auth|cookie|(x[-_]?)?api[-_]?key|token|secret|password|credential|pre[-_]?signed[-_]?url|signed[-_]?url)",
     re.IGNORECASE,
 )
+# Query parameters that carry the credential portion of a presigned/SAS URL
+# (AWS SigV4, GCS, Azure). Redacting the signature neutralizes the grant.
+_SIGNED_URL_QUERY_RE = re.compile(
+    r"^(x-(amz|goog|ms)-.*|sig|signature|awsaccesskeyid|googleaccessid)$",
+    re.IGNORECASE,
+)
+# Upper bound on backend-supplied error detail rendered on a single line.
+_MAX_BACKEND_DETAIL_CHARS = 500
+# Any ``scheme://...`` run embedded in free-form exception text; each match is
+# routed through sanitize_url so userinfo and signed query params are redacted.
+_EMBEDDED_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s'\"<>]+")
+# Bare ``user:pass@host`` userinfo that appears without a scheme (e.g. proxy
+# diagnostics). Requires a colon-bearing userinfo terminated by ``@``.
+_BARE_USERINFO_RE = re.compile(r"[^\s/@:]+:[^\s/@]+@")
 _REDACTED = "<redacted>"
 _REDACTED_DOCUMENT = "<redacted document>"
 _OPAQUE_DOCUMENT_KEY_NAMES = {
@@ -88,6 +102,156 @@ def _content_to_text(content: bytes | str | None) -> str:
     except Exception:
         return text
     return _safe_json_text(parsed)
+
+
+def _is_sensitive_query_key(key: str) -> bool:
+    stripped = key.strip()
+    return bool(_SENSITIVE_KEY_RE.search(stripped) or _SIGNED_URL_QUERY_RE.match(stripped))
+
+
+def sanitize_url(url: Any) -> str:
+    """Return *url* with credentials removed so it is safe to display or log.
+
+    Strips any ``user:password@`` userinfo and redacts the values of query
+    parameters that look like tokens, credentials, or presigned/SAS-URL
+    signatures. The scheme, host, port, path, and non-sensitive query keys are
+    preserved so the target stays recognizable.
+    """
+
+    text = str(url)
+    try:
+        parsed = urllib.parse.urlsplit(text)
+    except ValueError:
+        return _REDACTED
+    if not parsed.scheme and not parsed.netloc:
+        return text
+    host = parsed.hostname or ""
+    # ``hostname`` unwraps IPv6 literals, so re-bracket them before appending an
+    # optional port; otherwise ``[2001:db8::1]:8443`` becomes ambiguous garbage.
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{_REDACTED}@{host}" if (parsed.username or parsed.password) else host
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    query = parsed.query
+    if query:
+        pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+        query = urllib.parse.urlencode(
+            [
+                (key, _REDACTED if _is_sensitive_query_key(key) else value)
+                for key, value in pairs
+            ],
+            safe="<>",
+        )
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+
+
+def _bounded_detail(text: str | None) -> str:
+    """Collapse whitespace and cap length of backend-supplied error detail."""
+
+    if not text:
+        return ""
+    collapsed = " ".join(str(text).split())
+    if len(collapsed) > _MAX_BACKEND_DETAIL_CHARS:
+        collapsed = collapsed[:_MAX_BACKEND_DETAIL_CHARS].rstrip() + "…"
+    return collapsed
+
+
+def http_status_line(exc: httpx.HTTPStatusError) -> str:
+    """Return the ``HTTP <status> <reason>`` summary for a status error."""
+
+    response = exc.response
+    return f"HTTP {response.status_code} {response.reason_phrase}".strip()
+
+
+def format_http_status_error(exc: httpx.HTTPStatusError, *, include_detail: bool = True) -> str:
+    """Build a concise one-line message for an httpx HTTP status error.
+
+    Includes the status, request method, and a credential-safe URL. When
+    *include_detail* is set, the response body is first run through the same
+    structured secret redaction used for verbose logging, then whitespace
+    normalized and length bounded, so backend messages remain visible without
+    leaking reflected credentials or dumping multi-line/oversized payloads.
+    """
+
+    request = exc.request
+    method = request.method if request is not None else "?"
+    url = sanitize_url(request.url) if request is not None else "?"
+    message = f"{http_status_line(exc)} for {method} {url}"
+    if include_detail:
+        try:
+            body = exc.response.text
+        except Exception:  # pragma: no cover - defensive: streamed/undecodable body
+            body = ""
+        # Backends and proxies can reflect submitted fields (tokens, passwords)
+        # into validation/authentication errors, so redact structured secrets
+        # before the body reaches stderr and CI logs.
+        detail = _bounded_detail(_content_to_text(body)) if body else ""
+        if detail:
+            message = f"{message}: {detail}"
+    return message
+
+
+def _scrub_secret_text(text: str) -> str:
+    """Redact URLs and bare userinfo embedded in free-form exception text.
+
+    A crafted or third-party ``httpx`` exception can carry a proxy URL, signed
+    query, or ``user:pass@host`` inside its message. Never emit that raw: route
+    every ``scheme://`` run through :func:`sanitize_url` and strip any remaining
+    schemeless userinfo, while leaving benign diagnostics (errno, TLS reason)
+    intact.
+    """
+
+    def _replace_url(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        trailing = ""
+        while raw and raw[-1] in ").,;'\"":
+            trailing = raw[-1] + trailing
+            raw = raw[:-1]
+        return sanitize_url(raw) + trailing
+
+    scrubbed = _EMBEDDED_URL_RE.sub(_replace_url, text)
+    return _BARE_USERINFO_RE.sub(f"{_REDACTED}@", scrubbed)
+
+
+def describe_request_error(exc: httpx.RequestError) -> str:
+    """Return an actionable, credential-safe reason for an httpx request error.
+
+    Connection, timeout, proxy, and TLS failures are labeled so the user knows
+    what to check; the underlying detail is included when it adds information.
+    Any URL or userinfo embedded in the exception text is redacted first.
+    """
+
+    detail = _scrub_secret_text(" ".join(str(exc).split()))
+    lowered = detail.lower()
+    if isinstance(exc, httpx.ProxyError):
+        return f"proxy error: {detail}" if detail else "proxy error"
+    if isinstance(exc, httpx.TimeoutException):
+        label = {
+            httpx.ConnectTimeout: "connection timed out",
+            httpx.ReadTimeout: "read timed out",
+            httpx.WriteTimeout: "write timed out",
+            httpx.PoolTimeout: "connection pool timed out",
+        }.get(type(exc), "request timed out")
+        return f"{label}: {detail}" if detail and label not in lowered else label
+    if isinstance(exc, httpx.ConnectError):
+        if any(token in lowered for token in ("ssl", "certificate", "tls", "handshake")):
+            return f"TLS error: {detail}" if detail else "TLS error"
+        return f"connection failed: {detail}" if detail else "connection failed"
+    if detail:
+        return detail
+    return exc.__class__.__name__
+
+
+def format_request_error(exc: httpx.RequestError) -> str:
+    """Build a concise one-line message for an httpx connection-level error."""
+
+    request = getattr(exc, "request", None)
+    reason = describe_request_error(exc)
+    if request is None:
+        return f"Failed to reach the backend: {reason}"
+    url = sanitize_url(request.url)
+    return f"Failed to reach {request.method} {url}: {reason}"
 
 
 def log_http_exchange(
