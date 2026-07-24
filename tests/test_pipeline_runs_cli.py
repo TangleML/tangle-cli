@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
+import os
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import requests
 import yaml
 
 from tangle_cli import cli, pipeline_run_manager, pipeline_runs_cli
@@ -113,6 +117,10 @@ class FakeClient:
 
     def executions_container_log(self, id: str) -> dict[str, Any]:
         return {"log_text": f"logs for {id}\n"}
+
+    def iter_execution_container_log_lines(self, id: str):
+        yield f"stream {id} line 1"
+        yield f"stream {id} line 2"
 
     def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
         self.list_calls.append(kwargs)
@@ -2790,3 +2798,197 @@ def test_pipeline_runner_cleanup_runs_after_prepare_failure(tmp_path: Path) -> N
 
     assert cleaned == [(temp_effective_path, "Pipeline validation failed:\n  - boom")]
     assert not temp_effective_path.exists()
+
+
+def test_pipeline_runs_logs_stream_prints_lines(monkeypatch, capsys) -> None:
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "logs", "exec-7", "--stream"])
+
+    assert capsys.readouterr().out == "stream exec-7 line 1\nstream exec-7 line 2\n"
+
+
+def test_pipeline_runs_logs_snapshot_is_default_when_stream_absent(monkeypatch, capsys) -> None:
+    class TrackingClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.streamed_ids: list[str] = []
+
+        def iter_execution_container_log_lines(self, id: str):
+            self.streamed_ids.append(id)
+            yield from ()
+
+    fake_client = TrackingClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "logs", "exec-1"])
+
+    assert capsys.readouterr().out == "logs for exec-1\n"
+    assert fake_client.streamed_ids == []
+
+
+def test_stream_logs_open_transport_error_is_clean() -> None:
+    class RefusingClient(FakeClient):
+        def iter_execution_container_log_lines(self, id: str):
+            raise requests.ConnectionError("connection refused")
+
+    manager = pipeline_run_manager.PipelineRunManager(client=RefusingClient())
+
+    with pytest.raises(
+        PipelineRunError, match="Failed to open log stream for execution exec-1"
+    ):
+        manager.stream_logs("exec-1")
+
+
+def test_pipeline_runs_logs_stream_open_failure_exits_cleanly(monkeypatch) -> None:
+    class RefusingClient(FakeClient):
+        def iter_execution_container_log_lines(self, id: str):
+            raise requests.ConnectionError("connection refused")
+
+    fake_client = RefusingClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "logs", "exec-1", "--stream"])
+
+    assert "Failed to open log stream for execution exec-1" in str(exc_info.value)
+    assert "connection refused" in str(exc_info.value)
+
+
+def test_pipeline_runs_logs_stream_broken_pipe_exits_cleanly(monkeypatch) -> None:
+    # Simulates `... logs --stream | head`: the downstream reader closes the
+    # pipe, so the first stdout write raises BrokenPipeError. The command must
+    # stop following and exit cleanly instead of tracebacking.
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    write_attempts = {"count": 0}
+
+    class ClosedPipeStdout(io.TextIOBase):
+        def write(self, _text: str) -> int:
+            write_attempts["count"] += 1
+            raise BrokenPipeError
+
+        def fileno(self) -> int:
+            return devnull_fd
+
+    monkeypatch.setattr(sys, "stdout", ClosedPipeStdout())
+    app = cli.build_app()
+
+    try:
+        run_app(app, ["sdk", "pipeline-runs", "logs", "exec-7", "--stream"])
+    finally:
+        os.close(devnull_fd)
+
+    assert write_attempts["count"] == 1
+
+
+def test_pipeline_runs_logs_stream_ctrl_c_exits_cleanly(monkeypatch, capsys) -> None:
+    # An interactive Ctrl-C is the normal way to stop a live follow; it must
+    # exit with the conventional interrupt code (128 + SIGINT), not a
+    # KeyboardInterrupt traceback. cyclopts provides this by default
+    # (suppress_keyboard_interrupt); this locks that contract in for --stream.
+    class InterruptedStreamClient(FakeClient):
+        def iter_execution_container_log_lines(self, id: str):
+            yield "line-1"
+            raise KeyboardInterrupt
+
+    fake_client = InterruptedStreamClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "logs", "exec-1", "--stream"])
+
+    assert exc_info.value.code == 130
+    assert capsys.readouterr().out == "line-1\n"
+
+
+def test_pipeline_runs_logs_help_documents_stream(capsys) -> None:
+    app = cli.build_app()
+    run_app(app, ["sdk", "pipeline-runs", "logs", "--help"])
+    assert "--stream" in capsys.readouterr().out
+
+
+def test_pipeline_runs_stream_logs_uses_client_iterator() -> None:
+    fake_client = FakeClient()
+    manager = PipelineRunManager(client=fake_client)
+
+    assert list(manager.stream_logs("exec-9")) == ["stream exec-9 line 1", "stream exec-9 line 2"]
+
+
+def test_pipeline_runs_stream_logs_midstream_error_is_interruption() -> None:
+    # A transport failure after some lines have flowed must surface as a
+    # mid-stream interruption, not the "failed to open" wording reserved for a
+    # stream that never opened.
+    class MidStreamDropClient(FakeClient):
+        def iter_execution_container_log_lines(self, id: str):
+            yield "line-1"
+            raise requests.exceptions.ChunkedEncodingError("connection broken mid-stream")
+
+    manager = PipelineRunManager(client=MidStreamDropClient())
+
+    gen = iter(manager.stream_logs("exec-9"))
+    assert next(gen) == "line-1"
+    with pytest.raises(PipelineRunError, match="interrupted") as exc_info:
+        next(gen)
+    assert "Failed to open" not in str(exc_info.value)
+
+
+def test_pipeline_runs_stream_logs_zero_line_drop_is_interruption() -> None:
+    # A connection that opens successfully but drops before the first line is
+    # still a mid-stream interruption; only open failures (raised from the
+    # hook call itself) get the "failed to open" wording.
+    class ZeroLineDropClient(FakeClient):
+        def iter_execution_container_log_lines(self, id: str):
+            raise requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+            yield  # pragma: no cover
+
+    manager = PipelineRunManager(client=ZeroLineDropClient())
+
+    with pytest.raises(PipelineRunError, match="interrupted") as exc_info:
+        list(manager.stream_logs("exec-9"))
+    assert "Failed to open" not in str(exc_info.value)
+
+
+def test_pipeline_runs_logs_stream_honors_log_type_none(monkeypatch, capsys) -> None:
+    # --log-type controls the CLI's diagnostic logger and is orthogonal to
+    # --stream; the streamed log content still reaches stdout under any mode.
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "logs", "exec-7", "--stream", "--log-type", "none"])
+
+    assert capsys.readouterr().out == "stream exec-7 line 1\nstream exec-7 line 2\n"
+
+
+def _logs_http_error(status: int, path: str) -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status
+    response.request = requests.Request("GET", f"https://api.test{path}").prepare()
+    return requests.HTTPError(f"{status} Client Error", response=response)
+
+
+def test_pipeline_runs_logs_stream_missing_endpoint_is_clean(monkeypatch) -> None:
+    class NoStreamClient(FakeClient):
+        def iter_execution_container_log_lines(self, id: str):
+            # Like the real client, open failures raise from the call itself
+            # rather than on first iteration.
+            raise _logs_http_error(404, f"/api/executions/{id}/stream_container_log")
+
+    fake_client = NoStreamClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    # A clean SystemExit (not a raw requests.HTTPError) means no traceback.
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "logs", "exec-1", "--stream"])
+
+    message = str(exc_info.value)
+    assert "404" in message
+    assert "/api/executions/exec-1/stream_container_log" in message

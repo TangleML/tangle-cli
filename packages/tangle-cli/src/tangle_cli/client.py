@@ -9,7 +9,7 @@ higher-level semantic helpers that downstream callers use.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import asdict, is_dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -53,6 +53,14 @@ class TangleApiClient(GeneratedTangleApiOperations):
     _MAX_RATE_LIMIT_RETRIES = 3
     _RATE_LIMIT_BACKOFF_SECONDS = 1.0
     _MAX_RETRY_AFTER_SECONDS = 60.0
+    # Opening a log stream retries transient failures (transport-open errors
+    # and retryable 5xx) with doubling backoff, spent entirely before any line
+    # is yielded. An already-open stream that drops is the caller's to handle;
+    # never re-opening an established stream means lines cannot be duplicated.
+    _RETRYABLE_STREAM_STATUSES = frozenset({500, 502, 503, 504})
+    _MAX_STREAM_OPEN_ATTEMPTS = 7
+    _STREAM_OPEN_BACKOFF_SECONDS = 1.0
+    _MAX_STREAM_OPEN_BACKOFF_SECONDS = 30.0
 
     def __init__(
         self,
@@ -132,6 +140,12 @@ class TangleApiClient(GeneratedTangleApiOperations):
             request_kwargs=kwargs,
         )
         if response.status_code == 401:
+            # The 401 response is discarded by the auth-refresh retry. For a
+            # streamed request it is an open streamed connection, so close it
+            # before refreshing auth and issuing the second request to avoid
+            # leaking it. ``response.headers`` stays available after close.
+            if kwargs.get("stream"):
+                response.close()
             self._refresh_auth()
             response = self._request_with_rate_limit_retries(
                 request_method,
@@ -152,7 +166,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         params: Mapping[str, Any] | None,
         json_data: Any,
         extra_headers: Mapping[str, str] | None,
-        timeout: float,
+        timeout: float | tuple[float, float | None],
         request_kwargs: Mapping[str, Any],
     ) -> requests.Response:
         response: requests.Response | None = None
@@ -168,6 +182,13 @@ class TangleApiClient(GeneratedTangleApiOperations):
             )
             if response.status_code != 429 or attempt == self._MAX_RATE_LIMIT_RETRIES:
                 return response
+            # The 429 response is discarded by the retry. For a streamed request
+            # it is an open streamed connection, so close it before the sleep to
+            # avoid holding it open while we wait. ``response.headers`` stays
+            # available after close, so ``_sleep_for_rate_limit`` can still read
+            # Retry-After.
+            if request_kwargs.get("stream"):
+                response.close()
             self._sleep_for_rate_limit(response, attempt)
         return response
 
@@ -179,6 +200,14 @@ class TangleApiClient(GeneratedTangleApiOperations):
         delay = min(delay, self._MAX_RETRY_AFTER_SECONDS)
         if self.verbose:
             self.logger.info(f"429 rate limited; retrying in {delay:.1f}s")
+        time.sleep(delay)
+
+    def _sleep_for_stream_open_retry(self, backoff: float, next_attempt: int, reason: str) -> None:
+        delay = min(backoff, self._MAX_STREAM_OPEN_BACKOFF_SECONDS)
+        self.logger.warn(
+            f"transient {reason} opening log stream; retrying in {delay:.1f}s "
+            f"(attempt {next_attempt}/{self._MAX_STREAM_OPEN_ATTEMPTS})"
+        )
         time.sleep(delay)
 
     @staticmethod
@@ -205,7 +234,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         params: Mapping[str, Any] | None,
         json_data: Any,
         extra_headers: Mapping[str, str] | None,
-        timeout: float,
+        timeout: float | tuple[float, float | None],
         request_kwargs: Mapping[str, Any],
     ) -> requests.Response:
         """Send one request, following only same-origin redirects.
@@ -235,6 +264,16 @@ class TangleApiClient(GeneratedTangleApiOperations):
                 **request_kwargs,
             )
             if self.verbose:
+                # For streamed responses, reading ``response.text`` would buffer
+                # the entire body here, defeating callers that stream via
+                # ``iter_content``/``iter_lines``; a followed container-log
+                # stream may never terminate. Log a placeholder and leave the
+                # body unread.
+                response_body = (
+                    "<streaming body omitted>"
+                    if request_kwargs.get("stream")
+                    else response.text
+                )
                 log_http_exchange(
                     self.logger,
                     method=current_method,
@@ -243,7 +282,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
                     request_body=current_json,
                     response_status=response.status_code,
                     response_headers=dict(response.headers),
-                    response_body=response.text,
+                    response_body=response_body,
                 )
             if response.status_code not in self._REDIRECT_STATUSES:
                 return response
@@ -254,6 +293,13 @@ class TangleApiClient(GeneratedTangleApiOperations):
 
             next_url = urljoin(response.url, location)
             if not self._same_origin(response.url, next_url):
+                # Close before raising so callers that catch this and fall back
+                # to another route (or a streamed open) do not leak the open
+                # streamed redirect response and its pooled connection.
+                try:
+                    response.close()
+                except Exception:
+                    pass
                 raise requests.HTTPError(
                     f"Refusing to follow cross-origin redirect from {response.url} to {next_url}",
                     response=response,
@@ -358,16 +404,108 @@ class TangleApiClient(GeneratedTangleApiOperations):
         return details
 
     def stream_execution_container_log(self, execution_id: str) -> requests.Response:
-        response = self._make_request(
-            "GET",
-            self._format_path(
-                "/api/executions/{id}/stream_container_log",
-                {"id": execution_id},
-            ),
-            stream=True,
+        """Open the streaming container-log response for ``execution_id``.
+
+        The endpoint delivers raw log lines over a long-lived chunked HTTP
+        response; the client streams those lines as-is and does no
+        event-protocol parsing.
+
+        Establishing the stream (open + status check) follows a transient-error
+        retry budget: transport-open errors (connection/timeout) and retryable
+        5xx responses are retried with exponential backoff before any line is
+        read. Same-origin redirect protection errors (cross-origin ``HTTPError``
+        / ``TooManyRedirects``) are not transport blips and propagate
+        immediately. Once the stream is open the caller owns the response and
+        must close it; :meth:`iter_execution_container_log_lines` does that.
+
+        The request uses ``(connect, read)`` timeouts of ``(self.timeout,
+        None)``: the connect timeout still bounds opening the stream, but there
+        is no per-read timeout, because a healthy follow stream stays silent for
+        as long as the container emits no output.
+        """
+
+        path = self._format_path(
+            "/api/executions/{id}/stream_container_log",
+            {"id": execution_id},
         )
-        response.raise_for_status()
-        return response
+        backoff = self._STREAM_OPEN_BACKOFF_SECONDS
+        last_exc: requests.RequestException | None = None
+        last_error_response: requests.Response | None = None
+        for attempt in range(1, self._MAX_STREAM_OPEN_ATTEMPTS + 1):
+            try:
+                response = self._make_request(
+                    "GET", path, stream=True, timeout=(self.timeout, None)
+                )
+            except (requests.HTTPError, requests.TooManyRedirects) as exc:
+                # Same-origin redirect guard errors carry the rejected streamed
+                # response and are intentionally not retried. No iterator ever
+                # receives that response, so close it before re-raising.
+                if exc.response is not None:
+                    exc.response.close()
+                raise
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_exc = exc
+                last_error_response = None
+                if attempt == self._MAX_STREAM_OPEN_ATTEMPTS:
+                    break
+                self._sleep_for_stream_open_retry(backoff, attempt + 1, type(exc).__name__)
+                backoff *= 2.0
+                continue
+            if response.status_code in self._RETRYABLE_STREAM_STATUSES:
+                response.close()
+                last_error_response = response
+                last_exc = None
+                if attempt == self._MAX_STREAM_OPEN_ATTEMPTS:
+                    break
+                self._sleep_for_stream_open_retry(
+                    backoff, attempt + 1, f"HTTP {response.status_code}"
+                )
+                backoff *= 2.0
+                continue
+            try:
+                response.raise_for_status()
+            except requests.HTTPError:
+                # Non-retryable status (e.g. 400/403/404): close the open
+                # streamed response before propagating so it is not leaked.
+                response.close()
+                raise
+            return response
+        if last_exc is not None:
+            raise last_exc
+        if last_error_response is not None:
+            last_error_response.raise_for_status()
+        # Defensive: every exhausted attempt records either a transport error
+        # (re-raised above) or a retryable-status response (raise_for_status
+        # always raises for those), so this cannot be reached.
+        raise RuntimeError(  # pragma: no cover
+            "log stream open retries exhausted without a failure to re-raise"
+        )
+
+    def iter_execution_container_log_lines(self, execution_id: str) -> Iterable[str]:
+        """Return an iterator of decoded container-log lines for ``execution_id``.
+
+        The stream is opened eagerly, so open failures (HTTP status or transport
+        errors) raise from this call rather than on first iteration; anything
+        raised while iterating is a drop of an already-open stream. The
+        underlying streaming response is always closed when iteration finishes
+        or the consumer stops early.
+        """
+
+        response = self.stream_execution_container_log(execution_id)
+
+        def lines() -> Iterator[str]:
+            try:
+                # Decode whole ``bytes`` lines as UTF-8 explicitly rather than
+                # via ``decode_unicode=True``: requests' charset guessing falls
+                # back to latin-1 when the response declares no charset and
+                # would mojibake non-ASCII output. Whole-line decoding also
+                # reassembles multibyte sequences split across stream chunks.
+                for raw in response.iter_lines():
+                    yield raw.decode("utf-8", "replace")
+            finally:
+                response.close()
+
+        return lines()
 
     def get_component_spec(self, digest: str) -> ComponentSpec:
         """Return a parsed domain component spec from the generated component endpoint."""
