@@ -32,6 +32,9 @@ from .pipeline_run_manager import (
     PipelineRunError,
     PipelineRunHooks,
     PipelineRunManager,
+    merge_secret_run_args,
+    normalize_arg_secret_config,
+    parse_arg_secret_entries,
     parse_json_or_key_values,
     parse_key_value_entries,
 )
@@ -134,6 +137,17 @@ def pipeline_runs_submit(
         Parameter(help="Pipeline argument as KEY=VALUE. Repeat for multiple.", negative_iterable=()),
     ] = None,
     args_json: Annotated[str | None, Parameter(help="Pipeline arguments as a JSON object.")] = None,
+    arg_secret: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--arg-secret",
+            help=(
+                "Pipeline argument bound to a Tangle secret as INPUT=SECRET_NAME. "
+                "Repeat for multiple."
+            ),
+            negative_iterable=(),
+        ),
+    ] = None,
     annotation: Annotated[
         list[str] | None,
         Parameter(help="Run annotation as KEY=VALUE. Repeat for multiple.", negative_iterable=()),
@@ -185,6 +199,8 @@ def pipeline_runs_submit(
         "arg": (arg, None),
         "args_json": (args_json, None),
         "args_config": ("args", None, None, True),
+        "arg_secret": (arg_secret, None),
+        "arg_secrets_config": ("arg_secrets", None, None, True),
         "annotation": (annotation, None),
         "hydrate": (hydrate, True),
         "dry_run": (dry_run, None),
@@ -197,8 +213,11 @@ def pipeline_runs_submit(
     }
 
     def action(manager: PipelineRunManager, args: ArgsContainer) -> dict[str, Any]:
+        run_args = parse_json_or_key_values(args.args_json or args.args_config, args.arg)
+        secret_names = normalize_arg_secret_config(args.arg_secrets_config)
+        secret_names.update(parse_arg_secret_entries(args.arg_secret))
         kwargs = {
-            "run_args": parse_json_or_key_values(args.args_json or args.args_config, args.arg),
+            "run_args": merge_secret_run_args(run_args, secret_names),
             "annotations": parse_key_value_entries(args.annotation),
             "hydrate": bool(args.hydrate),
             "run_as": args.run_as,

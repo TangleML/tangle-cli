@@ -2100,3 +2100,80 @@ def parse_json_or_key_values(
         result.update(loaded)
     result.update(parse_key_value_entries(entries))
     return result
+
+
+def secret_argument_value(secret_name: str) -> dict[str, Any]:
+    """Return the OSS dynamic-data payload for a Tangle secret reference."""
+
+    return {"dynamicData": {"secret": {"name": secret_name}}}
+
+
+def parse_arg_secret_entries(entries: list[str] | None) -> dict[str, str]:
+    """Parse ``INPUT=SECRET_NAME`` secret references into a mapping.
+
+    Trimmed input and secret names must be non-empty, and an input may not be
+    repeated. Raising here keeps validation before any file read or network
+    call in the submit path.
+    """
+
+    parsed: dict[str, str] = {}
+    for entry in entries or []:
+        if "=" not in entry:
+            raise PipelineRunError(f"Expected INPUT=SECRET_NAME for --arg-secret, got {entry!r}")
+        raw_input, raw_secret = entry.split("=", 1)
+        input_name = raw_input.strip()
+        secret_name = raw_secret.strip()
+        if not input_name or not secret_name:
+            raise PipelineRunError(
+                f"--arg-secret requires a non-empty input and secret name, got {entry!r}"
+            )
+        if input_name in parsed:
+            raise PipelineRunError(f"Duplicate --arg-secret for input {input_name!r}")
+        parsed[input_name] = secret_name
+    return parsed
+
+
+def normalize_arg_secret_config(value: Any) -> dict[str, str]:
+    """Normalize a config ``arg_secrets`` mapping of input -> secret name."""
+
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise PipelineRunError("arg_secrets config must be a mapping of INPUT to SECRET_NAME")
+    normalized: dict[str, str] = {}
+    for raw_input, raw_secret in value.items():
+        input_name = str(raw_input).strip()
+        if not isinstance(raw_secret, str):
+            raise PipelineRunError(
+                f"arg_secrets[{raw_input!r}] must be a secret name string, "
+                f"got {type(raw_secret).__name__}"
+            )
+        secret_name = raw_secret.strip()
+        if not input_name or not secret_name:
+            raise PipelineRunError("arg_secrets entries require a non-empty input and secret name")
+        normalized[input_name] = secret_name
+    return normalized
+
+
+def merge_secret_run_args(
+    run_args: dict[str, Any],
+    secret_names: Mapping[str, str],
+) -> dict[str, Any]:
+    """Merge secret references into run args, rejecting input conflicts.
+
+    An input may be supplied as a plain value (``--arg`` / ``--args-json`` /
+    config ``args``) or as a secret reference (``--arg-secret`` / config
+    ``arg_secrets``), never both. Overlap is rejected rather than silently
+    overwriting one form with the other.
+    """
+
+    conflicts = sorted(set(run_args) & set(secret_names))
+    if conflicts:
+        raise PipelineRunError(
+            "Input(s) given as both a value and a secret reference: "
+            f"{', '.join(conflicts)}. Use only one of --arg/--args-json or --arg-secret per input."
+        )
+    merged = dict(run_args)
+    for input_name, secret_name in secret_names.items():
+        merged[input_name] = secret_argument_value(secret_name)
+    return merged

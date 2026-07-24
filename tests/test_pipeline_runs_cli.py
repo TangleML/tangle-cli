@@ -19,6 +19,10 @@ from tangle_cli.pipeline_run_manager import (
     PipelineRunManager,
     PipelineWaitOutcome,
     PipelineWaitPoll,
+    merge_secret_run_args,
+    normalize_arg_secret_config,
+    parse_arg_secret_entries,
+    secret_argument_value,
 )
 from tangle_cli.pipeline_runner import PipelineRunner, PipelineRunnerHooks
 
@@ -2790,3 +2794,335 @@ def test_pipeline_runner_cleanup_runs_after_prepare_failure(tmp_path: Path) -> N
 
     assert cleaned == [(temp_effective_path, "Pipeline validation failed:\n  - boom")]
     assert not temp_effective_path.exists()
+
+
+def _write_secret_pipeline(path: Path) -> Path:
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "Secret Pipeline",
+                "inputs": [
+                    {"name": "query", "type": "String", "default": "default"},
+                    {"name": "api_key", "type": "String"},
+                    {"name": "db_password", "type": "String", "optional": True},
+                    {"name": "required", "type": "String"},
+                ],
+                "implementation": {"graph": {"tasks": {}}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_secret_argument_value_matches_oss_dynamic_data_contract() -> None:
+    assert secret_argument_value("OPENAI_KEY") == {
+        "dynamicData": {"secret": {"name": "OPENAI_KEY"}}
+    }
+
+
+def test_parse_arg_secret_entries_trims_and_maps_inputs() -> None:
+    assert parse_arg_secret_entries([" api_key = OPENAI_KEY ", "db_password=PG"]) == {
+        "api_key": "OPENAI_KEY",
+        "db_password": "PG",
+    }
+
+
+def test_parse_arg_secret_entries_defaults_to_empty() -> None:
+    assert parse_arg_secret_entries(None) == {}
+
+
+@pytest.mark.parametrize("entry", ["api_key", "", "  ", "=SECRET", "api_key=", "api_key=   "])
+def test_parse_arg_secret_entries_rejects_malformed(entry: str) -> None:
+    with pytest.raises(PipelineRunError):
+        parse_arg_secret_entries([entry])
+
+
+def test_parse_arg_secret_entries_rejects_duplicate_input() -> None:
+    with pytest.raises(PipelineRunError, match="Duplicate --arg-secret for input 'api_key'"):
+        parse_arg_secret_entries(["api_key=A", "api_key=B"])
+
+
+def test_normalize_arg_secret_config_accepts_mapping() -> None:
+    assert normalize_arg_secret_config({"api_key": "OPENAI_KEY", " db ": " PG "}) == {
+        "api_key": "OPENAI_KEY",
+        "db": "PG",
+    }
+
+
+def test_normalize_arg_secret_config_defaults_to_empty() -> None:
+    assert normalize_arg_secret_config(None) == {}
+
+
+def test_normalize_arg_secret_config_rejects_non_mapping() -> None:
+    with pytest.raises(PipelineRunError, match="arg_secrets config must be a mapping"):
+        normalize_arg_secret_config(["api_key=OPENAI_KEY"])
+
+
+def test_normalize_arg_secret_config_rejects_non_string_secret() -> None:
+    with pytest.raises(PipelineRunError, match="must be a secret name string"):
+        normalize_arg_secret_config({"api_key": 123})
+
+
+def test_merge_secret_run_args_injects_dynamic_data() -> None:
+    merged = merge_secret_run_args({"required": "value"}, {"api_key": "OPENAI_KEY"})
+    assert merged == {
+        "required": "value",
+        "api_key": {"dynamicData": {"secret": {"name": "OPENAI_KEY"}}},
+    }
+
+
+def test_merge_secret_run_args_rejects_value_and_secret_conflict() -> None:
+    with pytest.raises(PipelineRunError, match="both a value and a secret reference: api_key"):
+        merge_secret_run_args({"api_key": "plain"}, {"api_key": "OPENAI_KEY"})
+
+
+def test_pipeline_runs_submit_arg_secret_encodes_dynamic_data(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_secret_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit",
+            str(pipeline_path),
+            "--no-hydrate",
+            "--arg",
+            "required=value",
+            "--arg-secret",
+            "api_key=OPENAI_KEY",
+        ],
+    )
+
+    capsys.readouterr()
+    arguments = fake_client.created[0]["root_task"]["arguments"]
+    assert arguments["required"] == "value"
+    assert arguments["api_key"] == {"dynamicData": {"secret": {"name": "OPENAI_KEY"}}}
+
+
+def test_pipeline_runs_submit_multiple_arg_secrets(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_secret_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit",
+            str(pipeline_path),
+            "--no-hydrate",
+            "--arg",
+            "required=value",
+            "--arg-secret",
+            "api_key=OPENAI_KEY",
+            "--arg-secret",
+            "db_password=PG_PASSWORD",
+        ],
+    )
+
+    capsys.readouterr()
+    arguments = fake_client.created[0]["root_task"]["arguments"]
+    assert arguments["api_key"] == {"dynamicData": {"secret": {"name": "OPENAI_KEY"}}}
+    assert arguments["db_password"] == {"dynamicData": {"secret": {"name": "PG_PASSWORD"}}}
+
+
+def test_pipeline_runs_submit_arg_secret_dry_run_no_network(monkeypatch, tmp_path: Path, capsys):
+    pipeline_path = _write_secret_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit",
+            str(pipeline_path),
+            "--no-hydrate",
+            "--dry-run",
+            "--arg",
+            "required=value",
+            "--arg-secret",
+            "api_key=OPENAI_KEY",
+        ],
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert fake_client.created == []
+    arguments = payload["root_task"]["arguments"]
+    assert arguments["api_key"] == {"dynamicData": {"secret": {"name": "OPENAI_KEY"}}}
+
+
+def test_pipeline_runs_submit_arg_secret_conflict_rejected_without_submit(
+    monkeypatch, tmp_path: Path
+):
+    pipeline_path = _write_secret_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(
+            [
+                "sdk",
+                "pipeline-runs",
+                "submit",
+                str(pipeline_path),
+                "--no-hydrate",
+                "--arg",
+                "api_key=plain",
+                "--arg-secret",
+                "api_key=OPENAI_KEY",
+            ]
+        )
+
+    assert "both a value and a secret reference" in str(excinfo.value)
+    assert fake_client.created == []
+
+
+def test_pipeline_runs_submit_arg_secret_conflicts_with_args_json(monkeypatch, tmp_path: Path):
+    pipeline_path = _write_secret_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(
+            [
+                "sdk",
+                "pipeline-runs",
+                "submit",
+                str(pipeline_path),
+                "--no-hydrate",
+                "--args-json",
+                json.dumps({"api_key": "plain"}),
+                "--arg-secret",
+                "api_key=OPENAI_KEY",
+            ]
+        )
+
+    assert "both a value and a secret reference" in str(excinfo.value)
+    assert fake_client.created == []
+
+
+def test_pipeline_runs_submit_arg_secret_malformed_skips_file_and_network(
+    monkeypatch, tmp_path: Path
+):
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+    missing_path = tmp_path / "does-not-exist.yaml"
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(
+            [
+                "sdk",
+                "pipeline-runs",
+                "submit",
+                str(missing_path),
+                "--no-hydrate",
+                "--arg-secret",
+                "api_key=",
+            ]
+        )
+
+    message = str(excinfo.value)
+    assert "non-empty input and secret name" in message
+    assert not missing_path.exists()
+    assert fake_client.created == []
+
+
+def test_pipeline_runs_submit_arg_secret_duplicate_rejected(monkeypatch, tmp_path: Path):
+    pipeline_path = _write_secret_pipeline(tmp_path / "pipeline.yaml")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(
+            [
+                "sdk",
+                "pipeline-runs",
+                "submit",
+                str(pipeline_path),
+                "--no-hydrate",
+                "--arg-secret",
+                "api_key=A",
+                "--arg-secret",
+                "api_key=B",
+            ]
+        )
+
+    assert "Duplicate --arg-secret for input 'api_key'" in str(excinfo.value)
+    assert fake_client.created == []
+
+
+def test_pipeline_runs_submit_arg_secret_from_config(monkeypatch, tmp_path: Path):
+    pipeline_path = _write_secret_pipeline(tmp_path / "pipeline.yaml")
+    config = tmp_path / "pipeline.config.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "pipeline_path": str(pipeline_path),
+                "hydrate": False,
+                "args": {"required": "value"},
+                "arg_secrets": {"api_key": "OPENAI_KEY"},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit", "--config", str(config)])
+
+    arguments = fake_client.created[0]["root_task"]["arguments"]
+    assert arguments["required"] == "value"
+    assert arguments["api_key"] == {"dynamicData": {"secret": {"name": "OPENAI_KEY"}}}
+
+
+def test_pipeline_runs_submit_cli_arg_secret_overrides_config(monkeypatch, tmp_path: Path):
+    pipeline_path = _write_secret_pipeline(tmp_path / "pipeline.yaml")
+    config = tmp_path / "pipeline.config.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "pipeline_path": str(pipeline_path),
+                "hydrate": False,
+                "args": {"required": "value"},
+                "arg_secrets": {"api_key": "FROM_CONFIG"},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit",
+            "--config",
+            str(config),
+            "--arg-secret",
+            "api_key=FROM_CLI",
+        ],
+    )
+
+    arguments = fake_client.created[0]["root_task"]["arguments"]
+    assert arguments["api_key"] == {"dynamicData": {"secret": {"name": "FROM_CLI"}}}
