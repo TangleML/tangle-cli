@@ -40,7 +40,8 @@ def _write_import_stubs(path: Path) -> None:
     _write_runtime_stubs(path)
     (path / "cyclopts.py").write_text(
         "class App:\n"
-        "    def __init__(self, *args, **kwargs): pass\n"
+        "    def __init__(self, *args, **kwargs):\n"
+        "        self.meta = self\n"
         "    def command(self, obj=None, **kwargs):\n"
         "        if obj is not None:\n"
         "            return obj\n"
@@ -77,7 +78,16 @@ def _write_runtime_stubs(path: Path) -> None:
         "        raise RuntimeError('request stub should not be called')\n"
         "\n"
         "class Response:\n"
-        "    pass\n",
+        "    pass\n"
+        "\n"
+        "class RequestException(Exception):\n"
+        "    def __init__(self, *args, **kwargs):\n"
+        "        self.response = kwargs.pop('response', None)\n"
+        "        self.request = kwargs.pop('request', None)\n"
+        "        super().__init__(*args)\n"
+        "\n"
+        "class exceptions:\n"
+        "    RequestException = RequestException\n",
         encoding="utf-8",
     )
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import requests
 
 DEFAULT_API_URL = "http://localhost:8000"
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -38,6 +39,93 @@ def tangle_verbose_enabled() -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def sanitize_destination(url: str | None) -> str | None:
+    """Return ``scheme://host[:port]/path`` with userinfo, query, and fragment dropped.
+
+    Userinfo can embed proxy credentials and query strings can carry signed-URL
+    tokens, so only the safe origin and path are kept for user-facing errors.
+    """
+
+    if not url:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(url)
+        # ``hostname`` and ``port`` are parsed lazily and raise ``ValueError`` for a
+        # malformed IPv6 authority or a non-numeric port (e.g. ``host:bad``), so both
+        # accesses must stay guarded; otherwise the exception escapes past the
+        # transport-error boundary that calls this helper.
+        scheme = parts.scheme
+        netloc = parts.netloc
+        path = parts.path
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return None
+    if not scheme and not netloc:
+        # A bare reference with no origin may itself be a signed URL; keep only
+        # the path portion and discard any query/fragment.
+        return url.split("?", 1)[0].split("#", 1)[0] or None
+    if ":" in host:
+        # ``hostname`` strips the brackets around an IPv6 literal; restore them so
+        # the origin stays a valid URL and any port remains unambiguous.
+        host = f"[{host}]"
+    if port is not None:
+        host = f"{host}:{port}"
+    return urllib.parse.urlunsplit((scheme, host, path, "", "")) or None
+
+
+def transport_error_reason(exc: BaseException) -> str:
+    """Classify a requests transport failure into a short, safe reason phrase.
+
+    The mapping references ``requests.exceptions`` lazily so importing this module
+    stays cheap and does not depend on the full requests package being present.
+    """
+
+    exceptions = requests.exceptions
+    # Ordered most-specific first: several transport errors share a base
+    # (SSLError/ProxyError subclass ConnectionError; ConnectTimeout subclasses both
+    # ConnectionError and Timeout), so the first match wins.
+    reasons: tuple[tuple[type[BaseException], str], ...] = (
+        (exceptions.SSLError, "TLS verification failed"),
+        (exceptions.ProxyError, "proxy connection failed"),
+        (exceptions.ConnectTimeout, "connection timed out"),
+        (exceptions.ReadTimeout, "read timed out"),
+        (exceptions.Timeout, "request timed out"),
+        (exceptions.ChunkedEncodingError, "connection closed mid-response"),
+        (exceptions.ConnectionError, "could not connect"),
+    )
+    for exc_type, reason in reasons:
+        if isinstance(exc, exc_type):
+            return reason
+    return "request failed"
+
+
+def format_transport_error(
+    exc: BaseException,
+    *,
+    method: str | None = None,
+    url: str | None = None,
+) -> str:
+    """Build a one-line, credential-safe message for a transport failure.
+
+    The raw exception text is never echoed because it can contain proxy URLs or
+    request paths with signed-URL query secrets; the reason is derived from the
+    exception type and the destination is reduced to a sanitized origin+path.
+    """
+
+    request = getattr(exc, "request", None)
+    if url is None and request is not None:
+        url = getattr(request, "url", None)
+    if method is None and request is not None:
+        method = getattr(request, "method", None)
+    reason = transport_error_reason(exc)
+    destination = sanitize_destination(url)
+    if destination:
+        prefix = f"{method} " if method else ""
+        return f"Could not reach Tangle API ({prefix}{destination}): {reason}"
+    return f"Could not reach Tangle API: {reason}"
 
 
 def _redact_headers(headers: dict[str, Any] | None) -> dict[str, Any]:
