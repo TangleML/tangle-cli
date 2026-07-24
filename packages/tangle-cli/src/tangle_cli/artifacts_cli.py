@@ -80,6 +80,7 @@ def artifacts_get(
                 header=args.header,
                 include_env_credentials=include_env_credentials_for_args(args, base_url),
                 command_name="artifact commands",
+                logger=logger,
             )
             if require_available := getattr(client, "require_available", None):
                 require_available()

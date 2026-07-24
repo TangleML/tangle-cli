@@ -6,6 +6,7 @@ import json
 import sys
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import ANY
 
 import pytest
 
@@ -341,6 +342,7 @@ def test_sdk_secrets_config_array_and_config_base_url_credential_isolation(
             "header": ["X-Config: yes"],
             "include_env_credentials": False,
             "command_name": "secret commands",
+            "logger": ANY,
         },
         {
             "base_url": "https://config.example",
@@ -349,6 +351,7 @@ def test_sdk_secrets_config_array_and_config_base_url_credential_isolation(
             "header": ["X-Config: yes"],
             "include_env_credentials": False,
             "command_name": "secret commands",
+            "logger": ANY,
         },
     ]
     assert [instance.calls[0]["secret_name"] for instance in FakeLazyTangleApiClient.instances] == [

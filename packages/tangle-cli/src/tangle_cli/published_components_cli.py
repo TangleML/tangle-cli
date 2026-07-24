@@ -24,7 +24,7 @@ from .cli_options import (
     TokenOption,
 )
 from .component_publisher import ComponentPublisher, deprecate_component
-from .logger import logger_for_log_type
+from .logger import Logger, logger_for_log_type
 
 
 def _client_from_options(
@@ -35,6 +35,7 @@ def _client_from_options(
     header: list[str] | str | None = None,
     include_env_credentials: bool = True,
     command_name: str = "published-component commands",
+    logger: Logger | None = None,
 ) -> LazyTangleApiClient:
     """Create a lazy static client proxy for published-component commands.
 
@@ -49,6 +50,7 @@ def _client_from_options(
         header=header,
         include_env_credentials=include_env_credentials,
         command_name=command_name,
+        logger=logger,
     )
 
 
@@ -97,6 +99,7 @@ def published_components_search(
                 header=args.header,
                 include_env_credentials=include_env_credentials_for_args(args, base_url),
                 command_name="published-component commands",
+                logger=logger,
             )
             if require_available := getattr(client, "require_available", None):
                 require_available()
@@ -163,6 +166,7 @@ def published_components_inspect(
                 header=args.header,
                 include_env_credentials=include_env_credentials_for_args(args, base_url),
                 command_name="published-component commands",
+                logger=logger,
             )
             if require_available := getattr(client, "require_available", None):
                 require_available()
@@ -219,6 +223,7 @@ def published_components_library(
                 header=args.header,
                 include_env_credentials=include_env_credentials_for_args(args, base_url),
                 command_name="published-component commands",
+                logger=logger,
             )
             if require_available := getattr(client, "require_available", None):
                 require_available()
@@ -288,6 +293,7 @@ def published_components_publish(
                 header=args.header,
                 include_env_credentials=include_env_credentials_for_args(args, base_url),
                 command_name="published-component commands",
+                logger=logger,
             )
             publisher = ComponentPublisher(
                 dry_run=bool(args.dry_run),
@@ -358,6 +364,7 @@ def published_components_deprecate(
                 header=args.header,
                 include_env_credentials=include_env_credentials_for_args(args, base_url),
                 command_name="published-component commands",
+                logger=logger,
             )
             result = deprecate_component(
                 client,
