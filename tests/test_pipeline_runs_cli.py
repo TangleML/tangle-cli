@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import copy
 import json
+import math
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import requests
 import yaml
 
 from tangle_cli import cli, pipeline_run_manager, pipeline_runs_cli
+from tangle_cli.logger import CaptureLogger
 from tangle_cli.pipeline_run_manager import (
+    _TASK_FAILURE_STATUSES,
+    _TERMINAL_STATUSES,
     AmbiguousPipelineRunRecoveryError,
     PipelineRunContext,
     PipelineRunError,
@@ -19,6 +25,8 @@ from tangle_cli.pipeline_run_manager import (
     PipelineRunManager,
     PipelineWaitOutcome,
     PipelineWaitPoll,
+    TaskStatusesFailed,
+    TransientServerError,
 )
 from tangle_cli.pipeline_runner import PipelineRunner, PipelineRunnerHooks
 
@@ -2790,3 +2798,553 @@ def test_pipeline_runner_cleanup_runs_after_prepare_failure(tmp_path: Path) -> N
 
     assert cleaned == [(temp_effective_path, "Pipeline validation failed:\n  - boom")]
     assert not temp_effective_path.exists()
+
+
+def _http_error(status_code: int) -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status_code
+    return requests.HTTPError(response=response)
+
+
+class ExecutionStateClient:
+    """Configurable fake for the root-execution task-map endpoints.
+
+    ``details`` maps a root execution id to its child_task_execution_ids; each
+    child/leaf id is resolved against ``container_state`` then
+    ``graph_execution_state``. Endpoint values may be a status dict, an HTTP
+    error to raise, or absent (KeyError-style 404).
+    """
+
+    def __init__(
+        self,
+        *,
+        details: dict[str, Any],
+        container_state: dict[str, Any] | None = None,
+        graph_state: dict[str, Any] | None = None,
+    ) -> None:
+        self.base_url = "https://tangle.example"
+        self._details = details
+        self._container_state = container_state or {}
+        self._graph_state = graph_state or {}
+        self.details_calls: list[str] = []
+        self.container_calls: list[str] = []
+        self.graph_calls: list[str] = []
+
+    def executions_details(self, id: str) -> dict[str, Any]:
+        return self._resolve(self._details, self.details_calls, id)
+
+    def _resolve(self, store: dict[str, Any], calls: list[str], id: str) -> dict[str, Any]:
+        calls.append(id)
+        if id not in store:
+            raise _http_error(404)
+        value = store[id]
+        if isinstance(value, requests.RequestException):
+            raise value
+        return value
+
+    def executions_container_state(self, id: str, **_: Any) -> dict[str, Any]:
+        return self._resolve(self._container_state, self.container_calls, id)
+
+    def executions_graph_execution_state(self, id: str) -> dict[str, Any]:
+        return self._resolve(self._graph_state, self.graph_calls, id)
+
+
+def test_task_statuses_walks_children_via_container_state() -> None:
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"a": "exec-a", "b": "exec-b"}}},
+        container_state={
+            "exec-a": {"status": "SUCCEEDED"},
+            "exec-b": {"status": "RUNNING"},
+        },
+    )
+    manager = PipelineRunManager(client=client)
+
+    assert manager.task_statuses("root-1") == {"a": "SUCCEEDED", "b": "RUNNING"}
+    # Container state resolves first, so graph state is never queried.
+    assert client.graph_calls == []
+
+
+def test_task_statuses_falsy_child_id_is_unknown_without_api_call() -> None:
+    # A None/empty/whitespace-only child execution id maps straight to UNKNOWN;
+    # it must not be stringified to "None"/blank and queried against the state
+    # endpoints.
+    client = ExecutionStateClient(
+        details={
+            "root-1": {"child_task_execution_ids": {"a": None, "b": "", "c": "exec-c", "d": "  "}}
+        },
+        container_state={"exec-c": {"status": "RUNNING"}},
+    )
+    manager = PipelineRunManager(client=client)
+
+    assert manager.task_statuses("root-1") == {
+        "a": "UNKNOWN",
+        "b": "UNKNOWN",
+        "c": "RUNNING",
+        "d": "UNKNOWN",
+    }
+    # Only the real child id reaches the state API.
+    assert client.container_calls == ["exec-c"]
+    assert client.graph_calls == []
+
+
+def test_task_statuses_root_only_execution_reports_root_key() -> None:
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {}}},
+        container_state={"root-1": {"status": "SUCCEEDED"}},
+    )
+    manager = PipelineRunManager(client=client)
+
+    assert manager.task_statuses("root-1") == {"root": "SUCCEEDED"}
+
+
+def test_task_statuses_falls_back_to_graph_state_on_404() -> None:
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"a": "exec-a"}}},
+        container_state={},  # exec-a missing -> 404 from container state
+        graph_state={"exec-a": {"status": "RUNNING"}},
+    )
+    manager = PipelineRunManager(client=client)
+
+    assert manager.task_statuses("root-1") == {"a": "RUNNING"}
+    assert client.container_calls == ["exec-a"]
+    assert client.graph_calls == ["exec-a"]
+
+
+def test_task_statuses_persistent_5xx_reported_as_unknown() -> None:
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"a": "exec-a"}}},
+        container_state={"exec-a": _http_error(503)},
+        graph_state={"exec-a": _http_error(503)},
+    )
+    logger = CaptureLogger()
+    manager = PipelineRunManager(client=client, logger=logger)
+
+    assert manager.task_statuses("root-1") == {"a": "UNKNOWN"}
+    # The persistent 5xx is announced so an UNKNOWN result is diagnosable.
+    logs = logger.get_logs() or ""
+    assert "exec-a" in logs
+    assert "503" in logs
+
+
+def test_task_statuses_past_deadline_reports_unknown_without_fetching() -> None:
+    # Past the caller's deadline no further state requests are issued, so one
+    # task-statuses poll cannot overrun the wait budget of task-wait.
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"a": "exec-a"}}},
+        container_state={"exec-a": {"status": "SUCCEEDED"}},
+    )
+    manager = PipelineRunManager(client=client)
+
+    assert manager.task_statuses("root-1", deadline=time.monotonic() - 1) == {"a": "UNKNOWN"}
+    assert client.container_calls == []
+    assert client.graph_calls == []
+
+
+def test_failure_statuses_are_the_non_skipped_non_succeeded_terminals() -> None:
+    # _TASK_FAILURE_STATUSES is derived from _TERMINAL_STATUSES; guard the intended
+    # membership so a new failure terminal can't be silently treated as success.
+    assert _TASK_FAILURE_STATUSES == {"FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "INVALID"}
+    assert _TASK_FAILURE_STATUSES == frozenset(_TERMINAL_STATUSES) - {"SKIPPED", "SUCCEEDED"}
+
+
+def test_task_statuses_wraps_non_retryable_http_error() -> None:
+    # A non-retryable state-endpoint status (429/403/etc.) becomes a clean
+    # PipelineRunError instead of a raw requests traceback out of task-status.
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"a": "exec-a"}}},
+        container_state={"exec-a": _http_error(429)},
+    )
+    manager = PipelineRunManager(client=client)
+
+    with pytest.raises(PipelineRunError, match="HTTP 429"):
+        manager.task_statuses("root-1")
+
+
+def test_task_statuses_wraps_connection_error() -> None:
+    # A transport failure (no HTTP response) is surfaced cleanly rather than
+    # escaping as a raw requests.ConnectionError.
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"a": "exec-a"}}},
+        container_state={"exec-a": requests.ConnectionError("connection refused")},
+    )
+    manager = PipelineRunManager(client=client)
+
+    with pytest.raises(PipelineRunError, match="connection refused"):
+        manager.task_statuses("root-1")
+
+
+def test_task_statuses_missing_root_is_not_found() -> None:
+    # A 404 on the root execution details is a clean not-found error, not a
+    # masked {"root": "UNKNOWN"} map.
+    client = ExecutionStateClient(details={"root-1": _http_error(404)})
+    manager = PipelineRunManager(client=client)
+
+    with pytest.raises(PipelineRunError, match="not found"):
+        manager.task_statuses("root-1")
+
+
+def test_task_statuses_root_details_transport_error_surfaces_cleanly() -> None:
+    client = ExecutionStateClient(details={"root-1": requests.ConnectionError("boom")})
+    manager = PipelineRunManager(client=client)
+
+    with pytest.raises(PipelineRunError, match="boom"):
+        manager.task_statuses("root-1")
+
+
+def test_task_statuses_root_details_5xx_is_transient_error() -> None:
+    # A one-shot task-status still fails fast on a root details 5xx, but the
+    # error is typed so the task-wait polling loop can retry it.
+    client = ExecutionStateClient(details={"root-1": _http_error(503)})
+    manager = PipelineRunManager(client=client)
+
+    with pytest.raises(TransientServerError, match="HTTP 503"):
+        manager.task_statuses("root-1")
+
+
+def test_task_statuses_derives_graph_status_from_child_stats() -> None:
+    # A child that is itself a graph/subpipeline has no direct `status`; derive
+    # it from child_execution_status_stats counts rather than reporting UNKNOWN.
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"sub": "exec-sub"}}},
+        container_state={},  # 404 -> fall back to graph state
+        graph_state={"exec-sub": {"child_execution_status_stats": {"leaf": {"SUCCEEDED": 1}}}},
+    )
+    manager = PipelineRunManager(client=client)
+
+    assert manager.task_statuses("root-1") == {"sub": "SUCCEEDED"}
+
+
+def test_task_statuses_derives_graph_status_from_status_totals() -> None:
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"sub": "exec-sub"}}},
+        container_state={},
+        graph_state={"exec-sub": {"status_totals": {"RUNNING": 1}}},
+    )
+    manager = PipelineRunManager(client=client)
+
+    # An active count outranks terminal counts, matching status_from_counts.
+    assert manager.task_statuses("root-1") == {"sub": "RUNNING"}
+
+
+def test_task_statuses_prefers_direct_graph_status_over_counts() -> None:
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"sub": "exec-sub"}}},
+        container_state={},
+        graph_state={"exec-sub": {"status": "FAILED", "status_totals": {"SUCCEEDED": 1}}},
+    )
+    manager = PipelineRunManager(client=client)
+
+    assert manager.task_statuses("root-1") == {"sub": "FAILED"}
+
+
+@pytest.mark.parametrize(
+    "counts, expected",
+    [
+        # An active/nonterminal status must outrank terminal success.
+        ({"SUCCEEDED": 1, "WAITING_FOR_UPSTREAM": 1}, "WAITING_FOR_UPSTREAM"),
+        ({"SUCCEEDED": 1, "UNINITIALIZED": 1}, "UNINITIALIZED"),
+        # Failure/invalid terminal statuses must outrank SUCCEEDED.
+        ({"SUCCEEDED": 1, "INVALID": 1}, "INVALID"),
+        ({"SUCCEEDED": 1, "FAILED": 1}, "FAILED"),
+        # INVALID must also outrank the other non-failure terminal, SKIPPED, so a
+        # mixed graph aggregate does not mask an invalid child behind SKIPPED.
+        ({"SKIPPED": 1, "INVALID": 1}, "INVALID"),
+        ({"SKIPPED": 1, "FAILED": 1}, "FAILED"),
+    ],
+)
+def test_status_from_counts_nonterminal_and_failure_outrank_success(counts, expected) -> None:
+    assert PipelineRunManager.status_from_counts(counts) == expected
+
+
+def test_task_statuses_nested_graph_waiting_is_nonterminal_and_blocks_wait() -> None:
+    # {"SUCCEEDED": 1, "WAITING_FOR_UPSTREAM": 1} must not collapse to SUCCEEDED
+    # and must not be treated as terminal by task-wait.
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"sub": "exec-sub"}}},
+        container_state={},
+        graph_state={
+            "exec-sub": {"child_execution_status_stats": {"leaf": {"SUCCEEDED": 1, "WAITING_FOR_UPSTREAM": 1}}}
+        },
+    )
+    manager = PipelineRunManager(client=client)
+
+    statuses = manager.task_statuses("root-1")
+    assert statuses == {"sub": "WAITING_FOR_UPSTREAM"}
+    assert not PipelineRunManager.is_terminal_status(statuses["sub"])
+
+
+def test_task_statuses_nested_graph_invalid_is_failure(monkeypatch) -> None:
+    # {"SUCCEEDED": 1, "INVALID": 1} reduces to INVALID, so task-wait fails.
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"sub": "exec-sub"}}},
+        container_state={},
+        graph_state={"exec-sub": {"status_totals": {"SUCCEEDED": 1, "INVALID": 1}}},
+    )
+    manager = PipelineRunManager(client=client)
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: None)
+
+    with pytest.raises(TaskStatusesFailed) as exc_info:
+        manager.wait_for_task_statuses("root-1", poll_interval=1)
+    assert exc_info.value.statuses == {"sub": "INVALID"}
+
+
+def test_task_statuses_nested_graph_skipped_and_invalid_collapses_to_invalid(monkeypatch) -> None:
+    # A nested-graph child whose counts mix SKIPPED and INVALID must reduce to
+    # INVALID (the failure), not SKIPPED, so task-wait surfaces the invalid child.
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"sub": "exec-sub"}}},
+        container_state={},
+        graph_state={"exec-sub": {"status_totals": {"SKIPPED": 1, "INVALID": 1}}},
+    )
+    manager = PipelineRunManager(client=client)
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: None)
+
+    assert manager.task_statuses("root-1") == {"sub": "INVALID"}
+    with pytest.raises(TaskStatusesFailed) as exc_info:
+        manager.wait_for_task_statuses("root-1", poll_interval=1)
+    assert exc_info.value.failures == {"sub": "INVALID"}
+
+
+def test_wait_for_task_statuses_skipped_is_successful_terminal() -> None:
+    # SKIPPED is a non-failure terminal (a skipped task, e.g. a conditional
+    # branch, is not a failure), so a fully SKIPPED task map returns
+    # successfully (exit 0), not as a failure.
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    manager.task_statuses = lambda root_id, deadline=None: {"a": "SKIPPED"}  # type: ignore[method-assign]
+
+    assert manager.wait_for_task_statuses("root-1") == {"a": "SKIPPED"}
+
+
+def test_wait_for_task_statuses_returns_terminal_map(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
+    statuses = iter([{"a": "RUNNING"}, {"a": "SUCCEEDED"}])
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    monkeypatch.setattr(manager, "task_statuses", lambda root_id, deadline=None: next(statuses))
+
+    assert manager.wait_for_task_statuses("root-1", poll_interval=1) == {"a": "SUCCEEDED"}
+    assert sleeps == [1]
+
+
+def test_wait_for_task_statuses_max_wait_none_waits_until_terminal(monkeypatch) -> None:
+    # max_wait=None waits indefinitely: no deadline is computed and the plain
+    # poll interval is slept between checks.
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
+    statuses = iter([{"a": "RUNNING"}, {"a": "RUNNING"}, {"a": "SUCCEEDED"}])
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    monkeypatch.setattr(manager, "task_statuses", lambda root_id, deadline=None: next(statuses))
+
+    result = manager.wait_for_task_statuses("root-1", max_wait=None, poll_interval=3)
+
+    assert result == {"a": "SUCCEEDED"}
+    assert sleeps == [3, 3]
+
+
+def test_wait_for_task_statuses_raises_on_failure() -> None:
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    manager.task_statuses = lambda root_id, deadline=None: {"a": "SUCCEEDED", "b": "FAILED"}  # type: ignore[method-assign]
+
+    with pytest.raises(TaskStatusesFailed) as exc_info:
+        manager.wait_for_task_statuses("root-1")
+    # Failures drive the exit code, but the full final map is retained too.
+    assert exc_info.value.failures == {"b": "FAILED"}
+    assert exc_info.value.statuses == {"a": "SUCCEEDED", "b": "FAILED"}
+
+
+def test_wait_for_task_statuses_allow_failure_returns_map() -> None:
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    final = {"a": "SUCCEEDED", "b": "CANCELLED"}
+    manager.task_statuses = lambda root_id, deadline=None: final  # type: ignore[method-assign]
+
+    assert manager.wait_for_task_statuses("root-1", allow_failure=True) == final
+
+
+def test_wait_for_task_statuses_timeout(monkeypatch) -> None:
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: None)
+    # deadline calc, first check, sleep-clamp read, then second check past deadline.
+    ticks = iter([0.0, 0.0, 0.0, 100.0])
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.monotonic", lambda: next(ticks))
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    manager.task_statuses = lambda root_id, deadline=None: {"a": "RUNNING"}  # type: ignore[method-assign]
+
+    with pytest.raises(PipelineRunError, match="non-terminal"):
+        manager.wait_for_task_statuses("root-1", max_wait=10, poll_interval=1)
+
+
+def test_wait_for_task_statuses_clamps_final_sleep_to_remaining(monkeypatch) -> None:
+    # Near the deadline the final sleep must shrink to the remaining budget so the
+    # loop times out at max_wait instead of overshooting by a full poll interval.
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
+    # deadline calc -> 0 (deadline=10); check -> 8 (not past); sleep clamp -> 8
+    # (10-8=2 < poll_interval 5); next check -> 10 (timeout).
+    ticks = iter([0.0, 8.0, 8.0, 10.0])
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.monotonic", lambda: next(ticks))
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    manager.task_statuses = lambda root_id, deadline=None: {"a": "RUNNING"}  # type: ignore[method-assign]
+
+    with pytest.raises(PipelineRunError, match="non-terminal"):
+        manager.wait_for_task_statuses("root-1", max_wait=10, poll_interval=5)
+    assert sleeps == [2.0]
+
+
+def test_wait_for_task_statuses_retries_transient_root_fetch_5xx(monkeypatch) -> None:
+    # A single 5xx blip on the per-poll root details fetch must not abort a
+    # long wait; it is tolerated like child-state 5xx and retried next poll.
+    sleeps: list[float] = []
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: sleeps.append(value))
+    outcomes = iter([TransientServerError("Fetching root execution root-1: request failed with HTTP 503"), {"a": "SUCCEEDED"}])
+
+    def fetch(root_id: str, deadline: float | None = None) -> dict[str, str]:
+        value = next(outcomes)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    logger = CaptureLogger()
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}), logger=logger)
+    monkeypatch.setattr(manager, "task_statuses", fetch)
+
+    assert manager.wait_for_task_statuses("root-1", poll_interval=1) == {"a": "SUCCEEDED"}
+    assert sleeps == [1]
+    # The tolerated blip is announced so a later timeout is diagnosable.
+    assert "HTTP 503" in (logger.get_logs() or "")
+
+
+def test_wait_for_task_statuses_persistent_root_fetch_5xx_raises_at_deadline(monkeypatch) -> None:
+    # Retrying the root fetch is bounded by the wait deadline: a persistent
+    # outage surfaces as the underlying server error once max_wait elapses,
+    # and the warning is logged once per outage rather than once per poll.
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: None)
+    # deadline calc, first-failure deadline check, sleep-clamp read, then
+    # second-failure deadline check past the deadline.
+    ticks = iter([0.0, 0.0, 0.0, 100.0])
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.monotonic", lambda: next(ticks))
+    logger = CaptureLogger()
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}), logger=logger)
+
+    def fetch(root_id: str, deadline: float | None = None) -> dict[str, str]:
+        raise TransientServerError("Fetching root execution root-1: request failed with HTTP 502")
+
+    monkeypatch.setattr(manager, "task_statuses", fetch)
+
+    with pytest.raises(TransientServerError, match="HTTP 502"):
+        manager.wait_for_task_statuses("root-1", max_wait=10, poll_interval=1)
+    assert (logger.get_logs() or "").count("HTTP 502") == 1
+
+
+def test_wait_for_task_statuses_unbounded_wait_caps_root_fetch_retries(monkeypatch) -> None:
+    # With max_wait=None there is no deadline to stop the retries, so a
+    # persistent root fetch outage must still surface after a bounded number
+    # of consecutive failures instead of being retried forever.
+    monkeypatch.setattr("tangle_cli.pipeline_run_manager.time.sleep", lambda value: None)
+    calls = 0
+
+    def fetch(root_id: str, deadline: float | None = None) -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        raise TransientServerError("Fetching root execution root-1: request failed with HTTP 500")
+
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    monkeypatch.setattr(manager, "task_statuses", fetch)
+
+    with pytest.raises(TransientServerError, match="HTTP 500"):
+        manager.wait_for_task_statuses("root-1", max_wait=None, poll_interval=1)
+    assert calls == pipeline_run_manager._MAX_UNBOUNDED_ROOT_FETCH_FAILURES
+
+
+def test_wait_for_task_statuses_rejects_invalid_bounds() -> None:
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    with pytest.raises(PipelineRunError, match="max-wait"):
+        manager.wait_for_task_statuses("root-1", max_wait=-1)
+    with pytest.raises(PipelineRunError, match="poll-interval"):
+        manager.wait_for_task_statuses("root-1", poll_interval=-1)
+
+
+def test_wait_for_task_statuses_rejects_non_finite_bounds() -> None:
+    # NaN/inf bounds slip past the sign checks; they must reject cleanly instead
+    # of reaching time.sleep (raw ValueError) or creating an unbounded deadline.
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    for bad in (math.nan, math.inf):
+        with pytest.raises(PipelineRunError, match="max-wait must be a finite number"):
+            manager.wait_for_task_statuses("root-1", max_wait=bad)
+        with pytest.raises(PipelineRunError, match="poll-interval must be a finite number"):
+            manager.wait_for_task_statuses("root-1", max_wait=1, poll_interval=bad)
+
+
+def test_wait_for_task_statuses_rejects_zero_poll_interval_without_spinning(monkeypatch) -> None:
+    # A zero interval must be rejected before any polling, not busy-loop.
+    calls = 0
+
+    def counting_statuses(root_id: str, deadline: float | None = None) -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        return {"a": "RUNNING"}
+
+    manager = PipelineRunManager(client=ExecutionStateClient(details={}))
+    monkeypatch.setattr(manager, "task_statuses", counting_statuses)
+
+    with pytest.raises(PipelineRunError, match="poll-interval must be positive"):
+        manager.wait_for_task_statuses("root-1", max_wait=0.02, poll_interval=0)
+    assert calls == 0
+
+
+def test_cli_task_status_outputs_json(monkeypatch, capsys) -> None:
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"a": "exec-a"}}},
+        container_state={"exec-a": {"status": "SUCCEEDED"}},
+    )
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: client)
+
+    run_app(cli.build_app(), ["sdk", "pipeline-runs", "task-status", "root-1"])
+
+    assert json.loads(capsys.readouterr().out) == {"a": "SUCCEEDED"}
+
+
+def test_cli_task_wait_failure_exits_nonzero_and_prints_full_map(monkeypatch, capsys) -> None:
+    # Mixed outcome: the failure exit code must not drop the succeeded task.
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"a": "exec-a", "b": "exec-b"}}},
+        container_state={
+            "exec-a": {"status": "SUCCEEDED"},
+            "exec-b": {"status": "FAILED"},
+        },
+    )
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: client)
+
+    with pytest.raises(SystemExit) as exc_info:
+        # All tasks are already terminal, so the first poll returns without sleeping.
+        run_app(cli.build_app(), ["sdk", "pipeline-runs", "task-wait", "root-1", "--poll-interval", "1"])
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"a": "SUCCEEDED", "b": "FAILED"}
+    # A human-readable failure summary goes to stderr; stdout stays pure JSON.
+    assert "failed task" in captured.err
+
+
+def test_cli_task_wait_success_outputs_map(monkeypatch, capsys) -> None:
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"a": "exec-a"}}},
+        container_state={"exec-a": {"status": "SUCCEEDED"}},
+    )
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: client)
+
+    run_app(cli.build_app(), ["sdk", "pipeline-runs", "task-wait", "root-1", "--poll-interval", "1"])
+
+    assert json.loads(capsys.readouterr().out) == {"a": "SUCCEEDED"}
+
+
+def test_cli_task_wait_skipped_exits_zero(monkeypatch, capsys) -> None:
+    # SKIPPED is a non-failure terminal, so task-wait must exit 0 rather than
+    # raise SystemExit.
+    client = ExecutionStateClient(
+        details={"root-1": {"child_task_execution_ids": {"a": "exec-a"}}},
+        container_state={"exec-a": {"status": "SKIPPED"}},
+    )
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: client)
+
+    run_app(cli.build_app(), ["sdk", "pipeline-runs", "task-wait", "root-1", "--poll-interval", "1"])
+
+    assert json.loads(capsys.readouterr().out) == {"a": "SKIPPED"}

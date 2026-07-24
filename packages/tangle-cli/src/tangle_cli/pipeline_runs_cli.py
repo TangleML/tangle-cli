@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sys
 from typing import Annotated, Any
 
 from cyclopts import App, Parameter
@@ -32,6 +33,7 @@ from .pipeline_run_manager import (
     PipelineRunError,
     PipelineRunHooks,
     PipelineRunManager,
+    TaskStatusesFailed,
     parse_json_or_key_values,
     parse_key_value_entries,
 )
@@ -353,6 +355,83 @@ def pipeline_runs_wait(
             exit_on_first_failure=bool(args.exit_on_first_failure),
         ),
     )
+
+
+@app.command(name="task-status")
+def pipeline_runs_task_status(
+    root_execution_id: str | None = None,
+    *,
+    base_url: BaseUrlOption = None,
+    token: TokenOption = None,
+    auth_header: AuthHeaderOption = None,
+    header: HeaderOption = None,
+    config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
+) -> None:
+    """Print the {task_name: status} map for a root execution id, without polling.
+
+    Walks the root execution's child task executions. A leaf/root-only execution
+    reports a single ``{"root": status}`` entry; unresolved children are UNKNOWN.
+    """
+    specs = {
+        "root_execution_id": (root_execution_id,),
+        "log_type": (log_type, "console"),
+        **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
+    }
+    _run_manager_action(
+        config,
+        base_url,
+        specs,
+        lambda manager, args: manager.task_statuses(args.root_execution_id),
+    )
+
+
+@app.command(name="task-wait")
+def pipeline_runs_task_wait(
+    root_execution_id: str | None = None,
+    *,
+    max_wait: float = 1800.0,
+    poll_interval: float = 5.0,
+    allow_failure: bool = False,
+    base_url: BaseUrlOption = None,
+    token: TokenOption = None,
+    auth_header: AuthHeaderOption = None,
+    header: HeaderOption = None,
+    config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
+) -> None:
+    """Poll a root execution's task-status map until all tasks are terminal.
+
+    Prints the final {task_name: status} map. Exit codes: 0 when every task
+    ends in a non-failure terminal status, 2 when any task fails and
+    --allow-failure is not set (the map is still printed), and non-zero on
+    timeout or API errors.
+    """
+    specs = {
+        "root_execution_id": (root_execution_id,),
+        "max_wait": (max_wait, 1800.0),
+        "poll_interval": (poll_interval, 5.0),
+        "allow_failure": (allow_failure, False),
+        "log_type": (log_type, "console"),
+        **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
+    }
+
+    def action(manager: PipelineRunManager, args: ArgsContainer) -> dict[str, Any] | None:
+        try:
+            return manager.wait_for_task_statuses(
+                args.root_execution_id,
+                max_wait=float(args.max_wait),
+                poll_interval=float(args.poll_interval),
+                allow_failure=bool(args.allow_failure),
+            )
+        except TaskStatusesFailed as exc:
+            # Print the full final map (failures retained on the exception drive
+            # the non-zero exit code) so succeeded/skipped tasks are not dropped.
+            print(str(exc), file=sys.stderr)
+            print_json(exc.statuses)
+            raise SystemExit(2) from exc
+
+    _run_manager_action(config, base_url, specs, action)
 
 
 @app.command(name="logs")
