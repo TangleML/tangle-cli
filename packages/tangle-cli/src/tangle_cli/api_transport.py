@@ -18,7 +18,28 @@ _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _MISSING = object()
 _SENSITIVE_HEADER_NAMES = {"authorization", "cloud-auth", "cookie", "x-api-key"}
 _SENSITIVE_KEY_RE = re.compile(
-    r"(authorization|authentication|(^|[-_])auth($|[-_])|cloud[-_]?auth|cookie|x[-_]?api[-_]?key|token|secret|password|credential|pre[-_]?signed[-_]?url|signed[-_]?url)",
+    r"(authorization|authentication|(^|[-_])auth($|[-_])|cloud[-_]?auth|cookie|(x[-_]?)?api[-_]?key|token|secret|password|credential|pre[-_]?signed[-_]?url|signed[-_]?url)",
+    re.IGNORECASE,
+)
+# Query parameters that carry the credential portion of a presigned/SAS URL
+# (AWS SigV4, GCS, Azure). Redacting the signature neutralizes the grant. Kept
+# in sync with the sibling transport module so the shared redaction guarantees
+# do not drift between error/diagnostic paths.
+_SIGNED_URL_QUERY_RE = re.compile(
+    r"^(x-(amz|goog|ms)-.*|sig|signature|awsaccesskeyid|googleaccessid)$",
+    re.IGNORECASE,
+)
+# Recognizable ``key=value`` / ``key: value`` assignments in free-form (non-JSON)
+# text whose key names a credential. Only the value after the separator is
+# redacted, so surrounding diagnostic text stays intact. The key must sit on a
+# word boundary to avoid matching substrings of unrelated identifiers.
+_SENSITIVE_TEXT_ASSIGNMENT_RE = re.compile(
+    r"\b((?:x[-_]?)?api[-_]?key"
+    r"|authorization|authentication|cloud[-_]?auth|auth[-_]?token|cookie"
+    r"|access[-_]?key(?:[-_]?id)?|awsaccesskeyid|googleaccessid"
+    r"|secret|password|passwd|pwd|credential|token|oauth(?:[-_]?token)?"
+    r"|signature|sig|(?:pre[-_]?)?signed[-_]?url)"
+    r"(\s*[:=]\s*)([^\s&;,<>\"']+)",
     re.IGNORECASE,
 )
 _REDACTED = "<redacted>"
@@ -64,6 +85,76 @@ def _redact_sensitive_values(value: Any, key: str | None = None) -> Any:
     return value
 
 
+def _is_sensitive_query_key(key: str) -> bool:
+    stripped = key.strip()
+    return bool(_SENSITIVE_KEY_RE.search(stripped) or _SIGNED_URL_QUERY_RE.match(stripped))
+
+
+def _looks_like_secret_value(value: str) -> bool:
+    """Heuristic: does *value* resemble an opaque credential rather than prose?
+
+    Tokens/signatures carry digits, base64/JWT punctuation, or are long; ordinary
+    words after a colon (``credential: invalid``) do not. Used to gate the
+    ambiguous ``key: value`` form so natural-language detail is not over-redacted.
+    """
+
+    return len(value) >= 20 or any(ch.isdigit() or ch in "+/=." for ch in value)
+
+
+def _redact_text_secrets(text: str) -> str:
+    """Redact ``key=value``/``key: value`` credential assignments in free text.
+
+    Structured JSON bodies are redacted key-by-key elsewhere; this handles the
+    non-JSON bodies (form-encoded, plain text, HTML) that would otherwise echo a
+    reflected secret verbatim. Only the value is replaced, so non-sensitive keys
+    (e.g. ``page=2``) and surrounding diagnostic prose are preserved. Form
+    ``key=value`` assignments are always redacted; the ambiguous ``key: value``
+    form is redacted only when the value looks like an opaque credential, so
+    natural-language detail such as ``credential: invalid`` survives.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        key, separator, value = match.group(1), match.group(2), match.group(3)
+        if "=" not in separator and not _looks_like_secret_value(value):
+            return match.group(0)
+        return f"{key}{separator}{_REDACTED}"
+
+    return _SENSITIVE_TEXT_ASSIGNMENT_RE.sub(_replace, text)
+
+
+def _redact_url(url: str | None) -> str:
+    """Strip userinfo and redact credential query parameters from a URL.
+
+    Shared by the requests/httpx error and diagnostic paths so a URL echoed into
+    a message never leaks ``user:pass@`` userinfo or ``?access_token=`` style
+    query credentials. Sensitive query values are replaced (key preserved) using
+    the same :data:`_SENSITIVE_KEY_RE` as body/header redaction; malformed URLs
+    fail closed to :data:`_REDACTED`.
+    """
+
+    if not url:
+        return url or ""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return _REDACTED
+    netloc = parts.netloc
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[-1]
+    query = parts.query
+    if query:
+        pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+        if any(_is_sensitive_query_key(key) for key, _ in pairs):
+            query = urllib.parse.urlencode(
+                [
+                    (key, _REDACTED if _is_sensitive_query_key(key) else value)
+                    for key, value in pairs
+                ],
+                safe="<>",
+            )
+    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+
+
 def _safe_json_text(value: Any) -> str:
     redacted = _redact_sensitive_values(value)
     try:
@@ -86,7 +177,7 @@ def _content_to_text(content: bytes | str | None) -> str:
     try:
         parsed = json.loads(text)
     except Exception:
-        return text
+        return _redact_text_secrets(text)
     return _safe_json_text(parsed)
 
 

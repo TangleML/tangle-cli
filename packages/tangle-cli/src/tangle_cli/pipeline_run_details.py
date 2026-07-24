@@ -11,6 +11,9 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
+import requests
+
+from .cli_helpers import format_http_error
 from .handler import TangleCliHandler
 
 
@@ -164,6 +167,8 @@ class PipelineRunDetails(TangleCliHandler):
                     results.append(future.result(timeout=timeout))
                 except FutureTimeoutError:
                     results.append(_error_result(run_id, f"timeout after {timeout}s"))
+                except requests.HTTPError as exc:
+                    results.append(_error_result(run_id, format_http_error(exc)))
                 except Exception as exc:
                     results.append(_error_result(run_id, str(exc)))
             finally:
