@@ -19,11 +19,14 @@ import requests
 
 from .api_transport import (
     DEFAULT_TIMEOUT_SECONDS,
+    VerifyArgument,
     _join_operation_url,
     _normalize_base_url,
     _request_headers,
+    _VERIFY_UNSET,
     default_base_url,
     log_http_exchange,
+    resolve_verify,
     tangle_verbose_enabled,
 )
 from tangle_api.generated.operations import GeneratedTangleApiOperations
@@ -67,6 +70,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         session: requests.Session | None = None,
         include_env_credentials: bool = True,
+        verify: VerifyArgument = None,
     ) -> None:
         self.base_url = _normalize_base_url(base_url or default_base_url())
         env_verbose = tangle_verbose_enabled()
@@ -79,6 +83,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         self.timeout = timeout
         self.session = session or requests.Session()
         self.include_env_credentials = include_env_credentials
+        self._verify = resolve_verify(verify)
 
     def _response_model(self, model_name: str, default: Any) -> Any:
         """Use CLI-composed models for generated operation deserialization."""
@@ -224,6 +229,9 @@ class TangleApiClient(GeneratedTangleApiOperations):
 
         for _ in range(self._MAX_REDIRECTS + 1):
             request_headers = self._headers(extra_headers)
+            call_kwargs = dict(request_kwargs)
+            if self._verify is not _VERIFY_UNSET and "verify" not in call_kwargs:
+                call_kwargs["verify"] = self._verify
             response = self.session.request(
                 current_method,
                 current_url,
@@ -232,7 +240,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
                 headers=request_headers,
                 timeout=timeout,
                 allow_redirects=False,
-                **request_kwargs,
+                **call_kwargs,
             )
             if self.verbose:
                 log_http_exchange(

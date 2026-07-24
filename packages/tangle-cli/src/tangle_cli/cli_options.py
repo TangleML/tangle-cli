@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 from cyclopts import Parameter
@@ -49,4 +50,27 @@ ConfigOption = Annotated[
 LogTypeOption = Annotated[
     str,
     Parameter(help="Log output: console, none, file."),
+]
+CaBundleOption = Annotated[
+    Path | None,
+    Parameter(
+        name="--ca-bundle",
+        help=(
+            "Path to a PEM CA bundle used as the TLS trust store for every "
+            "transport. Overrides TANGLE_API_CA_BUNDLE. Place before the "
+            "subcommand, e.g. `tangle --ca-bundle ca.pem api ...`."
+        ),
+    ),
+]
+VerifyTlsOption = Annotated[
+    bool | None,
+    Parameter(
+        name="--verify-tls",
+        help=(
+            "Enable (--verify-tls) or disable (--no-verify-tls) TLS "
+            "certificate verification for every transport. Overrides "
+            "TANGLE_API_VERIFY_TLS. --no-verify-tls is for local development "
+            "only. Place before the subcommand."
+        ),
+    ),
 ]

@@ -18,6 +18,7 @@ from .api_schema import (
 )
 from .api_transport import (
     DEFAULT_TIMEOUT_SECONDS,
+    VerifyArgument,
     _normalize_base_url,
     default_base_url,
     request_operation,
@@ -43,6 +44,7 @@ class TangleDynamicDiscoveryClient:
         auth_header: str | None = None,
         header: list[str] | str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        verify: VerifyArgument = None,
     ) -> None:
         self.schema = schema
         self.base_url = _normalize_base_url(base_url or default_base_url())
@@ -51,6 +53,7 @@ class TangleDynamicDiscoveryClient:
         self.auth_header = auth_header
         self.header = _header_list(header)
         self.timeout = timeout
+        self.verify = verify
         self._operations = operation_map(schema)
         self._aliases = self._build_alias_map(self._operations)
         self._groups = self._build_groups(self._operations)
@@ -66,6 +69,7 @@ class TangleDynamicDiscoveryClient:
         auth_header: str | None = None,
         header: list[str] | str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        verify: VerifyArgument = None,
     ) -> TangleDynamicDiscoveryClient:
         """Create a client from an already loaded OpenAPI schema."""
 
@@ -77,6 +81,7 @@ class TangleDynamicDiscoveryClient:
             auth_header=auth_header,
             header=header,
             timeout=timeout,
+            verify=verify,
         )
 
     @classmethod
@@ -89,6 +94,7 @@ class TangleDynamicDiscoveryClient:
         auth_header: str | None = None,
         header: list[str] | str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        verify: VerifyArgument = None,
     ) -> TangleDynamicDiscoveryClient:
         """Create a client from the local schema cache without network access."""
 
@@ -107,6 +113,7 @@ class TangleDynamicDiscoveryClient:
             auth_header=auth_header,
             header=header,
             timeout=timeout,
+            verify=verify,
         )
 
     @classmethod
@@ -119,6 +126,7 @@ class TangleDynamicDiscoveryClient:
         auth_header: str | None = None,
         header: list[str] | str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        verify: VerifyArgument = None,
     ) -> TangleDynamicDiscoveryClient:
         """Fetch ``/openapi.json`` and create a client without writing the cache."""
 
@@ -129,6 +137,7 @@ class TangleDynamicDiscoveryClient:
             header=header,
             auth_header=auth_header,
             headers=headers,
+            verify=verify,
         )
         return cls.from_schema(
             schema,
@@ -138,6 +147,7 @@ class TangleDynamicDiscoveryClient:
             auth_header=auth_header,
             header=header,
             timeout=timeout,
+            verify=verify,
         )
 
     @classmethod
@@ -150,6 +160,7 @@ class TangleDynamicDiscoveryClient:
         auth_header: str | None = None,
         header: list[str] | str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        verify: VerifyArgument = None,
     ) -> TangleDynamicDiscoveryClient:
         """Create a client from cache, fetching and caching the schema on miss."""
 
@@ -162,6 +173,7 @@ class TangleDynamicDiscoveryClient:
                 header=header,
                 auth_header=auth_header,
                 headers=headers,
+                verify=verify,
             )
         return cls.from_schema(
             schema,
@@ -171,6 +183,7 @@ class TangleDynamicDiscoveryClient:
             auth_header=auth_header,
             header=header,
             timeout=timeout,
+            verify=verify,
         )
 
     @property
@@ -197,6 +210,7 @@ class TangleDynamicDiscoveryClient:
         headers = {**self.headers, **dict(headers_override or {})}
         body = params.pop("body", None)
         timeout = params.pop("timeout", self.timeout)
+        verify = params.pop("verify", self.verify)
         return request_operation(
             operation,
             params,
@@ -207,6 +221,7 @@ class TangleDynamicDiscoveryClient:
             headers=headers,
             body=body,
             timeout=timeout,
+            verify=verify,
         )
 
     def call(self, operation_name: str, **params: Any) -> Any:
