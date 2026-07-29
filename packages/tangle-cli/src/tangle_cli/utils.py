@@ -10,7 +10,7 @@ import os
 import re
 import subprocess
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -870,31 +870,589 @@ _CI_BRANCH_VARS: tuple[str, ...] = ("BUILDKITE_BRANCH", "GITHUB_REF_NAME", "CI_C
 _CI_REPO_URL_VARS: tuple[str, ...] = ("BUILDKITE_REPO", "GITHUB_SERVER_URL", "CI_REPOSITORY_URL")
 
 
-def _normalize_git_url(url: str) -> str:
-    """Normalize a git remote URL to a browsable HTTPS URL.
+# Credential words that are conclusive as the final word of a canonicalized name.
+# Terminal position rather than substring containment is what redacts
+# ``x-api-key``/``apiKey``/``cloud-auth``/``X-Amz-Security-Token`` while preserving
+# benign git metadata that merely mentions them (``author``, ``token_count``,
+# ``keychain_path``, ``function_signature``, ``authorization_url``).  Unbroken
+# lower-case runs are listed in full because no separator or camelCase boundary
+# exists to split them.
+_CREDENTIAL_TERMINAL_WORDS: frozenset[str] = frozenset({
+    "apikey", "auth", "authentication", "authorization", "bearer", "cookie",
+    "credential", "credentials", "key", "keys", "oauth", "passphrase", "passwd",
+    "password", "pwd", "secret", "secrets", "session", "token", "tokens",
+    "accessid", "accesskey", "accesskeyid", "accesstoken", "apisecret",
+    "apitoken", "authtoken", "awsaccesskeyid", "bearertoken", "clientsecret",
+    "googleaccessid", "idtoken", "privatekey", "refreshtoken", "secretkey",
+    "sessionkey", "sessiontoken",
+})
 
-    Handles common formats:
-    - ``git@github.com:Org/repo.git``   -> ``https://github.com/Org/repo``
-    - ``ssh://git@github.com/Org/repo.git`` -> ``https://github.com/Org/repo``
-    - ``https://github.com/Org/repo.git`` -> ``https://github.com/Org/repo``
-    - ``https://github.com/Org/repo``     -> unchanged
+# Two-word endings that are credentials even though the final word is not one on
+# its own, so ``presigned-url`` is redacted while ``authorization_url`` is kept.
+_CREDENTIAL_PHRASES: frozenset[tuple[str, str]] = frozenset({
+    ("presigned", "url"), ("signed", "url"),
+})
 
-    The ``.git`` suffix is stripped so the result can be used directly to
-    build ``/blob/{ref}/{path}`` links without an extra ``.removesuffix``.
+# Words that turn a trailing credential word into a quantity (``max_tokens``,
+# ``num_keys``), which is metadata rather than a secret.
+_QUANTIFIER_WORDS: frozenset[str] = frozenset({
+    "avg", "count", "max", "mean", "min", "n", "num", "size", "total",
+})
+
+# Trailing words that name an identifier rather than a value.  They are peeled off
+# so ``token_id``/``apiKeyId`` are recognized, and after peeling a word such as
+# ``access`` is itself conclusive (``AWSAccessKeyId``, ``GoogleAccessId``) while
+# ``account_id``/``request_id``/``trace_id`` stay benign.
+_IDENTIFIER_SUFFIX_WORDS: frozenset[str] = frozenset({"id", "ident", "identifier"})
+_CREDENTIAL_ID_WORDS: frozenset[str] = frozenset({"access"})
+
+# A trailing version marker (``authToken2``, ``x-api-key-v2``) is not part of the
+# credential name and is peeled off before classification.  The ``v`` and the digits
+# are separate words after canonicalization, so both spellings are matched.
+_VERSION_SUFFIX_RE = re.compile(r"^(?:v[0-9]*|[0-9]+)$")
+
+# Signed-URL parameters whose names are only credentials as an exact whole key.
+# Matching exactly is what separates ``signature``/``sig`` from
+# ``function_signature`` and ``SignatureVersion``.
+_SIGNED_URL_QUERY_RE = re.compile(
+    r"x-(?:amz|goog|ms)-(?:signature|credential|security-token)"
+    r"|sig|signature|awsaccesskeyid|googleaccessid",
+    re.IGNORECASE,
+)
+
+_KEY_WORD_BOUNDARY_RE = re.compile(
+    r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[A-Za-z])(?=[0-9])"
+)
+_KEY_WORD_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
+
+
+def _key_words(key: str) -> list[str]:
+    """Split a parameter name into lower-case words on separators and camelCase."""
+    spaced = _KEY_WORD_BOUNDARY_RE.sub("-", key)
+    return [word for word in _KEY_WORD_SPLIT_RE.split(spaced.lower()) if word]
+
+
+def _names_credential(words: list[str]) -> bool:
+    """Return whether a canonicalized word list ends in a credential name."""
+    if len(words) >= 2 and (words[-2], words[-1]) in _CREDENTIAL_PHRASES:
+        return True
+    if words[-1] not in _CREDENTIAL_TERMINAL_WORDS:
+        return False
+    return len(words) < 2 or words[-2] not in _QUANTIFIER_WORDS
+
+
+def _is_sensitive_name(name: str) -> bool:
+    """Return whether a canonicalized parameter name carries a credential.
+
+    Identifier and version suffixes are peeled off one at a time so that
+    ``token_id``, ``apiKeyId``, ``authToken2``, and ``x-api-key-v2`` reduce to a
+    recognizable credential name, while names that only *end* in an identifier
+    (``account_id``, ``request_id``) reduce to something benign and are kept.
     """
-    import re
+    words = _key_words(name)
+    while words:
+        if _names_credential(words):
+            return True
+        last = words[-1]
+        if last in _IDENTIFIER_SUFFIX_WORDS:
+            words = words[:-1]
+            if words and words[-1] in _CREDENTIAL_ID_WORDS:
+                return True
+            continue
+        if _VERSION_SUFFIX_RE.match(last):
+            words = words[:-1]
+            continue
+        return False
+    return False
 
-    # SCP-style: git@host:path
-    m = re.match(r"^git@([^:]+):(.+)$", url)
-    if m:
-        url = f"https://{m.group(1)}/{m.group(2)}"
+
+def _is_sensitive_query_key(key: str) -> bool:
+    """Return whether a URL query parameter name carries authentication material.
+
+    Names are canonicalized into words first, so hyphen, underscore, and
+    camelCase spellings of the same key (``x-api-key``, ``api_key``, ``apiKey``)
+    are treated identically.  Classification is by terminal word and exact whole
+    key rather than by substring, which is what lets benign metadata such as
+    ``author``, ``max_tokens``, ``function_signature``, and ``SignatureVersion``
+    survive while provider-specific credential spellings are still caught.
+    Percent-encoded spellings of the name itself (``access%5Ftoken``,
+    ``%74oken``) are screened through the same collapsed copies as every other
+    check, since the consumer that decodes the link also decodes the key.
+    """
+    return _screen_reveals(
+        key.strip(),
+        lambda form: _SIGNED_URL_QUERY_RE.fullmatch(form) or _is_sensitive_name(form),
+    )
+
+
+# A benign key can still carry a credential in its *value*: a nested URL
+# (``?ref=https://u:s@h/p``), bare userinfo (``?ref=u:s@h``), or a second
+# assignment the query parser folds into the value (``?ref=main?access_token=…``,
+# since only the first ``?`` delimits the query).  Percent-encoded spellings count
+# because whatever consumes the link decodes them.
+#
+# Both patterns are written to run in linear time on hostile input, since they are
+# applied to attacker-influenced text of unbounded length.  The lookbehinds pin
+# each attempt to the start of a scheme token or a path segment instead of letting
+# it restart at every offset, and the second class in the userinfo pattern excludes
+# ``:`` so the two repeats cannot split the same run in more than one way.
+_NESTED_SCHEME_RE = re.compile(
+    r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]*:(?:/|%2f)", re.IGNORECASE
+)
+_NESTED_USERINFO_RE = re.compile(
+    r"(?<![^/\s@])[^/\s@]*:[^/\s@:]*(?:@|%40)", re.IGNORECASE
+)
+
+# The structural patterns above recognize literal separators plus one encoded
+# spelling, but a percent-encoded userinfo (``user%3Asecret%40host``) has
+# neither and decodes back into a credential wherever the link is consumed.
+# Screening therefore also judges percent-decoded copies of the text, while the
+# output is always rebuilt from the original bytes, so benign encodings survive
+# exactly as written.
+#
+# Re-encoding nests: ``@`` → ``%40`` → ``%2540`` → ``%252540``, i.e. an octet at
+# encode depth *k* is ``%`` + ``25``*(k-1) + hex.  Decoding one layer per pass
+# would need as many passes as the attacker chose a depth, so a pass instead
+# collapses the whole ``%(25)*HH`` tower to its final character at once — any
+# uniformly nested octet is closed in a single pass regardless of depth.
+# Escape sequences can also be assembled *across* replacements (``%%3430``,
+# where a pass must first produce ``%40`` before it exists to decode), and by
+# staggering that shape an attacker buys one pass per layer at a threefold size
+# cost per level.  The pass cap therefore cannot chase every input to its fixed
+# point; instead, text still resolving when the cap runs out is reported as
+# matching, so the URL fails closed rather than passing bytes screening never
+# examined.  Each pass is one linear scan whose backtracking is bounded to a
+# single ``25`` pair and strictly shortens the text, so with the fixed cap the
+# total cost stays linear.
+_NESTED_PERCENT_OCTET_RE = re.compile(r"%(?:25)*([0-9A-Fa-f]{2})")
+_MAX_PERCENT_COLLAPSE_PASSES: int = 4
+
+
+def _collapse_percent_octets(text: str) -> str:
+    """Decode every percent octet, however deeply its ``%`` is itself encoded."""
+    return _NESTED_PERCENT_OCTET_RE.sub(
+        lambda match: chr(int(match.group(1), 16)), text
+    )
+
+
+def _screen_reveals(text: str, match: Callable[[str], object]) -> bool:
+    """Judge *text* and its percent-collapsed copies against *match*.
+
+    Screening only — callers rebuild output from the original bytes.  Returns
+    true when any form matches, or when the pass cap is exhausted while octets
+    are still resolving and the remaining bytes cannot be examined.
+    """
+    if match(text):
+        return True
+    for _ in range(_MAX_PERCENT_COLLAPSE_PASSES):
+        if "%" not in text:
+            return False
+        decoded = _collapse_percent_octets(text)
+        if decoded == text:
+            return False
+        if match(decoded):
+            return True
+        text = decoded
+    return "%" in text and _collapse_percent_octets(text) != text
+
+
+_ASSIGNMENT_NAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+)
+
+
+def _embedded_assignment_names(value: str) -> Iterator[str]:
+    """Yield the names of ``name=…``/``name:…`` assignments embedded in *value*.
+
+    A name is the longest run of ``[A-Za-z0-9._-]`` that is followed by optional
+    whitespace and then ``=`` or ``:``, starting at the run's first letter.
+
+    Deliberately a hand-written scan rather than a pattern.  The equivalent
+    regex has to be retried at every offset of a run and backtracks across the
+    rest of it each time, which is quadratic: a benign ``?ref=`` followed by
+    32 KB of letters took eleven seconds, and that value arrives from a
+    server-supplied annotation.  This loop visits each character a bounded
+    number of times, so cost is linear in ``len(value)`` with no backtracking.
+    """
+    length = len(value)
+    index = 0
+    while index < length:
+        if value[index] not in _ASSIGNMENT_NAME_CHARS:
+            index += 1
+            continue
+        first_letter = -1
+        while index < length and value[index] in _ASSIGNMENT_NAME_CHARS:
+            if first_letter < 0 and value[index].isalpha():
+                first_letter = index
+            index += 1
+        run_end = index
+        while index < length and value[index].isspace():
+            index += 1
+        if first_letter >= 0 and index < length and value[index] in "=:":
+            yield value[first_letter:run_end]
+
+
+def _value_is_unsafe(value: str) -> bool:
+    """Return whether a parameter value embeds credential material.
+
+    Matching is structural — a nested scheme, a userinfo pattern, or an embedded
+    assignment whose name :func:`_is_sensitive_query_key` recognizes — so ordinary
+    values (``main``, ``refs/heads/topic``, ``AWS4-HMAC-SHA256``) are untouched.
+
+    Nested names are judged by the same predicate as top-level keys.  The narrower
+    :func:`_is_sensitive_name` misses the signed-URL family (``sig``,
+    ``X-Amz-Signature``), which would then be dropped in key position but
+    preserved once folded into a benign value such as ``?ref=main?sig=…``.
+    """
+    def _form_is_unsafe(form: str) -> bool:
+        if _NESTED_SCHEME_RE.search(form) or _NESTED_USERINFO_RE.search(form):
+            return True
+        return any(map(_is_sensitive_query_key, _embedded_assignment_names(form)))
+
+    return _screen_reveals(value, _form_is_unsafe)
+
+
+def _is_unsafe_pair(key: str, value: str) -> bool:
+    """Return whether a query/fragment parameter must be dropped.
+
+    The key is screened for embedded credential structure as well as by name:
+    a userinfo blob lands in key position whenever the attacker omits ``=``
+    around it (``?u:s@h=1`` parses as key ``u:s@h``).
+    """
+    return (
+        _is_sensitive_query_key(key)
+        or _value_is_unsafe(key)
+        or _value_is_unsafe(value)
+    )
+
+
+def _redact_sensitive_query(query: str) -> str:
+    """Drop credential-bearing parameters from a URL query string.
+
+    Keys are classified by :func:`_is_sensitive_query_key`, which recognizes
+    credential names across separator and casing variants rather than only an
+    enumerated allowlist.  Values are screened separately by
+    :func:`_value_is_unsafe`, because a benign key can still carry a nested
+    credential URL.  A query with nothing sensitive is returned byte-for-byte
+    unchanged so that ordinary URLs are not silently re-encoded.
+
+    ``parse_qsl`` silently discards fields without ``=``, so a credential
+    hidden in such a field would never reach the pair screen; those fields are
+    screened directly, and when one is unsafe the result is rebuilt from the
+    classifiable pairs only.
+    """
+    if not query:
+        return query
+
+    from urllib.parse import parse_qsl, urlencode
+
+    pairs = parse_qsl(query, keep_blank_values=True)
+    bare_field_unsafe = any(
+        _value_is_unsafe(field)
+        for field in query.split("&")
+        if field and "=" not in field
+    )
+    if not bare_field_unsafe and not any(
+        _is_unsafe_pair(key, value) for key, value in pairs
+    ):
+        return query
+    kept = [(key, value) for key, value in pairs if not _is_unsafe_pair(key, value)]
+    return urlencode(kept)
+
+
+# A fragment that embeds a nested URL or userinfo (``#https://u:s@h/p``,
+# ``#user:secret@host``) cannot be classified parameter-by-parameter, so it is
+# dropped whole.  Percent-encoded spellings are covered too because a fragment is
+# decoded by whatever consumes the link.
+_FRAGMENT_UNSAFE_RE = re.compile(
+    r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]*:(?:/|%2f)|@|%40", re.IGNORECASE
+)
+
+
+def _redact_sensitive_fragment(fragment: str) -> str:
+    """Drop credential material from a URL fragment, preserving benign anchors.
+
+    Git hosts use fragments as document anchors (``#readme``, ``#L42``), which are
+    useful and carry no secrets, so they are returned byte-for-byte.  OAuth
+    implicit-flow responses and signed links instead put credentials in the
+    fragment (``#access_token=…``), so a query-like fragment is filtered by
+    parameter name using the same classifier as the query string.  Anything that
+    cannot be classified — a nested URL or userinfo — fails closed and is dropped.
+    """
+    if not fragment:
+        return fragment
+
+    if _screen_reveals(fragment, _FRAGMENT_UNSAFE_RE.search):
+        return ""
+    if not _screen_reveals(fragment, lambda form: "=" in form):
+        return fragment
+    if "=" not in fragment:
+        # Query-like only once decoded (``access_token%3D…``): the parameters
+        # cannot be filtered without rewriting the fragment's bytes, so it is
+        # dropped whole.
+        return ""
+
+    from urllib.parse import parse_qsl, urlencode
+
+    pairs = parse_qsl(fragment, keep_blank_values=True)
+    if not pairs:
+        return ""
+    if not any(_is_unsafe_pair(key, value) for key, value in pairs):
+        return fragment
+    kept = [(key, value) for key, value in pairs if not _is_unsafe_pair(key, value)]
+    return urlencode(kept)
+
+
+def _decoded_delimiter_unsafe(form: str) -> bool:
+    """Screen a decoded ``?`` or ``#`` suffix revealed inside path or host text.
+
+    ``urlsplit`` splits on literal delimiters only, so an encoded one
+    (``repo%3Faccess_token%3D…``) keeps its parameters inside the path or the
+    reported hostname, where the query and fragment classifiers never look.
+    The suffix is judged by those same classifiers; the caller fails closed on
+    a credential because the parameters cannot be dropped without rewriting
+    the text's bytes.
+    """
+    for index, char in enumerate(form):
+        if char == "?":
+            query, _, fragment = form[index + 1 :].partition("#")
+            return (
+                _redact_sensitive_query(query) != query
+                or _redact_sensitive_fragment(fragment) != fragment
+            )
+        if char == "#":
+            fragment = form[index + 1 :]
+            return _redact_sensitive_fragment(fragment) != fragment
+    return False
+
+
+# Placeholder emitted when a URL-like remote carries credentials but cannot be
+# parsed into a clean host (malformed authority, missing host with userinfo,
+# malformed IPv6).  Returning this rather than the raw input keeps credential
+# material out of persisted annotations, CLI output, logs, and browse links, and
+# stops the parser from raising into callers.
+_REDACTED_GIT_URL: str = "[redacted-invalid-git-url]"
+
+# RFC 3986 scheme syntax followed by the start of a hier-part.  The slash is the
+# structural discriminator between URL-form and SCP-form: every URL-form remote has
+# one (``https:/``, ``git+https://``, ``hg:/``, ``foo:/``) and no SCP remote does
+# (``github.com:Org/repo``).  Recognizing the shape instead of enumerating known
+# schemes keeps any scheme — including unknown and malformed ones — out of the
+# SCP rewrite, which would otherwise mistake the scheme for a hostname and
+# re-embed the userinfo it was supposed to strip.
+_URL_FORM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:/")
+
+# A Windows drive path is a local filesystem path: the drive letter must not be
+# read as a scheme or as an SCP hostname.
+_WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+# ``git remote`` transport-helper syntax, ``<transport>::<address>``, e.g.
+# ``git::https://user:secret@host/repo.git``.  The transport name needs two or
+# more characters so a Windows drive (``C::``) cannot match, and ``::`` must
+# follow the name directly so an IPv6 authority (``https://[::1]/repo``) cannot.
+_TRANSPORT_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+::(.*)$", re.DOTALL)
+_MAX_TRANSPORT_HELPER_DEPTH: int = 4
+
+# SCP-style syntax, ``[user@]host:path``.  ``host`` is anchored to a hostname or a
+# bracketed IPv6 literal, and ``path`` must not start with a slash, so a URL-form
+# input can never be parsed this way.  Userinfo is matched only to be discarded.
+_SCP_RE = re.compile(
+    r"^(?:[^@/]*@)?"
+    r"(?P<host>[A-Za-z0-9._\-]+|\[[0-9A-Fa-f:.]+\])"
+    r":(?P<path>(?!/).*)$",
+    re.DOTALL,
+)
+
+# Userinfo shape (``user:secret@`` or ``token@``) in the first path segment.  An
+# empty or absent authority pushes credentials into the path — as in
+# ``https:///user:secret@Org/repo.git`` — where they would otherwise survive.
+# Anchoring to the first segment leaves later ``@`` in real paths alone.
+_PATH_USERINFO_RE = re.compile(r"^/*[^/@]*@")
+
+# ``urlsplit`` discards tabs and newlines before parsing, so leaving them in the
+# text we rebuild from would make the sanitizer disagree with its own parser about
+# where the authority ends.  Removing them up front keeps the two in step and stops
+# a remote from smuggling a line break into an annotation or a log line.
+_URL_CONTROL_CHARS_RE = re.compile(r"[\t\r\n]")
+
+
+def _has_path_userinfo(path: str) -> bool:
+    """Return whether a path carries authentication material.
+
+    Three shapes qualify: userinfo in the leading segment, which is what an
+    empty or mangled authority degrades into; a ``user:secret@`` pattern in any
+    later segment, which is what a scheme-like prefix leaves behind once its
+    colon has been consumed as the SCP host separator; and a credential-bearing
+    query or fragment behind an encoded delimiter.  Percent-decoded copies
+    are screened too, so an encoded spelling of any shape
+    (``user%3Asecret%40host``) is caught in any casing.
+    """
+    return _screen_reveals(
+        path,
+        lambda form: _PATH_USERINFO_RE.match(form)
+        or _NESTED_USERINFO_RE.search(form)
+        or _decoded_delimiter_unsafe(form),
+    )
+
+
+def _sanitize_pathlike(text: str) -> str:
+    """Sanitize text that has no authority of its own: a local path or a
+    hostless/driver-letter URL.
+
+    These shapes never reach the authority-handling code, so without this they
+    would be returned verbatim — yet a caller-supplied remote can still put
+    credentials in a query, a fragment, or a userinfo-shaped leading segment
+    (``token@host``, ``a/b:secret@c``).  Userinfo fails closed; query and
+    fragment go through the same classifiers as a full URL.  Rebuilt by string
+    surgery because ``urlunsplit`` cannot round-trip an empty authority.
+    """
+    from urllib.parse import urlsplit
+
+    base = text.split("#", 1)[0].split("?", 1)[0].strip()
+    if _has_path_userinfo(base):
+        return _REDACTED_GIT_URL
+    base = base.removesuffix(".git")
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return base
+    query = _redact_sensitive_query(parts.query)
+    fragment = _redact_sensitive_fragment(parts.fragment)
+    return (
+        base + (f"?{query}" if query else "") + (f"#{fragment}" if fragment else "")
+    ).strip()
+
+
+def _normalize_git_url(url: str) -> str:
+    """Normalize a git remote URL to a browsable, credential-free HTTPS URL.
+
+    Converts SSH/SCP forms to HTTPS and strips the ``.git`` suffix so the
+    result can build ``/blob/{ref}/{path}`` links directly:
+
+    - ``git@github.com:Org/repo.git``        -> ``https://github.com/Org/repo``
+    - ``ssh://git@github.com/Org/repo.git``  -> ``https://github.com/Org/repo``
+    - ``https://github.com/Org/repo.git``    -> ``https://github.com/Org/repo``
+    - ``https://github.com/Org/repo``        -> unchanged
+
+    Embedded credentials are removed: ``user:password@`` / ``token@`` userinfo is
+    stripped from URL-form and scheme-relative remotes, dropped entirely from
+    SCP-style remotes, and credential-bearing query and fragment parameters are
+    redacted by name (see :func:`_is_sensitive_query_key`) so secrets do not reach
+    persisted annotations, CLI output, logs, or error messages.  Host, port, path,
+    and benign document anchors are preserved.
+
+    Parsing fails closed: a URL-like input that cannot be parsed into a clean
+    host yields ``_REDACTED_GIT_URL`` rather than leaking the raw
+    ``user:secret@`` text or raising.  That covers a malformed authority
+    (unterminated IPv6), userinfo with no host, an empty or slash-mangled
+    authority that pushes the userinfo into the path
+    (``https:///user:secret@Org/repo.git``), and a transport-helper address that
+    is not itself a sanitizable URL (``ext::ssh user@host …``).  A malformed
+    textual port is dropped while the credential-free host is kept.  Local
+    filesystem paths and hostless schemes (e.g. ``file:///path``) are returned
+    unchanged aside from ``.git`` stripping and query/fragment redaction.
+    Re-normalizing a result is a no-op, except that each pass removes one ``.git``
+    suffix, since a repository directory may legitimately be named ``repo.git``.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    if not url:
+        return url
+
+    stripped = _URL_CONTROL_CHARS_RE.sub("", url).strip()
+
+    if _WINDOWS_PATH_RE.match(stripped):
+        return _sanitize_pathlike(stripped)
+
+    # Transport-helper remotes wrap a real address: ``git::https://u:s@host/repo``.
+    # Unwrap to the inner transport so it can be sanitized structurally.  Only an
+    # address that is itself URL-form (or another helper) can be; a helper command
+    # such as ``ext::ssh -p 22 user@host %S /repo`` cannot, so it fails closed.
+    for _ in range(_MAX_TRANSPORT_HELPER_DEPTH):
+        helper = _TRANSPORT_HELPER_RE.match(stripped)
+        if helper is None:
+            break
+        inner = helper.group(1).strip()
+        if not _URL_FORM_RE.match(inner) and not _TRANSPORT_HELPER_RE.match(inner):
+            return _REDACTED_GIT_URL
+        stripped = inner
     else:
-        # ssh://git@host/path
-        m = re.match(r"^ssh://(?:[^@]+@)?([^/]+)/(.+)$", url)
-        if m:
-            url = f"https://{m.group(1)}/{m.group(2)}"
+        if _TRANSPORT_HELPER_RE.match(stripped):
+            return _REDACTED_GIT_URL
 
-    return url.removesuffix(".git")
+    url_like = bool(_URL_FORM_RE.match(stripped)) or stripped.startswith("//")
+
+    # SCP-style syntax: ``[user@]host:path``.  Any userinfo is dropped since it is
+    # authentication material, and the remote is rewritten to https so the result
+    # is browsable.  A scheme-like prefix with a non-slash hier-part
+    # (``https:user:secret@Org/repo``) can still reach this branch, where the
+    # scheme would be read as the host and the credentials would land in the path;
+    # a userinfo shape in the rewritten path is therefore fatal, not normalized.
+    if not url_like:
+        scp = _SCP_RE.match(stripped)
+        if scp is not None:
+            if _has_path_userinfo(scp.group("path")):
+                return _REDACTED_GIT_URL
+            stripped = f"https://{scp.group('host')}/{scp.group('path')}"
+            url_like = True
+
+    try:
+        parts = urlsplit(stripped)
+        host = parts.hostname
+        try:
+            port = parts.port
+        except ValueError:
+            # Malformed textual port (e.g. ``host:notaport``): drop the port but
+            # keep the credential-free host so the link stays browsable.
+            port = None
+    except ValueError:
+        # Malformed authority (e.g. unterminated IPv6 ``[::1``).
+        return _REDACTED_GIT_URL if url_like else _sanitize_pathlike(stripped)
+
+    if parts.scheme or parts.netloc:
+        if host is None:
+            # URL-form/scheme-relative with no parseable host.  An empty or
+            # malformed authority leaves the credentials in the netloc or in the
+            # leading path segment, so returning the raw text would leak them —
+            # fail closed on either shape.  Otherwise this is a legitimately
+            # hostless scheme (``file:///path``) whose query still needs
+            # redacting before the text is handed back.
+            if "@" in parts.netloc or _has_path_userinfo(parts.path):
+                return _REDACTED_GIT_URL
+            return _sanitize_pathlike(stripped)
+        # A credential can also sit in the path of an otherwise well-formed URL
+        # (``https://host/a:secret@b``), which the authority rewrite below would
+        # carry through untouched.  Encoded spellings are screened on decoded
+        # copies so ``user%3Asecret%40b`` cannot slip past the literal pattern,
+        # and neither can parameters behind an encoded ``?``/``#``.
+        if _screen_reveals(
+            parts.path,
+            lambda form: _NESTED_USERINFO_RE.search(form)
+            or _decoded_delimiter_unsafe(form),
+        ):
+            return _REDACTED_GIT_URL
+        # ``urlsplit`` only recognizes a literal ``@`` as the userinfo delimiter,
+        # so a percent-encoded userinfo stays inside the hostname
+        # (``https://user%3As%40evil/repo``) and would be emitted as the "host"
+        # of the rebuilt URL, one decode away from a credential.
+        if "%" in host and _screen_reveals(
+            host, lambda form: "@" in form or _decoded_delimiter_unsafe(form)
+        ):
+            return _REDACTED_GIT_URL
+        # Re-bracket IPv6 literals, which ``hostname`` returns without brackets.
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = host if port is None else f"{host}:{port}"
+        out_scheme = "https" if parts.scheme.lower() == "ssh" else parts.scheme.lower()
+        query = _redact_sensitive_query(parts.query)
+        fragment = _redact_sensitive_fragment(parts.fragment)
+        # Strip ``.git`` from the path itself so it is removed even when a query
+        # or fragment follows it.
+        path = parts.path.removesuffix(".git")
+        return urlunsplit((out_scheme, netloc, path, query, fragment)).strip()
+
+    # No scheme and no authority: a bare local path.
+    return _sanitize_pathlike(stripped)
 
 
 def _fill_from_ci_env(info: dict[str, str]) -> None:
