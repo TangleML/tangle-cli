@@ -36,8 +36,10 @@ seam so the compiler can resolve an explicit relative
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import inspect
+import json
 import os
 import re
 import sys
@@ -50,6 +52,7 @@ from typing import Any, get_type_hints
 
 import yaml
 
+from .component_from_func import build_unwrapped_inputs_schema
 from .handler import TangleCliHandler
 from .python_pipeline.cfg import Cfg, _coerce_override, load_cfg
 from .python_pipeline.compiler_context import (
@@ -70,6 +73,40 @@ from .python_pipeline.trace import trace_pipeline
 from .python_pipeline.types import In
 from .schema_validation import SchemaValidationError, validate_dehydrated_pipeline
 from .utils import dump_yaml
+
+
+IMAGE_IDS: dict[str, str] = {}
+"""Logical image-id registry used by ``@task(image_id=...)``.
+
+OSS ships this empty. Downstream distributions may register environment-specific
+image defaults without hard-coding their image literals into the open-source
+package; CLI ``--image ID=REF`` overrides still win over registered defaults.
+"""
+
+
+def register_image_id(image_id: str, image: str) -> None:
+    """Register a default image reference for ``@task(image_id=...)``."""
+    if not image_id:
+        raise ValueError("image_id must be a non-empty string")
+    if not image:
+        raise ValueError("image must be a non-empty string")
+    IMAGE_IDS[image_id] = image
+
+
+def get_image_id(image_id: str) -> str | None:
+    """Return the registered default image for ``image_id``, if any."""
+    return IMAGE_IDS.get(image_id)
+
+
+def resolve_image_id(
+    image_id: str,
+    image_overrides: Mapping[str, str] | None = None,
+) -> str | None:
+    """Resolve ``image_id`` using compile-time overrides, then registered defaults."""
+    overrides = image_overrides or {}
+    if image_id in overrides:
+        return overrides[image_id]
+    return get_image_id(image_id)
 
 
 @dataclass
@@ -102,6 +139,7 @@ def compile_pipeline(
     *,
     pipeline_name: str | None = None,
     emit_components_sidecar: bool = True,
+    image_overrides: Mapping[str, str] | None = None,
 ) -> CompileResult:
     """Compile ``script`` to a single pipeline YAML at ``output``.
 
@@ -132,6 +170,9 @@ def compile_pipeline(
             compilation fails with a :class:`CompileError` (a valid
             dehydrated pipeline cannot be produced without the sidecar).
             Pipelines that use only ``ref(url=...)`` are unaffected.
+        image_overrides: Compile-time image-id overrides from ``--image
+            ID=REF``. They apply only to ``@task(image_id=...)`` refs that do
+            not also set an explicit ``image=``.
 
     Returns:
         A :class:`CompileResult`. ``components_path`` is the sidecar path
@@ -143,6 +184,7 @@ def compile_pipeline(
             unreachable ``@task`` source/dependency files).
     """
     overrides = dict(overrides or {})
+    image_overrides = dict(image_overrides or {})
 
     # 1. Validate the script path.
     script_path = Path(script).resolve()
@@ -197,6 +239,7 @@ def compile_pipeline(
             root_overrides=overrides,
             emit_components_sidecar=emit_components_sidecar,
             source_dirs=purge_dirs,
+            image_overrides=image_overrides,
         )
 
         # 5. Compile the root (and, recursively, all children) into in-memory
@@ -436,11 +479,17 @@ def _compile_pipeline_fn(
         )
     if task_refs:
         components_path = output_path.with_name(output_path.stem + ".components.yaml")
-        components_entries = _build_local_from_python_components(task_refs, components_yaml_dir=components_path.parent)
+        components_entries = _build_local_from_python_components(
+            task_refs,
+            components_yaml_dir=components_path.parent,
+            image_overrides=ctx.image_overrides,
+            unwrapped_input_keys=builder.task_unwrapped_input_keys,
+        )
         _rewrite_task_componentref_urls(
             body_dict=body_dict,
             task_refs=task_refs,
             components_yaml_name=components_path.name,
+            unwrapped_input_keys=builder.task_unwrapped_input_keys,
         )
 
     # 4b. A CHILD artifact is written under ``<root>.subgraphs/``, away from
@@ -1075,17 +1124,72 @@ def _artifact_label(artifact: SubgraphArtifact) -> str:
 # portable (the sidecar and the files it points at can move together).
 
 
-def _fragment_for_task(ref: CallableRef) -> str:
-    """Stable fragment key for a @task ref in the components sidecar.
+def _unwrapped_schema_for_task(
+    ref: CallableRef,
+    task_id: str,
+    unwrapped_input_keys: Mapping[str, dict[str, list[str]]] | None,
+) -> dict[str, Any]:
+    """Return the persisted unwrap schema for one traced task call.
 
-    Uses the hyphenated function name, matching the ``local_from_python``
-    resolver's output-filename convention
-    (``my_task`` -> ``my-task``). Multiple call sites for the SAME
-    function share one fragment — the local_from_python entry is keyed by
-    source file, not by call site.
+    Args:
+        ref: The ``@task`` callable reference for the traced task.
+        task_id: The concrete graph task ID for this call site.
+        unwrapped_input_keys: Builder metadata mapping task IDs to the
+            unwrap parameter/key order captured during tracing.
+
+    Returns:
+        A ``local_from_python.unwrapped_inputs`` schema for this task, or an
+        empty dict when the task did not use ``@task(unwrap=...)``. The schema
+        is shared by sidecar emission and componentRef rewriting so fragment
+        names and hydrate-time generation stay deterministic.
+
+    Raises:
+        CompileError: If schema construction fails because the task signature is
+            incompatible with its unwrap declaration.
+    """
+    if not unwrapped_input_keys or task_id not in unwrapped_input_keys:
+        return {}
+    try:
+        return build_unwrapped_inputs_schema(ref, unwrapped_input_keys[task_id])
+    except ValueError as exc:
+        raise CompileError(str(exc)) from exc
+
+
+def _unwrapped_schema_hash(schema: Mapping[str, Any]) -> str:
+    """Hash a persisted unwrap schema for sidecar fragment disambiguation.
+
+    Args:
+        schema: The ``local_from_python.unwrapped_inputs`` schema for one task
+            call site.
+
+    Returns:
+        A short stable SHA-256 prefix used in fragments like
+        ``combine--0123abcd`` so different key sets for the same function do
+        not collide in the generated components sidecar.
+    """
+    payload = json.dumps(schema, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
+
+
+def _fragment_for_task(ref: CallableRef, unwrapped_schema: Mapping[str, Any] | None = None) -> str:
+    """Return the stable components-sidecar fragment for a ``@task`` call.
+
+    Args:
+        ref: The ``@task`` callable reference.
+        unwrapped_schema: Optional persisted unwrap schema for this call site.
+
+    Returns:
+        The hyphenated function name for normal tasks, matching the
+        ``local_from_python`` resolver's output-filename convention
+        (``my_task`` -> ``my-task``). For unwrapped tasks, returns the function
+        fragment plus a schema hash so different key sets do not collide into
+        one component schema.
     """
     assert ref._task_function_name is not None  # only @task refs reach here
-    return ref._task_function_name.replace("_", "-")
+    base = ref._task_function_name.replace("_", "-")
+    if unwrapped_schema:
+        return f"{base}--{_unwrapped_schema_hash(unwrapped_schema)}"
+    return base
 
 
 def _relpath_posix(target: Path, start: Path) -> str:
@@ -1427,12 +1531,28 @@ def _relocate_relative_local_url(url: str, source_dir: Path, sidecar_dir: Path) 
 
 
 def _build_local_from_python_components(
-    task_refs: list[tuple[str, CallableRef]], *, components_yaml_dir: Path
+    task_refs: list[tuple[str, CallableRef]],
+    *,
+    components_yaml_dir: Path,
+    image_overrides: Mapping[str, str] | None = None,
+    unwrapped_input_keys: Mapping[str, dict[str, list[str]]] | None = None,
 ) -> dict[str, Any]:
     """Build the ``<stem>.components.yaml`` content for @task refs.
 
-    Returns an ordered map ``{fragment: {name?, local_from_python:
-    {image?, function, mode?, resolve_root?, dependencies_from?, file}}}``, DEDUPED by FUNCTION
+    Args:
+        task_refs: Traced ``(task_id, CallableRef)`` records for ``@task``
+            calls in the pipeline graph.
+        components_yaml_dir: Directory where the generated sidecar will live;
+            local paths are written relative to this directory.
+        image_overrides: Optional compile-time ``--image ID=REF`` overrides.
+        unwrapped_input_keys: Optional trace metadata for ``@task(unwrap=...)``
+            calls. When present, this function writes
+            ``local_from_python.unwrapped_inputs`` so hydrate can regenerate the
+            exact same flattened input schema without call-site context.
+
+    Returns:
+        An ordered map ``{fragment: {name?, local_from_python:
+        {image?, function, mode?, resolve_root?, dependencies_from?, file}}}``, DEDUPED by FUNCTION
     (the fragment = hyphenated function name). The SAME @task function
     called from multiple task sites collapses to one entry; TWO DISTINCT
     @task functions defined in ONE file each get their own entry (they
@@ -1461,11 +1581,12 @@ def _build_local_from_python_components(
     """
     seen_fragments: dict[str, Path] = {}
     entries: dict[str, Any] = {}
-    for _task_id, ref in task_refs:
+    for task_id, ref in task_refs:
         source = ref._task_source_path
         if source is None:  # defensive — only @task refs are recorded here
             continue
-        fragment = _fragment_for_task(ref)
+        unwrapped_schema = _unwrapped_schema_for_task(ref, task_id, unwrapped_input_keys)
+        fragment = _fragment_for_task(ref, unwrapped_schema)
 
         prior_source = seen_fragments.get(fragment)
         if prior_source is not None:
@@ -1492,6 +1613,16 @@ def _build_local_from_python_components(
         local_from_python: dict[str, Any] = {}
         if ref._task_image is not None:
             local_from_python["image"] = ref._task_image
+        elif ref._task_image_id is not None:
+            resolved_image = resolve_image_id(ref._task_image_id, image_overrides)
+            if resolved_image is None:
+                raise CompileError(
+                    f"@task image_id={ref._task_image_id!r} on function "
+                    f"{ref._task_function_name!r} did not resolve to an image. "
+                    f"Pass --image {ref._task_image_id}=IMAGE to `tangle sdk pipelines compile`, "
+                    f"or register a default with register_image_id({ref._task_image_id!r}, IMAGE)."
+                )
+            local_from_python["image"] = resolved_image
         # Always pin the function name. Without it the hydrator defaults
         # to the file stem and extracts the wrong symbol.
         assert ref._task_function_name is not None
@@ -1514,6 +1645,8 @@ def _build_local_from_python_components(
                     "Point dependencies_from at an existing file or drop it."
                 )
             local_from_python["dependencies_from"] = _relpath_posix(deps, components_yaml_dir)
+        if unwrapped_schema:
+            local_from_python["unwrapped_inputs"] = unwrapped_schema
         local_from_python["file"] = _relpath_posix(source, components_yaml_dir)
 
         seen_fragments[fragment] = source
@@ -1533,17 +1666,27 @@ def _rewrite_task_componentref_urls(
     body_dict: dict[str, Any],
     task_refs: list[tuple[str, CallableRef]],
     components_yaml_name: str,
+    unwrapped_input_keys: Mapping[str, dict[str, list[str]]] | None = None,
 ) -> None:
     """Rewrite each @task task's ``componentRef`` to a pure resolve URL.
 
-    Mutates ``body_dict`` in place. Each entry in ``task_refs`` is a
-    ``(task_id, CallableRef)`` tuple; the task_id is the key under
-    ``implementation.graph.tasks`` whose componentRef is replaced with
-    ``{"url": "resolve://./<components_yaml_name>#<fragment>"}``.
+    Args:
+        body_dict: Emitted dehydrated pipeline body to mutate in place.
+        task_refs: Traced ``(task_id, CallableRef)`` records for ``@task``
+            calls in the pipeline graph.
+        components_yaml_name: Filename of the generated components sidecar.
+        unwrapped_input_keys: Optional trace metadata for ``@task(unwrap=...)``
+            calls. The same persisted schema used for sidecar emission is used
+            here to compute schema-hashed fragments consistently.
+
+    Returns:
+        None. ``body_dict`` is mutated so each task's componentRef becomes
+        ``{"url": "resolve://./<components_yaml_name>#<fragment>"}``.
     """
     tasks = body_dict.get("implementation", {}).get("graph", {}).get("tasks", {})
     for task_id, ref in task_refs:
-        fragment = _fragment_for_task(ref)
+        unwrapped_schema = _unwrapped_schema_for_task(ref, task_id, unwrapped_input_keys)
+        fragment = _fragment_for_task(ref, unwrapped_schema)
         url = f"resolve://./{components_yaml_name}#{fragment}"
         if task_id not in tasks:
             raise CompileError(
@@ -2233,6 +2376,7 @@ class PipelineCompiler(TangleCliHandler):
         overrides: Mapping[str, str] | None = None,
         pipeline_name: str | None = None,
         emit_components_sidecar: bool = True,
+        image_overrides: Mapping[str, str] | None = None,
     ) -> CompileResult:
         """Compile ``script`` to a single dehydrated pipeline YAML at ``output``.
 
@@ -2251,6 +2395,7 @@ class PipelineCompiler(TangleCliHandler):
             overrides,
             pipeline_name=pipeline_name,
             emit_components_sidecar=emit_components_sidecar,
+            image_overrides=image_overrides,
         )
         self.log.info(f"wrote {result.pipeline_path}")
         if result.components_path is not None:

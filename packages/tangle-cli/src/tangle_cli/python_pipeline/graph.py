@@ -76,6 +76,13 @@ class GraphBuilder:
     task_refs_for_local_from_python: list[tuple[str, Any]] = field(
         default_factory=list
     )
+    # Per-task call-site keys for @task(unwrap=...) dict parameters. The trace
+    # layer records only the dynamic key set here; the compile driver combines
+    # this with the function signature to infer Tangle input types and persist a
+    # hydrate-safe ``local_from_python.unwrapped_inputs`` schema.
+    task_unwrapped_input_keys: dict[str, dict[str, list[str]]] = field(
+        default_factory=dict
+    )
     # ``(task_id, CallableRef)`` tuples captured from
     # ``CallableRef.__call__`` when the ref was produced by ``@registered``
     # (``_registered_source_path`` is set). The compile driver uses this

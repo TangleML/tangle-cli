@@ -220,10 +220,14 @@ def test_tangle_deploy_pipeline_compile_import_surface() -> None:
         validate_dehydrated_pipeline,
     )
     from tangle_cli.pipeline_compiler import (
+        IMAGE_IDS,
         CompileResult,
         PipelineCompiler,
         ZONE_ROOT_MARKERS,
         compile_pipeline,
+        get_image_id,
+        register_image_id,
+        resolve_image_id,
     )
     from tangle_cli.handler import TangleCliHandler
 
@@ -249,6 +253,26 @@ def test_tangle_deploy_pipeline_compile_import_surface() -> None:
     assert issubclass(PipelineCompiler, TangleCliHandler)
     assert callable(PipelineCompiler.compile_file)
     assert isinstance(ZONE_ROOT_MARKERS, list)
+    assert isinstance(IMAGE_IDS, dict)
+    assert callable(register_image_id)
+    assert callable(get_image_id)
+    assert callable(resolve_image_id)
+
+
+def test_image_id_registry_is_empty_and_mutable_for_downstream() -> None:
+    from tangle_cli import pipeline_compiler as pc
+
+    assert pc.IMAGE_IDS == {}
+    original = dict(pc.IMAGE_IDS)
+    try:
+        pc.register_image_id("eval-slim", "registry.example/eval-slim:latest")
+        assert pc.get_image_id("eval-slim") == "registry.example/eval-slim:latest"
+        assert pc.resolve_image_id("eval-slim", {"eval-slim": "override"}) == "override"
+    finally:
+        pc.IMAGE_IDS.clear()
+        pc.IMAGE_IDS.update(original)
+    assert pc.IMAGE_IDS == {}
+
 
 
 def test_zone_root_markers_seam_is_empty_and_mutable_for_downstream() -> None:

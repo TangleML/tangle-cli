@@ -16,10 +16,12 @@ import yaml
 
 from tangle_cli import cli
 from tangle_cli.pipeline_compiler import (
+    IMAGE_IDS,
     ZONE_ROOT_MARKERS,
     CompileResult,
     PipelineCompiler,
     compile_pipeline,
+    register_image_id,
 )
 from tangle_cli.pipelines import PipelineValidationError, compile_pipeline_file
 from tangle_cli.python_pipeline.errors import CompileError
@@ -344,6 +346,199 @@ def test_compile_task_decorator_emits_sidecar(tmp_path):
     validate_dehydrated_data(yaml.safe_load(out.read_text()))
 
 
+def test_compile_task_decorator_emits_unwrapped_input_schema_and_flat_edges(tmp_path):
+    project = tmp_path / "project"
+    src = project / "src"
+    pipeline_path = src / "pipeline.py"
+    src.mkdir(parents=True)
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        "@task(image='python:3.12')\n"
+        "def produce() -> str:\n"
+        "    return 'ok'\n\n"
+        "@task(image='python:3.12', unwrap='run_data')\n"
+        "def combine(run_data: dict[str, str]) -> str:\n"
+        "    return run_data['shop'] + run_data['catalog']\n\n"
+        "@pipeline('Unwrap Pipeline')\n"
+        "def unwrap_pipeline() -> Out[str]:\n"
+        "    shop = produce.named('shop')()\n"
+        "    catalog = produce.named('catalog')()\n"
+        "    combined = combine.named('combine')(run_data={'shop': shop, 'catalog': catalog})\n"
+        "    return combined\n",
+        encoding="utf-8",
+    )
+
+    out = project / "compiled.yaml"
+    result = compile_pipeline(pipeline_path, out)
+
+    compiled = yaml.safe_load(out.read_text())
+    combine_task = compiled["implementation"]["graph"]["tasks"]["combine"]
+    assert combine_task["componentRef"]["url"].startswith(
+        "resolve://./compiled.components.yaml#combine--"
+    )
+    assert set(combine_task["arguments"]) == {"run_data__shop", "run_data__catalog"}
+    assert combine_task["arguments"]["run_data__shop"]["taskOutput"]["taskId"] == "shop"
+    assert combine_task["arguments"]["run_data__catalog"]["taskOutput"]["taskId"] == "catalog"
+
+    sidecar = yaml.safe_load(result.components_path.read_text())
+    fragments = [name for name in sidecar if name.startswith("combine--")]
+    assert len(fragments) == 1
+    local_from_python = sidecar[fragments[0]]["local_from_python"]
+    schema = local_from_python["unwrapped_inputs"]["run_data"]
+    assert schema["value_type"] == "String"
+    assert schema["keys"] == [
+        {
+            "key": "catalog",
+            "input_name": "run_data__catalog",
+            "type": "String",
+            "optional": False,
+        },
+        {"key": "shop", "input_name": "run_data__shop", "type": "String", "optional": False},
+    ]
+
+
+def test_compile_task_decorator_uses_schema_hash_for_unwrapped_fragment_collisions(tmp_path):
+    project = tmp_path / "project"
+    src = project / "src"
+    pipeline_path = src / "pipeline.py"
+    src.mkdir(parents=True)
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        "@task(image='python:3.12')\n"
+        "def produce() -> str:\n"
+        "    return 'ok'\n\n"
+        "@task(image='python:3.12', unwrap='run_data')\n"
+        "def combine(run_data: dict[str, str]) -> str:\n"
+        "    return ','.join(sorted(run_data))\n\n"
+        "@pipeline('Unwrap Hash Pipeline')\n"
+        "def unwrap_hash_pipeline() -> Out[str]:\n"
+        "    first = produce.named('first')()\n"
+        "    second = produce.named('second')()\n"
+        "    a = combine.named('combine_a')(run_data={'first': first})\n"
+        "    b = combine.named('combine_b')(run_data={'second': second})\n"
+        "    return combine.named('combine_c')(run_data={'a': a, 'b': b})\n",
+        encoding="utf-8",
+    )
+
+    result = compile_pipeline(pipeline_path, project / "compiled.yaml")
+    sidecar = yaml.safe_load(result.components_path.read_text())
+
+    fragments = sorted(name for name in sidecar if name.startswith("combine--"))
+    assert len(fragments) == 3
+    key_sets = {
+        tuple(key["key"] for key in sidecar[name]["local_from_python"]["unwrapped_inputs"]["run_data"]["keys"])
+        for name in fragments
+    }
+    assert key_sets == {("first",), ("second",), ("a", "b")}
+
+
+def test_compile_task_decorator_dedupes_reordered_unwrapped_key_sets(tmp_path):
+    project = tmp_path / "project"
+    src = project / "src"
+    pipeline_path = src / "pipeline.py"
+    src.mkdir(parents=True)
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        "@task(image='python:3.12')\n"
+        "def produce() -> str:\n"
+        "    return 'ok'\n\n"
+        "@task(image='python:3.12', unwrap='run_data')\n"
+        "def combine(run_data: dict[str, str]) -> str:\n"
+        "    return ','.join(sorted(run_data))\n\n"
+        "@pipeline('Unwrap Stable Hash Pipeline')\n"
+        "def unwrap_stable_hash_pipeline() -> Out[str]:\n"
+        "    x = produce.named('x')()\n"
+        "    y = produce.named('y')()\n"
+        "    a = combine.named('combine_a')(run_data={'x': x, 'y': y})\n"
+        "    b = combine.named('combine_b')(run_data={'y': y, 'x': x})\n"
+        "    return combine.named('combine_c')(run_data={'a': a, 'b': b})\n",
+        encoding="utf-8",
+    )
+
+    result = compile_pipeline(pipeline_path, project / "compiled.yaml")
+    compiled = yaml.safe_load((project / "compiled.yaml").read_text())
+    sidecar = yaml.safe_load(result.components_path.read_text())
+
+    combine_a_url = compiled["implementation"]["graph"]["tasks"]["combine_a"]["componentRef"]["url"]
+    combine_b_url = compiled["implementation"]["graph"]["tasks"]["combine_b"]["componentRef"]["url"]
+    assert combine_a_url == combine_b_url
+
+    fragments = sorted(name for name in sidecar if name.startswith("combine--"))
+    assert len(fragments) == 2
+    xy_fragment = next(
+        name
+        for name in fragments
+        if [
+            key["key"]
+            for key in sidecar[name]["local_from_python"]["unwrapped_inputs"]["run_data"]["keys"]
+        ]
+        == ["x", "y"]
+    )
+    assert combine_a_url.endswith(f"#{xy_fragment}")
+
+
+def test_compile_task_decorator_rejects_unwrapped_input_colliding_with_fixed_param(tmp_path):
+    project = tmp_path / "project"
+    src = project / "src"
+    pipeline_path = src / "pipeline.py"
+    src.mkdir(parents=True)
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        "@task(image='python:3.12', unwrap='items')\n"
+        "def greet(items: dict[str, str], items__who: str = 'default') -> str:\n"
+        "    return items['who'] + items__who\n\n"
+        "@pipeline('Bad Collision Pipeline')\n"
+        "def bad_collision_pipeline() -> Out[str]:\n"
+        "    return greet.named('greet')(items={'who': 'Ada'})\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CompileError, match="collides with parameter 'items__who'"):
+        compile_pipeline(pipeline_path, project / "compiled.yaml")
+    assert not (project / "compiled.yaml").exists()
+    assert not (project / "compiled.components.yaml").exists()
+
+
+def test_compile_task_decorator_rejects_empty_unwrapped_dict(tmp_path):
+    project = tmp_path / "project"
+    src = project / "src"
+    pipeline_path = src / "pipeline.py"
+    src.mkdir(parents=True)
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        "@task(image='python:3.12', unwrap='run_data')\n"
+        "def combine(run_data: dict[str, str]) -> str:\n"
+        "    return 'ok'\n\n"
+        "@pipeline('Bad Unwrap Pipeline')\n"
+        "def bad_unwrap_pipeline() -> Out[str]:\n"
+        "    return combine.named('combine')(run_data={})\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CompileError, match="cannot be an empty dict"):
+        compile_pipeline(pipeline_path, project / "compiled.yaml")
+
+
+def test_compile_task_decorator_rejects_unwrap_on_non_dict_annotation(tmp_path):
+    project = tmp_path / "project"
+    src = project / "src"
+    pipeline_path = src / "pipeline.py"
+    src.mkdir(parents=True)
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        "@task(image='python:3.12', unwrap='run_data')\n"
+        "def combine(run_data: str) -> str:\n"
+        "    return 'ok'\n\n"
+        "@pipeline('Bad Annotation Pipeline')\n"
+        "def bad_annotation_pipeline() -> Out[str]:\n"
+        "    return combine.named('combine')(run_data={'x': 'y'})\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CompileError, match="must be annotated as dict"):
+        compile_pipeline(pipeline_path, project / "compiled.yaml")
+
+
 def test_compile_task_decorator_emits_bundle_mode_and_resolve_root(tmp_path):
     """@task(mode="bundle") is carried into the auto-emitted sidecar."""
     project = tmp_path / "project"
@@ -373,6 +568,85 @@ def test_compile_task_decorator_emits_bundle_mode_and_resolve_root(tmp_path):
     assert local_from_python["resolve_root"] == "./src"
     assert local_from_python["file"] == "./src/pipeline.py"
     assert local_from_python["function"] == "bundled_task"
+
+
+def _write_image_id_pipeline(project: Path, decorator: str) -> Path:
+    src = project / "src"
+    src.mkdir(parents=True)
+    pipeline_path = src / "pipeline.py"
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        f"@task({decorator})\n"
+        "def image_task() -> str:\n"
+        "    return 'ok'\n\n"
+        "@pipeline('Image Pipeline')\n"
+        "def image_pipeline() -> Out[str]:\n"
+        "    result = image_task()\n"
+        "    return result\n",
+        encoding="utf-8",
+    )
+    return pipeline_path
+
+
+def test_compile_task_image_id_uses_registered_default(tmp_path):
+    original = dict(IMAGE_IDS)
+    try:
+        IMAGE_IDS.clear()
+        register_image_id("eval-slim", "registry.example/eval-slim:latest")
+        pipeline_path = _write_image_id_pipeline(tmp_path / "project", "image_id='eval-slim'")
+
+        result = compile_pipeline(pipeline_path, tmp_path / "project" / "compiled.yaml")
+
+        sidecar = yaml.safe_load(result.components_path.read_text())
+        local_from_python = sidecar["image-task"]["local_from_python"]
+        assert local_from_python["image"] == "registry.example/eval-slim:latest"
+    finally:
+        IMAGE_IDS.clear()
+        IMAGE_IDS.update(original)
+
+
+def test_compile_task_image_id_uses_compile_time_override(tmp_path):
+    pipeline_path = _write_image_id_pipeline(tmp_path / "project", "image_id='eval-slim'")
+
+    result = compile_pipeline(
+        pipeline_path,
+        tmp_path / "project" / "compiled.yaml",
+        image_overrides={"eval-slim": "registry.example/eval-slim@sha256:abc"},
+    )
+
+    sidecar = yaml.safe_load(result.components_path.read_text())
+    local_from_python = sidecar["image-task"]["local_from_python"]
+    assert local_from_python["image"] == "registry.example/eval-slim@sha256:abc"
+
+
+def test_compile_task_explicit_image_precedes_image_id_override(tmp_path):
+    pipeline_path = _write_image_id_pipeline(
+        tmp_path / "project",
+        "image='python:3.12', image_id='eval-slim'",
+    )
+
+    result = compile_pipeline(
+        pipeline_path,
+        tmp_path / "project" / "compiled.yaml",
+        image_overrides={"eval-slim": "registry.example/eval-slim@sha256:abc"},
+    )
+
+    sidecar = yaml.safe_load(result.components_path.read_text())
+    local_from_python = sidecar["image-task"]["local_from_python"]
+    assert local_from_python["image"] == "python:3.12"
+
+
+def test_compile_task_image_id_without_default_or_override_fails(tmp_path):
+    original = dict(IMAGE_IDS)
+    try:
+        IMAGE_IDS.clear()
+        pipeline_path = _write_image_id_pipeline(tmp_path / "project", "image_id='eval-slim'")
+
+        with pytest.raises(CompileError, match="image_id='eval-slim'.*did not resolve"):
+            compile_pipeline(pipeline_path, tmp_path / "project" / "compiled.yaml")
+    finally:
+        IMAGE_IDS.clear()
+        IMAGE_IDS.update(original)
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +795,30 @@ def test_compile_cli_writes_output(tmp_path, capsys):
     assert out.exists()
     assert yaml.safe_load(out.read_text())["name"] == "Noop Pipeline"
     assert "Compiled" in capsys.readouterr().out
+
+
+def test_compile_cli_image_override_writes_resolved_image(tmp_path):
+    project = tmp_path / "project"
+    out = project / "compiled.yaml"
+    pipeline_path = _write_image_id_pipeline(project, "image_id='eval-slim'")
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipelines",
+            "compile",
+            str(pipeline_path),
+            "-o",
+            str(out),
+            "--image",
+            "eval-slim=registry.example/eval-slim@sha256:abc",
+        ],
+    )
+
+    sidecar = yaml.safe_load(out.with_name("compiled.components.yaml").read_text())
+    assert sidecar["image-task"]["local_from_python"]["image"] == "registry.example/eval-slim@sha256:abc"
 
 
 def test_compile_cli_help_exits_zero(capsys):
