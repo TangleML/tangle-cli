@@ -323,17 +323,44 @@ def greeting_pipeline(who: In[str], cfg) -> Out[str]:
 
 Task IDs default from the left-hand variable name at the call site, converted to title case. If there is no simple left-hand variable, or if you want a stable explicit label, call `.named("Task Id")` before invoking the task. Use `.bind(...)` to pre-fill task arguments and `.with_annotations({...})` to add per-task annotations.
 
-Use the reserved `is_enabled=` call keyword for conditional execution of container-component tasks. It accepts a boolean (serialized as the lowercase string `"true"` or `"false"`), a string, an `In[...]` graph input, or a previous task output:
+##### Conditional task execution
+
+Pipeline inputs used as conditions are ordinary `In[str]` values; there is no special conditional input annotation. Pass the value through the reserved task-call metadata keyword `is_enabled=`:
 
 ```python
 @pipeline("Conditional greeting")
 def conditional_greeting(enabled: In[str]) -> Out[str]:
     greeting = write_greeting(who="world", is_enabled=enabled)
-    publish = publish_greeting(path=greeting.out, is_enabled=greeting.should_publish)
-    return publish.out
+    return greeting.out
 ```
 
-`is_enabled` is emitted as the canonical task field `isEnabled`; it is not a component argument, and there is no `condition` alias. If a component itself has an input named `is_enabled`, pass that input through `.bind(is_enabled=...)`; bound values stay in the task's `arguments` while call-site `is_enabled=` controls task execution. Tangle does not evaluate conditions on graph-component tasks, so `subpipeline(...)(is_enabled=...)` is rejected with guidance to condition tasks inside the child pipeline. A child graph input with that name remains available through `subpipeline(...).bind(is_enabled=...)(...)`.
+This emits the canonical task field rather than a component argument:
+
+```yaml
+isEnabled:
+  graphInput:
+    inputName: enabled
+```
+
+`is_enabled=` supports Python booleans (serialized as lowercase `"true"` / `"false"` strings), string constants, `In[...]` graph inputs, and previous task outputs such as `is_enabled=gate.Output`. It is container-component task metadata; component function parameters are not implicitly conditions.
+
+If a component itself declares an input named `is_enabled`, bind that component argument separately while using the call-site keyword for task metadata:
+
+```python
+@task(image="python:3.12")
+def work(is_enabled: str, message: str) -> str:
+    return message
+
+@pipeline("Input-name collision")
+def collision(runtime_condition: In[str]) -> Out[str]:
+    result = work.bind(is_enabled="component-input-value")(
+        message="hello",
+        is_enabled=runtime_condition,
+    )
+    return result.Output
+```
+
+The bound value remains under `arguments.is_enabled`; the call-site value emits as `isEnabled`. Tangle does not evaluate conditions on graph-component tasks, so `subpipeline(...)(is_enabled=...)` is rejected with guidance to condition tasks inside the child pipeline. A child graph input with that name remains available through `subpipeline(...).bind(is_enabled=...)(...)`. There is no `condition` alias.
 
 ##### Task images, dependencies, and image IDs
 
