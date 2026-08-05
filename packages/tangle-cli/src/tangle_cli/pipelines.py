@@ -419,6 +419,11 @@ def _dependency_edges(tasks: Mapping[str, Any]) -> set[tuple[str, str]]:
         for referenced_task in _extract_task_output_refs(task_spec.get("arguments", {})):
             if referenced_task in task_names:
                 edges.add((referenced_task, target))
+        for referenced_task in _extract_task_output_refs(
+            task_spec.get("isEnabled")
+        ):
+            if referenced_task in task_names:
+                edges.add((referenced_task, target))
 
     return edges
 

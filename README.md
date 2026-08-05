@@ -323,6 +323,18 @@ def greeting_pipeline(who: In[str], cfg) -> Out[str]:
 
 Task IDs default from the left-hand variable name at the call site, converted to title case. If there is no simple left-hand variable, or if you want a stable explicit label, call `.named("Task Id")` before invoking the task. Use `.bind(...)` to pre-fill task arguments and `.with_annotations({...})` to add per-task annotations.
 
+Use the reserved `is_enabled=` call keyword for conditional execution of container-component tasks. It accepts a boolean (serialized as the lowercase string `"true"` or `"false"`), a string, an `In[...]` graph input, or a previous task output:
+
+```python
+@pipeline("Conditional greeting")
+def conditional_greeting(enabled: In[str]) -> Out[str]:
+    greeting = write_greeting(who="world", is_enabled=enabled)
+    publish = publish_greeting(path=greeting.out, is_enabled=greeting.should_publish)
+    return publish.out
+```
+
+`is_enabled` is emitted as the canonical task field `isEnabled`; it is not a component argument, and there is no `condition` alias. If a component itself has an input named `is_enabled`, pass that input through `.bind(is_enabled=...)`; bound values stay in the task's `arguments` while call-site `is_enabled=` controls task execution. Tangle does not evaluate conditions on graph-component tasks, so `subpipeline(...)(is_enabled=...)` is rejected with guidance to condition tasks inside the child pipeline. A child graph input with that name remains available through `subpipeline(...).bind(is_enabled=...)(...)`.
+
 ##### Task images, dependencies, and image IDs
 
 Use `@task(image="...")` to write the component image directly. Use `dependencies_from="pyproject.toml"` when generated components need to install Python dependencies. Several tasks can share one authoring-only `TaskEnv`:

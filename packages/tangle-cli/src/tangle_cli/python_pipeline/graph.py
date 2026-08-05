@@ -10,6 +10,12 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
+# Distinguishes an omitted task condition from an explicitly supplied value.
+# The latter is validated by the emitter, so ``is_enabled=None`` fails closed
+# instead of being silently omitted.
+IS_ENABLED_UNSET = object()
+
+
 @dataclass
 class EdgeRef:
     """How one task's input wires to a producer.
@@ -28,9 +34,9 @@ class EdgeRef:
 class TaskNode:
     """A single emitted task in the graph.
 
-    ``arguments`` values may be plain strings, TaskOutputProxy objects
-    (for taskOutput edges in non-``wait_for`` argument positions — not
-    used in the PoC), or GraphInputPlaceholder objects.
+    ``arguments`` values may be plain strings, TaskOutputProxy objects, or
+    GraphInputPlaceholder objects. ``is_enabled`` is separate task metadata;
+    the emitter normalizes and serializes it as ``isEnabled`` when supplied.
     """
 
     task_id: str
@@ -39,6 +45,7 @@ class TaskNode:
     ref_digest: str | None = None
     arguments: dict[str, Any] = field(default_factory=dict)
     annotations: dict[str, str] | None = None
+    is_enabled: Any = IS_ENABLED_UNSET
 
 
 @dataclass

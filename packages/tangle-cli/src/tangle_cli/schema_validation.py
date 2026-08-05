@@ -212,6 +212,15 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset(
 _ARGUMENT_WRAPPER_KEYS = ("graphInput", "taskOutput", "dynamicData")
 
 
+def _is_condition_value(value: Any) -> bool:
+    """True for a backend-supported serialized ``isEnabled`` value."""
+    if isinstance(value, str):
+        return True
+    return isinstance(value, Mapping) and any(
+        key in value for key in ("graphInput", "taskOutput")
+    )
+
+
 def _is_argument_value(value: Any) -> bool:
     """True when ``value`` looks like a runnable ArgumentValue — a raw
     string constant, or a mapping carrying a ``graphInput`` / ``taskOutput`` /
@@ -266,6 +275,8 @@ def is_dehydrated_pipeline(data: Any) -> bool:
 
     for task in tasks.values():
         if not isinstance(task, Mapping):
+            return False
+        if "isEnabled" in task and not _is_condition_value(task["isEnabled"]):
             return False
         arguments = task.get("arguments")
         if arguments is None:
@@ -376,6 +387,13 @@ def _validate_semantics(data: Mapping[str, Any]) -> None:
                         input_names,
                         loc=f"tasks.{task_id}.arguments.{arg_name}",
                     )
+            if "isEnabled" in task:
+                _check_argument_refs(
+                    task["isEnabled"],
+                    task_ids,
+                    input_names,
+                    loc=f"tasks.{task_id}.isEnabled",
+                )
 
     output_values = graph.get("outputValues") if isinstance(graph, Mapping) else None
     if isinstance(output_values, Mapping):

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import CompileError
+from .graph import IS_ENABLED_UNSET
 
 _UNWRAPPED_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -291,7 +292,12 @@ class CallableRef:
     # ------------------------------------------------------------------
     # Trace-mode call site
 
-    def __call__(self, **kwargs: Any) -> Any:
+    def __call__(
+        self,
+        *,
+        is_enabled: Any = IS_ENABLED_UNSET,
+        **kwargs: Any,
+    ) -> Any:
         """Trace-mode invocation.
 
         Records a :class:`TaskNode` into the active :class:`GraphBuilder`
@@ -301,11 +307,17 @@ class CallableRef:
         call site (resolved via the AST pre-pass map stashed on the
         builder).
 
-        Edge kwargs (``wait_for`` / ``depends_on``) and regular kwargs
-        share one ``arguments`` dict in the IR; the value-vs-key
-        dispatch happens at emit time. ``.bind(...)`` kwargs are merged
-        in last so call-site kwargs win on conflict (same key) and come
-        first in insertion order (the bind block is appended).
+        ``is_enabled`` is task metadata, not a component input. It accepts a
+        boolean, string, graph input, or task output and is emitted as the
+        canonical ``isEnabled`` task field. If a component itself declares an
+        input named ``is_enabled``, bind that input with
+        ``ref(...).bind(is_enabled=...)``; bound kwargs remain component
+        arguments while the reserved call-site keyword remains task metadata,
+        so both may be used on the same task. Edge kwargs (``wait_for`` /
+        ``depends_on``) and regular kwargs share one ``arguments`` dict in the
+        IR; the value-vs-key dispatch happens at emit time. ``.bind(...)``
+        kwargs are merged in last so call-site kwargs win on conflict (same
+        key) and come first in insertion order (the bind block is appended).
         """
         # Local import keeps the @ref shell importable during early
         # bootstrap (and avoids the circular dep at module load).
@@ -364,6 +376,7 @@ class CallableRef:
             ref_digest=self.ref_digest,
             arguments=merged,
             annotations=dict(self.annotations) if self.annotations else None,
+            is_enabled=is_enabled,
         )
         builder.add_task(node)
 

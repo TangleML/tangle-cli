@@ -65,6 +65,33 @@ def test_pipeline_dehydrator_replaces_refs_by_explicit_choice(tmp_path: Path) ->
     assert "spec" in keep_result["implementation"]["graph"]["tasks"]["task"]["componentRef"]
 
 
+def test_pipeline_dehydrator_preserves_is_enabled_round_trip(tmp_path: Path) -> None:
+    task = _task(
+        "Leaf Component",
+        "digest-1",
+        canonical_url="https://example.test/leaf.yaml",
+    )
+    task["isEnabled"] = {
+        "taskOutput": {"taskId": "gate", "outputName": "enabled"}
+    }
+    data = _pipeline(
+        {
+            "gate": _task(
+                "Gate", "digest-2", canonical_url="https://example.test/gate.yaml"
+            ),
+            "task": task,
+        }
+    )
+
+    result = PipelineDehydrator(
+        {"": DehydrateChoice.URL}, output_file=tmp_path / "out.yaml"
+    ).dehydrate(data)
+
+    assert result["implementation"]["graph"]["tasks"]["task"]["isEnabled"] == {
+        "taskOutput": {"taskId": "gate", "outputName": "enabled"}
+    }
+
+
 def test_pipeline_dehydrator_construction_is_auth_env_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Auth-free dehydration construction must not require TANGLE_API_URL."""
 
