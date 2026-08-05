@@ -12,6 +12,7 @@ import yaml
 from tangle_cli import cli
 from tangle_cli.pipeline_hydrator import PipelineHydrator
 from tangle_cli.pipelines import (
+    _dependency_edges,
     collect_pipeline_spec_errors,
     load_pipeline_schema,
     validate_component_inputs,
@@ -199,6 +200,32 @@ def test_pipelines_validate_fails_for_invalid_yaml(tmp_path: Path):
     assert "unknown task 'missing'" in str(exc_info.value)
 
 
+def test_pipeline_validation_treats_is_enabled_task_output_as_dependency():
+    pipeline = _minimal_valid_pipeline()
+    tasks = pipeline["implementation"]["graph"]["tasks"]
+    tasks["extract"]["isEnabled"] = {
+        "taskOutput": {"taskId": "load", "outputName": "enabled"}
+    }
+
+    errors = collect_pipeline_spec_errors(pipeline)
+
+    assert ("load", "extract") in _dependency_edges(tasks)
+    assert any("dependency cycle" in error for error in errors)
+
+
+def test_pipeline_validation_rejects_unknown_is_enabled_reference():
+    pipeline = _minimal_valid_pipeline()
+    pipeline["implementation"]["graph"]["tasks"]["load"]["isEnabled"] = {
+        "taskOutput": {"taskId": "missing", "outputName": "enabled"}
+    }
+
+    errors = collect_pipeline_spec_errors(pipeline)
+
+    assert any(
+        "isEnabled references unknown task 'missing'" in error for error in errors
+    )
+
+
 def test_pipelines_validate_rejects_non_string_task_ids(tmp_path: Path):
     pipeline_path = _write_pipeline(
         tmp_path / "pipeline.yaml",
@@ -254,6 +281,17 @@ def test_pipeline_schema_validation_rejects_wrong_root_input_type():
     errors = validate_pipeline_schema(pipeline)
 
     assert any("'inputs' must be array, got str" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [False, {"dynamicData": {"secret": {"name": "TOKEN"}}}],
+)
+def test_pipeline_schema_rejects_backend_unsupported_is_enabled(condition):
+    pipeline = _minimal_valid_pipeline()
+    pipeline["implementation"]["graph"]["tasks"]["load"]["isEnabled"] = condition
+
+    assert validate_pipeline_schema(pipeline)
 
 
 def _component_spec(

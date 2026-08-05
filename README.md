@@ -323,6 +323,45 @@ def greeting_pipeline(who: In[str], cfg) -> Out[str]:
 
 Task IDs default from the left-hand variable name at the call site, converted to title case. If there is no simple left-hand variable, or if you want a stable explicit label, call `.named("Task Id")` before invoking the task. Use `.bind(...)` to pre-fill task arguments and `.with_annotations({...})` to add per-task annotations.
 
+##### Conditional task execution
+
+Pipeline inputs used as conditions are ordinary `In[str]` values; there is no special conditional input annotation. Pass the value through the reserved task-call metadata keyword `is_enabled=`:
+
+```python
+@pipeline("Conditional greeting")
+def conditional_greeting(enabled: In[str]) -> Out[str]:
+    greeting = write_greeting(who="world", is_enabled=enabled)
+    return greeting.out
+```
+
+This emits the canonical task field rather than a component argument:
+
+```yaml
+isEnabled:
+  graphInput:
+    inputName: enabled
+```
+
+`is_enabled=` supports Python booleans (serialized as lowercase `"true"` / `"false"` strings), string constants, `In[...]` graph inputs, and previous task outputs such as `is_enabled=gate.Output`. It is container-component task metadata; component function parameters are not implicitly conditions.
+
+If a component itself declares an input named `is_enabled`, bind that component argument separately while using the call-site keyword for task metadata:
+
+```python
+@task(image="python:3.12")
+def work(is_enabled: str, message: str) -> str:
+    return message
+
+@pipeline("Input-name collision")
+def collision(runtime_condition: In[str]) -> Out[str]:
+    result = work.bind(is_enabled="component-input-value")(
+        message="hello",
+        is_enabled=runtime_condition,
+    )
+    return result.Output
+```
+
+The bound value remains under `arguments.is_enabled`; the call-site value emits as `isEnabled`. Tangle does not evaluate conditions on graph-component tasks, so `subpipeline(...)(is_enabled=...)` is rejected with guidance to condition tasks inside the child pipeline. A child graph input with that name remains available through `subpipeline(...).bind(is_enabled=...)(...)`. There is no `condition` alias.
+
 ##### Task images, dependencies, and image IDs
 
 Use `@task(image="...")` to write the component image directly. Use `dependencies_from="pyproject.toml"` when generated components need to install Python dependencies. Several tasks can share one authoring-only `TaskEnv`:

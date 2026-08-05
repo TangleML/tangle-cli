@@ -118,7 +118,7 @@
           "additionalProperties": { "$ref": "#/$defs/ArgumentValue" },
           "description": "Map of component input name -> argument source."
         },
-        "isEnabled":        { "type": "boolean" },
+        "isEnabled":        { "$ref": "#/$defs/ConditionValue" },
         "executionOptions": { "$ref": "#/$defs/ExecutionOptionsSpec" },
         "annotations": {
           "type": "object",
@@ -175,6 +175,15 @@
         { "$ref": "#/$defs/GraphInputArgument" },
         { "$ref": "#/$defs/TaskOutputArgument" },
         { "$ref": "#/$defs/DynamicDataArgument" }
+      ]
+    },
+
+    "ConditionValue": {
+      "description": "Task execution condition evaluated by Tangle. Supports a string constant or a graph/task output reference. Raw JSON/YAML booleans and dynamicData are not accepted.",
+      "oneOf": [
+        { "type": "string" },
+        { "$ref": "#/$defs/GraphInputArgument" },
+        { "$ref": "#/$defs/TaskOutputArgument" }
       ]
     },
 

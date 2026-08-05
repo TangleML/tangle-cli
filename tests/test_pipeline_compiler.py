@@ -733,6 +733,91 @@ def test_compile_validates_schema(multi_arg_args):
     validate_dehydrated_data(data)
 
 
+def test_compile_emits_first_class_is_enabled_values_and_collision_escape(tmp_path):
+    """Task conditions use canonical ``isEnabled`` without stealing a bound
+    component input of the same Python name."""
+    out = tmp_path / "compiled.yaml"
+    _provide_noop(out)
+    src = tmp_path / "conditional_pipeline.py"
+    src.write_text(
+        "from tangle_cli.python_pipeline import In, Out, pipeline, ref\n"
+        "\n"
+        "@pipeline('Conditional Pipeline')\n"
+        "def conditional_pipeline(enabled: In[str]) -> Out[str]:\n"
+        "    producer = ref(url='file://./noop.yaml')(message='produce')\n"
+        "    by_bool = ref(url='file://./noop.yaml')(is_enabled=False)\n"
+        "    by_string = ref(url='file://./noop.yaml')(is_enabled='TRUE')\n"
+        "    by_input = ref(url='file://./noop.yaml')(is_enabled=enabled)\n"
+        "    by_task = ref(url='file://./noop.yaml')(is_enabled=producer.should_run)\n"
+        "    collision = ref(url='file://./noop.yaml').bind(\n"
+        "        is_enabled='component-value'\n"
+        "    )(is_enabled=by_task)\n"
+        "    alias_is_argument = ref(url='file://./noop.yaml')(condition='false')\n"
+        "    return collision\n",
+        encoding="utf-8",
+    )
+
+    compile_pipeline(src, out)
+    tasks = yaml.safe_load(out.read_text())["implementation"]["graph"]["tasks"]
+
+    assert tasks["By Bool"]["isEnabled"] == "false"
+    assert tasks["By String"]["isEnabled"] == "TRUE"
+    assert tasks["By Input"]["isEnabled"] == {
+        "graphInput": {"inputName": "enabled"}
+    }
+    assert tasks["By Task"]["isEnabled"] == {
+        "taskOutput": {"taskId": "Producer", "outputName": "should_run"}
+    }
+    assert tasks["Collision"]["isEnabled"] == {
+        "taskOutput": {"taskId": "By Task", "outputName": "wait_for_output"}
+    }
+    assert tasks["Collision"]["arguments"]["is_enabled"] == "component-value"
+    assert tasks["Alias Is Argument"]["arguments"]["condition"] == "false"
+    assert "isEnabled" not in tasks["Alias Is Argument"]
+
+
+def test_compile_omits_is_enabled_when_not_authored(multi_arg_args):
+    data, _produce, _consume = multi_arg_args
+    tasks = data["implementation"]["graph"]["tasks"]
+    assert all("isEnabled" not in task for task in tasks.values())
+
+
+@pytest.mark.parametrize(
+    ("expression", "type_name"),
+    [
+        ("None", "NoneType"),
+        ("1", "int"),
+        ("{'graphInput': {'inputName': 'enabled'}}", "dict"),
+        ("dynamic_secret('TOKEN')", "DynamicData"),
+        ("raw('{{runtime}}')", "Raw"),
+    ],
+)
+def test_compile_rejects_unsupported_is_enabled_values(
+    expression, type_name, tmp_path
+):
+    out = tmp_path / "compiled.yaml"
+    _provide_noop(out)
+    src = tmp_path / "bad_condition_pipeline.py"
+    src.write_text(
+        "from tangle_cli.python_pipeline import (\n"
+        "    In, Out, dynamic_secret, pipeline, raw, ref,\n"
+        ")\n"
+        "\n"
+        "@pipeline('Bad Condition Pipeline')\n"
+        "def bad_condition_pipeline(enabled: In[str]) -> Out[str]:\n"
+        f"    bad = ref(url='file://./noop.yaml')(is_enabled={expression})\n"
+        "    return bad\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CompileError) as exc:
+        compile_pipeline(src, out)
+
+    assert "unsupported is_enabled value type" in str(exc.value)
+    assert type_name in str(exc.value)
+    assert not out.exists()
+
+
 # ---------------------------------------------------------------------------
 # PipelineCompiler handler + ZONE_ROOT_MARKERS seam.
 
@@ -1051,6 +1136,60 @@ def test_compile_subpipeline_emits_child_sidecar(tmp_path):
     # Both parent and child are valid dehydrated pipelines.
     validate_dehydrated_data(parent)
     validate_dehydrated_data(yaml.safe_load(child.read_text()))
+
+
+def test_compile_subpipeline_rejects_is_enabled_task_metadata(tmp_path):
+    src = tmp_path / "conditional_subpipeline.py"
+    source = (FIXTURES / "subpipeline_pipeline.py").read_text(encoding="utf-8")
+    src.write_text(
+        source.replace(
+            "(seed=parent_wait_token)",
+            "(seed=parent_wait_token, is_enabled='false')",
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy(FIXTURES / "config.yaml", tmp_path / "config.yaml")
+
+    with pytest.raises(CompileError) as exc:
+        compile_pipeline(
+            src, tmp_path / "compiled.yaml", pipeline_name="Parent Pipeline"
+        )
+
+    message = str(exc.value)
+    assert "subpipeline tasks do not support call-site is_enabled=" in message
+    assert "container-component tasks" in message
+    assert ".bind(is_enabled=...)" in message
+
+
+def test_compile_subpipeline_preserves_bound_is_enabled_graph_input(tmp_path):
+    src = tmp_path / "bound_is_enabled_subpipeline.py"
+    src.write_text(
+        "from tangle_cli.python_pipeline import In, Out, pipeline, subpipeline, task\n"
+        "\n"
+        "@task(image='python:3.12')\n"
+        "def child_task(value: str):\n"
+        "    print(value)\n"
+        "\n"
+        "@pipeline('Child')\n"
+        "def child(is_enabled: In[str]) -> Out[str]:\n"
+        "    result = child_task(value=is_enabled)\n"
+        "    return result\n"
+        "\n"
+        "@pipeline('Parent')\n"
+        "def parent(seed: In[str]) -> Out[str]:\n"
+        "    child_result = subpipeline(child).bind(\n"
+        "        is_enabled='component-input'\n"
+        "    )()\n"
+        "    return child_result\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "compiled.yaml"
+    compile_pipeline(src, out, pipeline_name="Parent")
+
+    tasks = yaml.safe_load(out.read_text())["implementation"]["graph"]["tasks"]
+    assert tasks["Child Result"]["arguments"]["is_enabled"] == "component-input"
+    assert "isEnabled" not in tasks["Child Result"]
 
 
 def test_compile_subpipeline_override_config_wins(tmp_path):
