@@ -23,6 +23,7 @@ from .api_transport import (
     _normalize_base_url,
     _request_headers,
     default_base_url,
+    format_transport_error,
     log_http_exchange,
     tangle_verbose_enabled,
 )
@@ -38,6 +39,16 @@ from .models import (
     RunDetails,
     TaskSpec,
 )
+
+
+class TangleApiTransportError(requests.exceptions.RequestException):
+    """A connection/timeout/TLS/proxy/stream failure carrying no HTTP response.
+
+    The message is a single, credential-safe line. Subclassing
+    ``requests.exceptions.RequestException`` keeps callers that already handle
+    requests errors working unchanged, while the originating exception is chained
+    as ``__cause__`` so programmatic hooks can still inspect the low-level cause.
+    """
 
 
 class TangleApiClient(GeneratedTangleApiOperations):
@@ -144,6 +155,35 @@ class TangleApiClient(GeneratedTangleApiOperations):
             )
         return response
 
+    def _send_request(
+        self,
+        method: str,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        json_data: Any = None,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Issue a request, converting an unhandled transport failure to a clean error.
+
+        ``_make_request`` and every retry/redirect layer beneath it re-raise the
+        original ``requests`` exception subtypes, so callers that manage their own
+        retries -- and the transient-retry layer -- can classify and retry them.
+        This public boundary is where a failure that survived all of those layers
+        becomes a credential-safe :class:`TangleApiTransportError`. HTTP status
+        errors carry a response and stay the caller's responsibility, so they
+        propagate unchanged.
+        """
+
+        try:
+            return self._make_request(method, path, params=params, json_data=json_data, **kwargs)
+        except requests.exceptions.RequestException as exc:
+            if getattr(exc, "response", None) is not None:
+                raise
+            raise TangleApiTransportError(
+                format_transport_error(exc, method=method.upper(), url=self._safe_error_url(path)),
+                request=getattr(exc, "request", None),
+            ) from exc
+
     def _request_with_rate_limit_retries(
         self,
         method: str,
@@ -224,6 +264,9 @@ class TangleApiClient(GeneratedTangleApiOperations):
 
         for _ in range(self._MAX_REDIRECTS + 1):
             request_headers = self._headers(extra_headers)
+            # Transport failures raised here propagate untouched so the enclosing
+            # retry/rate-limit layers can classify them; conversion to a clean
+            # TangleApiTransportError happens once, at the _send_request boundary.
             response = self.session.request(
                 current_method,
                 current_url,
@@ -296,7 +339,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         response_model: Any = None,
     ) -> Any:
         formatted_path = self._format_path(path, path_params)
-        response = self._make_request(method, formatted_path, params=params, json_data=json_data)
+        response = self._send_request(method, formatted_path, params=params, json_data=json_data)
         response.raise_for_status()
         data = self._decode_response(response)
         if response_model is not None and isinstance(data, dict):
@@ -321,7 +364,29 @@ class TangleApiClient(GeneratedTangleApiOperations):
         )
 
     def _url(self, path: str) -> str:
-        return _join_operation_url(self.base_url, path)
+        """Build the absolute request URL, mapping a malformed base to a transport error.
+
+        ``_join_operation_url`` accesses the authority while joining, so a malformed
+        base URL (an unterminated IPv6 literal such as ``http://[::1``) raises a bare
+        ``ValueError`` during URL construction, before any request is issued.
+        Re-raising it as ``requests.exceptions.InvalidURL`` -- which carries no HTTP
+        response -- routes it through the same ``_send_request`` boundary as other
+        transport failures, so it surfaces as a credential-safe
+        :class:`TangleApiTransportError` instead of an unhandled ``ValueError``.
+        """
+
+        try:
+            return _join_operation_url(self.base_url, path)
+        except ValueError as exc:
+            raise requests.exceptions.InvalidURL(str(exc)) from exc
+
+    def _safe_error_url(self, path: str) -> str | None:
+        """Best-effort destination for an error message; a malformed base yields none."""
+
+        try:
+            return self._url(path)
+        except requests.exceptions.RequestException:
+            return None
 
     @staticmethod
     def _format_path(path: str, path_params: Mapping[str, Any] | None = None) -> str:
@@ -358,7 +423,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         return details
 
     def stream_execution_container_log(self, execution_id: str) -> requests.Response:
-        response = self._make_request(
+        response = self._send_request(
             "GET",
             self._format_path(
                 "/api/executions/{id}/stream_container_log",

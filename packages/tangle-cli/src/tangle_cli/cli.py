@@ -1,4 +1,10 @@
-from cyclopts import App
+from __future__ import annotations
+
+import sys
+from typing import Annotated
+
+import requests
+from cyclopts import App, Parameter
 
 from . import (
     __version__,
@@ -11,6 +17,7 @@ from . import (
     quickstart,
     secrets_cli,
 )
+from .api_transport import format_transport_error
 
 
 def version() -> None:
@@ -46,11 +53,56 @@ def build_app() -> App:
     app.command(quickstart.app)
     app.command(api_cli.build_app())
     app.command(build_sdk_app())
+
+    @app.meta.default
+    def launcher(*tokens: Annotated[str, Parameter(allow_leading_hyphen=True)]) -> None:
+        """Dispatch the requested command through the meta app.
+
+        The runner enters the CLI via ``app.meta`` so that a sibling branch which
+        registers global root options on ``app.meta.default`` (e.g. TLS flags that
+        must apply before dynamic schema discovery) composes here without this
+        module importing that feature: a merge keeps the richer launcher while
+        this runner keeps routing through it.
+        """
+
+        app(tokens)
+
     return app
 
 
+def run(tokens: list[str] | None = None) -> int:
+    """Dispatch the CLI, rendering transport failures as one clean stderr line.
+
+    The static requests client raises transport failures with no HTTP response;
+    they are printed without a traceback and mapped to a nonzero exit. HTTP status
+    errors carry a response and stay the command layer's responsibility, so they
+    are re-raised unchanged.
+    """
+
+    try:
+        build_app().meta(tokens)
+    except requests.exceptions.RequestException as exc:
+        if getattr(exc, "response", None) is not None:
+            raise
+        print(_transport_error_line(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+def _transport_error_line(exc: requests.exceptions.RequestException) -> str:
+    # The static client already formats its failures into a clean line, so only raw
+    # requests exceptions that bypassed it need formatting here. The client module is
+    # only inspected if it is already imported (it must be, to have raised the domain
+    # error), so local-only commands never load the generated API bindings.
+    client_module = sys.modules.get(f"{__package__}.client")
+    domain_error = getattr(client_module, "TangleApiTransportError", None)
+    if domain_error is not None and isinstance(exc, domain_error):
+        return str(exc)
+    return format_transport_error(exc)
+
+
 def main() -> None:
-    build_app()()
+    raise SystemExit(run())
 
 
 if __name__ == "__main__":
