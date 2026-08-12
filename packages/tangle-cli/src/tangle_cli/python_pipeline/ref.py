@@ -9,11 +9,98 @@ the tracer can call. Calling a :class:`CallableRef` inside a live
 """
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from .errors import CompileError
+from .graph import IS_ENABLED_UNSET
+
+_UNWRAPPED_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _flatten_unwrapped_arguments(
+    *,
+    task_id: str,
+    unwrap_names: tuple[str, ...],
+    arguments: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    """Flatten call-site dict values for ``@task(unwrap=...)`` tracing.
+
+    Args:
+        task_id: Concrete graph task ID for error messages and persisted
+            metadata.
+        unwrap_names: Original dict parameter names requested by the decorator.
+        arguments: Merged call-site and bound task arguments before emission.
+
+    Returns:
+        A pair ``(flattened_arguments, unwrapped_keys)``. Flattened arguments
+        replace each ``param={key: value}`` with synthetic entries such as
+        ``param__key=value`` so edge emission targets explicit inputs.
+        ``unwrapped_keys`` preserves the original key order per parameter for
+        later ``local_from_python.unwrapped_inputs`` schema persistence.
+
+    Raises:
+        CompileError: If an unwrap argument is missing, is not a dict, is empty,
+            contains invalid keys, or collides with another argument.
+    """
+    if not unwrap_names:
+        return dict(arguments), {}
+
+    unwrap_set = set(unwrap_names)
+    missing = [name for name in unwrap_names if name not in arguments]
+    if missing:
+        raise CompileError(
+            f"@task unwrap parameter {missing[0]!r} was not supplied when calling "
+            f"task {task_id!r}. Pass {missing[0]}={{...}} or remove it from unwrap=."
+        )
+
+    fixed_arg_names = set(arguments) - unwrap_set
+    flattened: dict[str, Any] = {}
+    unwrapped_keys: dict[str, list[str]] = {}
+
+    for name, value in arguments.items():
+        if name not in unwrap_set:
+            if name in flattened:
+                raise CompileError(f"duplicate task argument {name!r} for task {task_id!r}")
+            flattened[name] = value
+            continue
+
+        if not isinstance(value, Mapping):
+            raise CompileError(
+                f"@task unwrap parameter {name!r} expects a dict at call site for "
+                f"task {task_id!r}, got {type(value).__name__}."
+            )
+        if not value:
+            raise CompileError(
+                f"@task unwrap parameter {name!r} cannot be an empty dict for task {task_id!r}."
+            )
+
+        keys: list[str] = []
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise CompileError(
+                    f"@task unwrap parameter {name!r} for task {task_id!r} has a "
+                    f"non-string key {key!r}."
+                )
+            if not _UNWRAPPED_KEY_RE.fullmatch(key):
+                raise CompileError(
+                    f"@task unwrap parameter {name!r} for task {task_id!r} has key "
+                    f"{key!r}; keys may contain only letters, numbers, '_' and '-'."
+                )
+            input_name = f"{name}__{key}"
+            if input_name in fixed_arg_names or input_name in flattened:
+                raise CompileError(
+                    f"@task unwrap parameter {name!r} for task {task_id!r} produces "
+                    f"input {input_name!r}, which collides with another task argument."
+                )
+            flattened[input_name] = item
+            keys.append(key)
+        unwrapped_keys[name] = keys
+
+    return flattened, unwrapped_keys
 
 
 @dataclass(frozen=True)
@@ -49,10 +136,12 @@ class CallableRef:
     _task_source_path: Path | None = None
     _task_function_name: str | None = None
     _task_image: str | None = None
+    _task_image_id: str | None = None
     _task_dependencies_from: Path | None = None
     _task_mode: str | None = None
     _task_resolve_root: Path | None = None
     _task_custom_annotations: dict[str, str] | None = None
+    _task_unwrap: tuple[str, ...] = ()
     # ``@registered`` metadata. ``None`` for ``ref()``/``@task`` refs;
     # populated by the ``@registered`` decorator. Drives the compile-time
     # rewrite of the ``registered://pending`` sentinel URL to a
@@ -70,16 +159,45 @@ class CallableRef:
     # ------------------------------------------------------------------
     # Builders — all return a fresh CallableRef (immutable composition)
 
+    def _replace(self, **changes: Any) -> "CallableRef":
+        """Return a modified ref while preserving function-like dunders.
+
+        ``@task`` attaches ``__signature__`` / ``__wrapped__`` / annotations to the
+        original ref so codegen can introspect it like the decorated function.
+        ``dataclasses.replace`` does not copy those dynamic attributes, so fluent
+        helpers such as ``.named(...)`` must carry them forward explicitly.
+
+        Args:
+            **changes: Dataclass field overrides to pass to ``dataclasses.replace``.
+
+        Returns:
+            A new ``CallableRef`` with the requested field changes and the
+            dynamic introspection attributes needed by compile/hydrate codegen.
+        """
+        new_ref = replace(self, **changes)
+        for attr in (
+            "__name__",
+            "__qualname__",
+            "__module__",
+            "__doc__",
+            "__wrapped__",
+            "__signature__",
+            "__annotations__",
+        ):
+            if hasattr(self, attr):
+                object.__setattr__(new_ref, attr, getattr(self, attr))
+        return new_ref
+
     def bind(self, **kwargs: Any) -> "CallableRef":
         """Return a new CallableRef with ``kwargs`` merged into
         ``bound_kwargs``. Later .bind calls win on conflict."""
         merged = {**self.bound_kwargs, **kwargs}
-        return replace(self, bound_kwargs=merged)
+        return self._replace(bound_kwargs=merged)
 
     def named(self, task_id: str) -> "CallableRef":
         """Return a new CallableRef whose task ID will be ``task_id``
         instead of the LHS-derived auto ID."""
-        return replace(self, task_id_hint=task_id)
+        return self._replace(task_id_hint=task_id)
 
     def with_annotations(self, ann: dict[str, Any]) -> "CallableRef":
         """Return a new CallableRef with per-task annotations.
@@ -92,7 +210,7 @@ class CallableRef:
         # store as a dict to preserve user intent.
         for k, v in ann.items():
             merged[k] = v  # type: ignore[assignment]
-        return replace(self, annotations=merged)
+        return self._replace(annotations=merged)
 
     # ------------------------------------------------------------------
     # @task codegen — materialize() writes the component YAML.
@@ -174,7 +292,12 @@ class CallableRef:
     # ------------------------------------------------------------------
     # Trace-mode call site
 
-    def __call__(self, **kwargs: Any) -> Any:
+    def __call__(
+        self,
+        *,
+        is_enabled: Any = IS_ENABLED_UNSET,
+        **kwargs: Any,
+    ) -> Any:
         """Trace-mode invocation.
 
         Records a :class:`TaskNode` into the active :class:`GraphBuilder`
@@ -184,11 +307,17 @@ class CallableRef:
         call site (resolved via the AST pre-pass map stashed on the
         builder).
 
-        Edge kwargs (``wait_for`` / ``depends_on``) and regular kwargs
-        share one ``arguments`` dict in the IR; the value-vs-key
-        dispatch happens at emit time. ``.bind(...)`` kwargs are merged
-        in last so call-site kwargs win on conflict (same key) and come
-        first in insertion order (the bind block is appended).
+        ``is_enabled`` is task metadata, not a component input. It accepts a
+        boolean, string, graph input, or task output and is emitted as the
+        canonical ``isEnabled`` task field. If a component itself declares an
+        input named ``is_enabled``, bind that input with
+        ``ref(...).bind(is_enabled=...)``; bound kwargs remain component
+        arguments while the reserved call-site keyword remains task metadata,
+        so both may be used on the same task. Edge kwargs (``wait_for`` /
+        ``depends_on``) and regular kwargs share one ``arguments`` dict in the
+        IR; the value-vs-key dispatch happens at emit time. ``.bind(...)``
+        kwargs are merged in last so call-site kwargs win on conflict (same
+        key) and come first in insertion order (the bind block is appended).
         """
         # Local import keeps the @ref shell importable during early
         # bootstrap (and avoids the circular dep at module load).
@@ -227,12 +356,18 @@ class CallableRef:
 
         # Merge bound and call-site kwargs: call-site keys come first in
         # insertion order and win on conflict; bound keys are appended.
-        merged: dict[str, Any] = {}
+        raw_merged: dict[str, Any] = {}
         for k, v in kwargs.items():
-            merged[k] = v
+            raw_merged[k] = v
         for k, v in self.bound_kwargs.items():
-            if k not in merged:
-                merged[k] = v
+            if k not in raw_merged:
+                raw_merged[k] = v
+
+        merged, unwrapped_input_keys = _flatten_unwrapped_arguments(
+            task_id=task_id,
+            unwrap_names=self._task_unwrap,
+            arguments=raw_merged,
+        )
 
         node = TaskNode(
             task_id=task_id,
@@ -241,6 +376,7 @@ class CallableRef:
             ref_digest=self.ref_digest,
             arguments=merged,
             annotations=dict(self.annotations) if self.annotations else None,
+            is_enabled=is_enabled,
         )
         builder.add_task(node)
 
@@ -254,6 +390,8 @@ class CallableRef:
         # the other end of the URL).
         if self._task_source_path is not None:
             builder.task_refs_for_local_from_python.append((task_id, self))
+            if unwrapped_input_keys:
+                builder.task_unwrapped_input_keys[task_id] = unwrapped_input_keys
 
         # If this ref was produced by ``@registered``, record ``(task_id,
         # self)`` on the builder so the compile driver can rewrite this

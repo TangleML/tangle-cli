@@ -101,6 +101,36 @@ def test_validate_dehydrated_data_rejects_empty_tasks():
         validate_dehydrated_data(data)
 
 
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "false",
+        {"graphInput": {"inputName": "in1"}},
+        {"taskOutput": {"taskId": "extract", "outputName": "enabled"}},
+    ],
+)
+def test_validate_dehydrated_data_accepts_supported_is_enabled(condition):
+    data = _valid_pipeline()
+    data["implementation"]["graph"]["tasks"]["load"]["isEnabled"] = condition
+    validate_dehydrated_data(data)
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        False,
+        {"dynamicData": {"secret": {"name": "TOKEN"}}},
+        {"graphInput": "in1"},
+        {"taskOutput": {"taskId": "extract"}},
+    ],
+)
+def test_validate_dehydrated_data_rejects_unsupported_is_enabled(condition):
+    data = _valid_pipeline()
+    data["implementation"]["graph"]["tasks"]["load"]["isEnabled"] = condition
+    with pytest.raises(SchemaValidationError):
+        validate_dehydrated_data(data)
+
+
 # ---------------------------------------------------------------------------
 # Template-delimiter output contract.
 
@@ -207,6 +237,17 @@ def test_validate_dehydrated_pipeline_rejects_undeclared_graph_input():
     with pytest.raises(SchemaValidationError) as exc:
         validate_dehydrated_pipeline(data)
     assert "nope" in str(exc.value)
+
+
+def test_validate_dehydrated_pipeline_checks_is_enabled_references():
+    data = _valid_pipeline()
+    data["implementation"]["graph"]["tasks"]["load"]["isEnabled"] = {
+        "taskOutput": {"taskId": "missing", "outputName": "enabled"}
+    }
+    with pytest.raises(SchemaValidationError) as exc:
+        validate_dehydrated_pipeline(data)
+    assert "tasks.load.isEnabled" in str(exc.value)
+    assert "missing" in str(exc.value)
 
 
 def test_validate_dehydrated_pipeline_rejects_output_value_without_output():
