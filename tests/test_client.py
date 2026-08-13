@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import threading
+import time
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -89,9 +93,19 @@ def test_get_run_pipeline_spec_reads_generated_run_response_directly(monkeypatch
     client.executions_details.assert_called_once_with("root-exec-1")
 
 
+class _TimeoutSocket:
+    def __init__(self) -> None:
+        self.timeouts: list[float | None] = []
+
+    def settimeout(self, value: float | None) -> None:
+        self.timeouts.append(value)
+
+
 def _tracked_stream_response(raw: Any, status_code: int = 200) -> requests.Response:
     """A streaming-style response reading from ``raw`` that records ``close()`` in ``_closed``."""
 
+    if not hasattr(raw, "connection"):
+        raw.connection = SimpleNamespace(sock=_TimeoutSocket())
     r = requests.Response()
     r.status_code = status_code
     r.raw = raw
@@ -113,6 +127,63 @@ def _stream_response(lines: list[bytes] | None = None, status_code: int = 200) -
     return _tracked_stream_response(io.BytesIO(body), status_code)
 
 
+@contextmanager
+def _local_http_server(handler: type[BaseHTTPRequestHandler]):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_stream_open_header_stall_is_bounded() -> None:
+    class HeaderStallHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            time.sleep(0.5)
+
+        def log_message(self, _format: str, *args: Any) -> None:
+            pass
+
+    with _local_http_server(HeaderStallHandler) as base_url:
+        client = TangleApiClient(base_url, timeout=0.1)
+        client._MAX_STREAM_OPEN_ATTEMPTS = 1
+        started = time.monotonic()
+        with pytest.raises(requests.ReadTimeout):
+            client.stream_execution_container_log("exec-1")
+        elapsed = time.monotonic() - started
+
+    assert 0.05 <= elapsed < 0.4
+
+
+def test_stream_quiet_body_read_is_unbounded_after_headers() -> None:
+    class QuietBodyHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", "5")
+            self.end_headers()
+            self.wfile.flush()
+            time.sleep(0.25)
+            self.wfile.write(b"line\n")
+            self.wfile.flush()
+
+        def log_message(self, _format: str, *args: Any) -> None:
+            pass
+
+    with _local_http_server(QuietBodyHandler) as base_url:
+        client = TangleApiClient(base_url, timeout=0.1)
+        client._MAX_STREAM_OPEN_ATTEMPTS = 1
+        lines = list(client.iter_execution_container_log_lines("exec-1"))
+
+    assert lines == ["line"]
+
+
 def test_stream_execution_container_log_yields_lines_and_closes() -> None:
     stream = _stream_response([b"line-1", b"line-2", b"line-3"])
     session = _FakeSession([stream])
@@ -124,9 +195,24 @@ def test_stream_execution_container_log_yields_lines_and_closes() -> None:
     assert stream._closed is True
     assert session.calls[0]["url"] == "https://api.test/api/executions/exec-1/stream_container_log"
     assert session.calls[0]["stream"] is True
-    # The follow stream keeps the connect timeout but has no per-read timeout,
-    # so a healthy stream that is idle (container quiet) is never killed.
-    assert session.calls[0]["timeout"] == (client.timeout, None)
+    # Opening, including the response headers, remains bounded. Only the
+    # accepted response socket is changed to unbounded idle for body reads.
+    assert session.calls[0]["timeout"] == (client.timeout, client.timeout)
+    assert stream.raw.connection.sock.timeouts == [None]
+
+
+def test_stream_open_closes_when_body_timeout_cannot_be_disabled() -> None:
+    stream = _tracked_stream_response(io.BytesIO(b"line\n"))
+    stream.raw.connection = SimpleNamespace(sock=object())
+    client = TangleApiClient("https://api.test", session=_FakeSession([stream]))
+
+    with pytest.raises(
+        requests.ConnectionError,
+        match="opened log stream but could not disable the body read timeout",
+    ):
+        client.stream_execution_container_log("exec-1")
+
+    assert stream._closed is True
 
 
 def test_stream_execution_container_log_closes_on_early_break() -> None:

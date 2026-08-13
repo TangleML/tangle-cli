@@ -55,8 +55,10 @@ class TangleApiClient(GeneratedTangleApiOperations):
     _MAX_RETRY_AFTER_SECONDS = 60.0
     # Opening a log stream retries transient failures (transport-open errors
     # and retryable 5xx) with doubling backoff, spent entirely before any line
-    # is yielded. An already-open stream that drops is the caller's to handle;
-    # never re-opening an established stream means lines cannot be duplicated.
+    # is yielded. Connect and response-header reads are bounded; after the final
+    # response is accepted, only its body socket is reset to unbounded idle.
+    # An already-open stream that drops is the caller's to handle; never
+    # re-opening an established stream means lines cannot be duplicated.
     _RETRYABLE_STREAM_STATUSES = frozenset({500, 502, 503, 504})
     _MAX_STREAM_OPEN_ATTEMPTS = 7
     _STREAM_OPEN_BACKOFF_SECONDS = 1.0
@@ -403,6 +405,37 @@ class TangleApiClient(GeneratedTangleApiOperations):
         self._enrich_execution_tree(details)
         return details
 
+    @staticmethod
+    def _make_stream_body_idle_unbounded(response: requests.Response) -> None:
+        """Clear the accepted response socket's timeout for quiet body reads.
+
+        ``requests`` has no public API for using a finite response-header timeout
+        followed by an unbounded streamed-body timeout. Keep the locked
+        requests 2.34.2 / urllib3 2.7.0 transport access isolated here and
+        fail closed if their response layout changes.
+        """
+
+        raw = response.raw
+        socket = None
+        try:
+            socket = raw._fp.fp.raw._sock  # type: ignore[attr-defined]
+        except AttributeError:
+            connection = getattr(raw, "connection", None)
+            socket = getattr(connection, "sock", None)
+        settimeout = getattr(socket, "settimeout", None)
+        if not callable(settimeout):
+            response.close()
+            raise requests.ConnectionError(
+                "opened log stream but could not disable the body read timeout"
+            )
+        try:
+            settimeout(None)
+        except Exception as exc:
+            response.close()
+            raise requests.ConnectionError(
+                "opened log stream but could not disable the body read timeout"
+            ) from exc
+
     def stream_execution_container_log(self, execution_id: str) -> requests.Response:
         """Open the streaming container-log response for ``execution_id``.
 
@@ -418,10 +451,11 @@ class TangleApiClient(GeneratedTangleApiOperations):
         immediately. Once the stream is open the caller owns the response and
         must close it; :meth:`iter_execution_container_log_lines` does that.
 
-        The request uses ``(connect, read)`` timeouts of ``(self.timeout,
-        None)``: the connect timeout still bounds opening the stream, but there
-        is no per-read timeout, because a healthy follow stream stays silent for
-        as long as the container emits no output.
+        The request uses finite ``(connect, read)`` timeouts of
+        ``(self.timeout, self.timeout)`` through receipt of the final response
+        headers. Once that response is accepted, its body socket alone is reset
+        to an unbounded idle timeout, because a healthy follow stream can stay
+        silent for as long as the container emits no output.
         """
 
         path = self._format_path(
@@ -434,7 +468,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
         for attempt in range(1, self._MAX_STREAM_OPEN_ATTEMPTS + 1):
             try:
                 response = self._make_request(
-                    "GET", path, stream=True, timeout=(self.timeout, None)
+                    "GET", path, stream=True, timeout=(self.timeout, self.timeout)
                 )
             except (requests.HTTPError, requests.TooManyRedirects) as exc:
                 # Same-origin redirect guard errors carry the rejected streamed
@@ -469,6 +503,7 @@ class TangleApiClient(GeneratedTangleApiOperations):
                 # streamed response before propagating so it is not leaked.
                 response.close()
                 raise
+            self._make_stream_body_idle_unbounded(response)
             return response
         if last_exc is not None:
             raise last_exc

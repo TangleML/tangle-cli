@@ -12,6 +12,7 @@ import yaml
 from tangle_cli import cli
 from tangle_cli.pipeline_hydrator import PipelineHydrator
 from tangle_cli.pipelines import (
+    _dependency_edges,
     collect_pipeline_spec_errors,
     load_pipeline_schema,
     validate_component_inputs,
@@ -76,6 +77,16 @@ def test_sdk_help_includes_pipelines(capsys):
     assert "pipelines" in output
     assert "published-components" in output
     assert "secrets" in output
+
+
+def test_pipelines_compile_help_includes_image_override(capsys):
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipelines", "compile", "--help"])
+
+    output = capsys.readouterr().out
+    assert "--image" in output
+    assert "ID=REF" in output
 
 
 def test_sdk_pipelines_help_lists_local_commands(capsys):
@@ -189,6 +200,32 @@ def test_pipelines_validate_fails_for_invalid_yaml(tmp_path: Path):
     assert "unknown task 'missing'" in str(exc_info.value)
 
 
+def test_pipeline_validation_treats_is_enabled_task_output_as_dependency():
+    pipeline = _minimal_valid_pipeline()
+    tasks = pipeline["implementation"]["graph"]["tasks"]
+    tasks["extract"]["isEnabled"] = {
+        "taskOutput": {"taskId": "load", "outputName": "enabled"}
+    }
+
+    errors = collect_pipeline_spec_errors(pipeline)
+
+    assert ("load", "extract") in _dependency_edges(tasks)
+    assert any("dependency cycle" in error for error in errors)
+
+
+def test_pipeline_validation_rejects_unknown_is_enabled_reference():
+    pipeline = _minimal_valid_pipeline()
+    pipeline["implementation"]["graph"]["tasks"]["load"]["isEnabled"] = {
+        "taskOutput": {"taskId": "missing", "outputName": "enabled"}
+    }
+
+    errors = collect_pipeline_spec_errors(pipeline)
+
+    assert any(
+        "isEnabled references unknown task 'missing'" in error for error in errors
+    )
+
+
 def test_pipelines_validate_rejects_non_string_task_ids(tmp_path: Path):
     pipeline_path = _write_pipeline(
         tmp_path / "pipeline.yaml",
@@ -244,6 +281,17 @@ def test_pipeline_schema_validation_rejects_wrong_root_input_type():
     errors = validate_pipeline_schema(pipeline)
 
     assert any("'inputs' must be array, got str" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [False, {"dynamicData": {"secret": {"name": "TOKEN"}}}],
+)
+def test_pipeline_schema_rejects_backend_unsupported_is_enabled(condition):
+    pipeline = _minimal_valid_pipeline()
+    pipeline["implementation"]["graph"]["tasks"]["load"]["isEnabled"] = condition
+
+    assert validate_pipeline_schema(pipeline)
 
 
 def _component_spec(
@@ -960,6 +1008,7 @@ def _write_local_from_python_pipeline(
     *,
     mode: str | None = None,
     resolve_root: str | None = None,
+    unwrapped_inputs: dict[str, object] | None = None,
 ) -> Path:
     gen_config = {
         "file": python_file,
@@ -969,6 +1018,8 @@ def _write_local_from_python_pipeline(
         gen_config["mode"] = mode
     if resolve_root is not None:
         gen_config["resolve_root"] = resolve_root
+    if unwrapped_inputs is not None:
+        gen_config["unwrapped_inputs"] = unwrapped_inputs
     _write_pipeline(
         project_dir / "components.resolve.yaml",
         {"generated": {"local_from_python": gen_config}},
@@ -1059,6 +1110,48 @@ def test_pipelines_hydrate_local_from_python_forwards_bundle_mode_and_resolve_ro
     assert calls[0]["python_file"] == python_file.resolve()
     assert calls[0]["mode"] == "bundle"
     assert calls[0]["resolve_root"] == src_dir.resolve()
+
+
+def test_pipelines_hydrate_local_from_python_forwards_unwrapped_inputs(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from tangle_cli import pipeline_hydrator as hydrator_module
+    from tangle_cli.pipelines import hydrate_pipeline_file
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    python_file = project_dir / "component.py"
+    python_file.write_text("# trusted project component\n", encoding="utf-8")
+    unwrapped_inputs = {
+        "run_data": {
+            "input_prefix": "run_data__",
+            "value_type": "String",
+            "keys": [
+                {"key": "shop", "input_name": "run_data__shop", "type": "String"},
+            ],
+        }
+    }
+    pipeline_path = _write_local_from_python_pipeline(
+        project_dir,
+        "./component.py",
+        unwrapped_inputs=unwrapped_inputs,
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_regenerate_yaml(**kwargs):
+        calls.append(kwargs)
+        kwargs["output_path"].write_text(
+            "name: Generated Component\nimplementation:\n  container:\n    image: busybox\n",
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr(hydrator_module, "regenerate_yaml", fake_regenerate_yaml)
+
+    hydrate_pipeline_file(pipeline_path)
+
+    assert calls[0]["unwrapped_inputs"] == unwrapped_inputs
 
 
 def test_pipelines_hydrate_local_from_python_refuses_untrusted_absolute_path(

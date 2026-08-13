@@ -65,10 +65,12 @@ def task(
     *,
     env: TaskEnv | None = None,
     image: str | None = None,
+    image_id: str | None = None,
     dependencies_from: str | Path | None = None,
     mode: str | None = None,
     resolve_root: str | Path | None = None,
     annotations: dict[str, Any] | None = None,
+    unwrap: str | list[str] | tuple[str, ...] | None = None,
 ) -> Callable[[Callable[..., Any]], CallableRef]:
     """Decorator: turn a Python function into a Tangle component ref.
 
@@ -95,6 +97,10 @@ def task(
             written verbatim into the emitted
             ``components.yaml#local_from_python.image`` field. Overrides
             ``env.image`` when both are given.
+        image_id: Logical image identifier resolved at compile time via
+            registered defaults or ``tangle sdk pipelines compile --image
+            ID=REF`` overrides. Ignored when explicit ``image=`` supplies
+            an image; otherwise it also overrides ``env.image``.
         dependencies_from: Path to a ``pyproject.toml`` (or any file
             the hydrator understands) that declares pip
             dependencies. Resolved relative to the caller's source
@@ -111,6 +117,12 @@ def task(
             ``components.yaml#local_from_python.resolve_root``.
         annotations: Extra annotations to merge into the emitted
             component's ``metadata.annotations`` block.
+        unwrap: Optional dict parameter name (or names) whose call-site
+            ``dict`` value should be flattened into explicit component inputs.
+            For example ``unwrap="run_data"`` turns
+            ``run_data={"run_id_1": task.output}`` into a component input
+            named ``run_data__run_id_1`` and reconstructs the original dict in
+            the generated runtime wrapper.
 
     Returns:
         A decorator that, given the user's function, returns a
@@ -138,7 +150,11 @@ def task(
     # overrides the corresponding ``env`` field; otherwise the env value
     # (if any) is used. This mirrors YAML anchor semantics: start from the
     # declared-once defaults, override locally where needed.
-    effective_image = image if image is not None else (env.image if env else None)
+    effective_image = (
+        image
+        if image is not None
+        else (None if image_id is not None else (env.image if env else None))
+    )
     effective_deps_raw = (
         dependencies_from
         if dependencies_from is not None
@@ -157,7 +173,35 @@ def task(
     if mode is not None and mode not in {"inline", "bundle"}:
         raise ValueError("@task(mode=...) must be 'inline', 'bundle', or None")
 
+    if unwrap is None:
+        unwrap_names: tuple[str, ...] = ()
+    elif isinstance(unwrap, str):
+        unwrap_names = (unwrap,)
+    elif isinstance(unwrap, (list, tuple)) and all(isinstance(name, str) for name in unwrap):
+        unwrap_names = tuple(unwrap)
+    else:
+        raise TypeError("@task(unwrap=...) expects a string, a list/tuple of strings, or None")
+    if len(set(unwrap_names)) != len(unwrap_names):
+        raise ValueError("@task(unwrap=...) contains duplicate parameter names")
+    for name in unwrap_names:
+        if not name.isidentifier():
+            raise ValueError(
+                "@task(unwrap=...) names must be valid Python parameter names; "
+                f"got {name!r}"
+            )
+
     def decorator(fn: Callable[..., Any]) -> CallableRef:
+        """Capture a task function as a traceable ``CallableRef``.
+
+        Args:
+            fn: The user-authored Python function being decorated.
+
+        Returns:
+            A ``CallableRef`` carrying source, image, dependency, generation,
+            annotation, and unwrap metadata. The unwrap names are stored on the
+            ref so trace-time calls can flatten matching dict arguments and the
+            compiler can persist ``local_from_python.unwrapped_inputs``.
+        """
         # Capture the absolute path of the source file the user wrote
         # the function in. ``inspect.getfile`` raises TypeError for
         # builtins / dynamically-built functions; the @task path
@@ -202,10 +246,12 @@ def task(
             _task_source_path=source_path,
             _task_function_name=function_name,
             _task_image=effective_image,
+            _task_image_id=image_id,
             _task_dependencies_from=deps_path,
             _task_mode=mode,
             _task_resolve_root=resolve_root_path,
             _task_custom_annotations=dict(annotations) if annotations else None,
+            _task_unwrap=unwrap_names,
         )
 
         # Expose function-like introspection so ``tangle_cli``'s

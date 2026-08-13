@@ -2843,6 +2843,22 @@ def test_stream_logs_open_transport_error_is_clean() -> None:
         manager.stream_logs("exec-1")
 
 
+def test_stream_logs_body_timeout_reset_error_is_clean() -> None:
+    class UnconfigurableStreamClient(FakeClient):
+        def iter_execution_container_log_lines(self, id: str):
+            raise requests.ConnectionError(
+                "opened log stream but could not disable the body read timeout"
+            )
+
+    manager = pipeline_run_manager.PipelineRunManager(client=UnconfigurableStreamClient())
+
+    with pytest.raises(
+        PipelineRunError, match="Failed to open log stream for execution exec-1"
+    ) as exc_info:
+        manager.stream_logs("exec-1")
+    assert "could not disable the body read timeout" in str(exc_info.value)
+
+
 def test_pipeline_runs_logs_stream_open_failure_exits_cleanly(monkeypatch) -> None:
     class RefusingClient(FakeClient):
         def iter_execution_container_log_lines(self, id: str):

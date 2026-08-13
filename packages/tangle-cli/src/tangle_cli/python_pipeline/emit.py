@@ -4,7 +4,7 @@ Canonical top-level key order:
     name, description, metadata, inputs, outputs, implementation
 
 Per-task key order:
-    annotations?, componentRef, arguments
+    annotations?, componentRef, arguments?, isEnabled?
 
 Argument values are emitted in the runnable ``ArgumentValue`` shape,
 dispatched purely on the VALUE's runtime type — never on the argument
@@ -38,7 +38,7 @@ from typing import Any
 
 from .dynamic_data import DynamicData
 from .errors import CompileError, InvalidArgumentTypeError
-from .graph import EdgeRef, GraphBuilder, TaskNode
+from .graph import IS_ENABLED_UNSET, EdgeRef, GraphBuilder, TaskNode
 from .placeholders import GraphInputPlaceholder, TaskOutputProxy
 from .raw import Raw
 
@@ -141,7 +141,7 @@ def _emit_task(
     node: TaskNode, task_path: str, exempt_paths: set[str]
 ) -> dict[str, Any]:
     """Build the per-task body dict in canonical key order:
-    ``annotations?, componentRef, arguments``.
+    ``annotations?, componentRef, arguments?, isEnabled?``.
 
     ``task_path`` is this task's dot-delimited JSON path
     (``implementation.graph.tasks.<task_id>``); each argument's path is
@@ -163,6 +163,9 @@ def _emit_task(
             k: _emit_argument_value(k, v, f"{args_path}.{k}", exempt_paths)
             for k, v in node.arguments.items()
         }
+
+    if node.is_enabled is not IS_ENABLED_UNSET:
+        body["isEnabled"] = _emit_is_enabled(node.is_enabled)
 
     return body
 
@@ -280,6 +283,36 @@ def _validate_constant(value: Any, key: str) -> None:
         "non-string values to a string explicitly in your pipeline code "
         "(for example json.dumps(...) or str(...)) before passing them as "
         "task arguments."
+    )
+
+
+def _emit_is_enabled(value: Any) -> Any:
+    """Render task-level conditional metadata in the backend contract.
+
+    Python booleans are normalized to lowercase strings because runnable
+    Tangle schemas and the backend evaluator do not accept raw JSON/YAML
+    booleans. String constants and graph/task references use the same wire
+    shapes as runnable argument values. Other value forms, including
+    ``DynamicData`` and ``Raw``, are intentionally unsupported by the backend
+    condition evaluator and fail at compile time.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, TaskOutputProxy):
+        return {
+            "taskOutput": {
+                "taskId": value._task_id,
+                "outputName": value._resolved_output_name(),
+            }
+        }
+    if isinstance(value, GraphInputPlaceholder):
+        return {"graphInput": {"inputName": value.input_name}}
+    if isinstance(value, str):
+        return value
+    raise InvalidArgumentTypeError(
+        f"unsupported is_enabled value type {type(value).__name__!r}. "
+        "Task conditions only support bool, string constants, graphInput, "
+        "or taskOutput; booleans are serialized as lowercase strings."
     )
 
 

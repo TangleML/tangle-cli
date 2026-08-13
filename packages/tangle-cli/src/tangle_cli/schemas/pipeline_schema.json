@@ -934,9 +934,6 @@
               "$ref": "#/$defs/TaskOutputArgument"
             },
             {
-              "$ref": "#/$defs/DynamicDataArgument"
-            },
-            {
               "type": "null"
             }
           ],
@@ -1892,9 +1889,6 @@
                     },
                     {
                       "$ref": "#/$defs/TaskOutputArgument"
-                    },
-                    {
-                      "$ref": "#/$defs/DynamicDataArgument"
                     },
                     {
                       "type": "null"
