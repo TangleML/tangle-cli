@@ -258,6 +258,7 @@ def compile_pipeline_file(
     overrides: Mapping[str, str] | None = None,
     pipeline_name: str | None = None,
     emit_components_sidecar: bool = True,
+    image_overrides: Mapping[str, str] | None = None,
     logger: Any | None = None,
 ) -> CompileResult:
     """Compile a Python-authored pipeline to a dehydrated YAML bundle.
@@ -284,6 +285,7 @@ def compile_pipeline_file(
             overrides=dict(overrides) if overrides else None,
             pipeline_name=pipeline_name,
             emit_components_sidecar=emit_components_sidecar,
+            image_overrides=dict(image_overrides) if image_overrides else None,
         )
     except (CompileError, SchemaValidationError) as exc:
         raise PipelineValidationError(str(exc)) from exc
@@ -415,6 +417,11 @@ def _dependency_edges(tasks: Mapping[str, Any]) -> set[tuple[str, str]]:
                 if isinstance(dependency, str) and dependency in task_names:
                     edges.add((dependency, target))
         for referenced_task in _extract_task_output_refs(task_spec.get("arguments", {})):
+            if referenced_task in task_names:
+                edges.add((referenced_task, target))
+        for referenced_task in _extract_task_output_refs(
+            task_spec.get("isEnabled")
+        ):
             if referenced_task in task_names:
                 edges.add((referenced_task, target))
 

@@ -138,6 +138,18 @@ def _parse_overrides(values: list[str] | None) -> dict[str, str]:
     return parsed
 
 
+def _parse_image_overrides(values: list[str] | None) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for value in values or []:
+        if "=" not in value:
+            raise SystemExit("--image entries must use ID=REF syntax")
+        image_id, image_ref = value.split("=", 1)
+        if not image_id or not image_ref:
+            raise SystemExit("--image entries must use ID=REF syntax")
+        parsed[image_id] = image_ref
+    return parsed
+
+
 @app.command(name="hydrate")
 def pipelines_hydrate(
     pipeline_path: pathlib.Path,
@@ -266,6 +278,17 @@ def pipelines_compile(
             negative_iterable=(),
         ),
     ] = None,
+    image: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--image",
+            help=(
+                "Compile-time image-id override as ID=REF for @task(image_id=ID). "
+                "Repeat for multiple IDs."
+            ),
+            negative_iterable=(),
+        ),
+    ] = None,
     log_type: LogTypeOption = "console",
 ) -> None:
     """Compile a Python-authored pipeline to a dehydrated YAML bundle."""
@@ -276,6 +299,7 @@ def pipelines_compile(
             pipeline_path,
             output,
             overrides=_parse_overrides(override),
+            image_overrides=_parse_image_overrides(image),
             pipeline_name=pipeline,
             logger=logger,
         )

@@ -15,7 +15,10 @@ handle that mirrors :class:`tangle_cli.python_pipeline.ref.CallableRef`
 ergonomics (``.bind`` / ``.named`` / ``.with_annotations`` and call-site
 kwargs). Calling the handle inside an active ``@pipeline`` trace records
 ONE parent task (never the child's internals) and returns a
-:class:`tangle_cli.python_pipeline.placeholders.TaskOutputProxy`.
+:class:`tangle_cli.python_pipeline.placeholders.TaskOutputProxy`. Tangle only
+supports conditional execution for container-component tasks, so the reserved
+call-site ``is_enabled=`` metadata keyword is rejected on subpipeline boundary
+(graph-component) tasks.
 
 The child body is NOT executed into the parent's :class:`GraphBuilder`.
 The compile driver (a later milestone) reads the recorded child
@@ -120,6 +123,11 @@ class SubpipelineRef:
         declared outputs (derived from the child's return annotation) so
         unknown named access fails early and a bare proxy resolves to a
         default output only when unambiguous.
+
+        ``is_enabled`` at the call site is rejected because Tangle does not
+        evaluate conditions on graph-component tasks. A child graph input with
+        that name remains available through ``.bind(is_enabled=...)``, matching
+        the reserved-metadata collision convention used by ``CallableRef``.
         """
         import sys
 
@@ -135,6 +143,15 @@ class SubpipelineRef:
                 "subpipeline(child)(...) requires an active @pipeline trace "
                 "context. Either call this inside a function decorated with "
                 "@pipeline, or compile the script with `tangle sdk pipelines compile`."
+            )
+
+        if "is_enabled" in kwargs:
+            raise CompileError(
+                "subpipeline tasks do not support call-site is_enabled= because "
+                "Tangle conditional execution is limited to container-component "
+                "tasks. Apply conditions to tasks inside the child pipeline. If "
+                "the child declares a graph input named 'is_enabled', pass that "
+                "input with .bind(is_enabled=...)."
             )
 
         # Resolve the parent task ID. ``.named(...)`` always wins over the
