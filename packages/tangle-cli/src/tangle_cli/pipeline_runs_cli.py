@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 from typing import Annotated, Any
@@ -34,6 +35,9 @@ from .pipeline_run_manager import (
     PipelineRunHooks,
     PipelineRunManager,
     TaskStatusesFailed,
+    merge_secret_run_args,
+    normalize_arg_secret_config,
+    parse_arg_secret_entries,
     parse_json_or_key_values,
     parse_key_value_entries,
 )
@@ -136,6 +140,17 @@ def pipeline_runs_submit(
         Parameter(help="Pipeline argument as KEY=VALUE. Repeat for multiple.", negative_iterable=()),
     ] = None,
     args_json: Annotated[str | None, Parameter(help="Pipeline arguments as a JSON object.")] = None,
+    arg_secret: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--arg-secret",
+            help=(
+                "Pipeline argument bound to a Tangle secret as INPUT=SECRET_NAME. "
+                "Repeat for multiple."
+            ),
+            negative_iterable=(),
+        ),
+    ] = None,
     annotation: Annotated[
         list[str] | None,
         Parameter(help="Run annotation as KEY=VALUE. Repeat for multiple.", negative_iterable=()),
@@ -187,6 +202,8 @@ def pipeline_runs_submit(
         "arg": (arg, None),
         "args_json": (args_json, None),
         "args_config": ("args", None, None, True),
+        "arg_secret": (arg_secret, None),
+        "arg_secrets_config": ("arg_secrets", None, None, True),
         "annotation": (annotation, None),
         "hydrate": (hydrate, True),
         "dry_run": (dry_run, None),
@@ -199,8 +216,11 @@ def pipeline_runs_submit(
     }
 
     def action(manager: PipelineRunManager, args: ArgsContainer) -> dict[str, Any]:
+        run_args = parse_json_or_key_values(args.args_json or args.args_config, args.arg)
+        secret_names = normalize_arg_secret_config(args.arg_secrets_config)
+        secret_names.update(parse_arg_secret_entries(args.arg_secret))
         kwargs = {
-            "run_args": parse_json_or_key_values(args.args_json or args.args_config, args.arg),
+            "run_args": merge_secret_run_args(run_args, secret_names),
             "annotations": parse_key_value_entries(args.annotation),
             "hydrate": bool(args.hydrate),
             "run_as": args.run_as,
@@ -438,6 +458,14 @@ def pipeline_runs_task_wait(
 def pipeline_runs_logs(
     execution_id: str | None = None,
     *,
+    stream: Annotated[
+        bool | None,
+        Parameter(
+            help="Follow the live log stream instead of fetching a one-shot snapshot. "
+            "The follow has no read timeout and stays open silently while the "
+            "container emits no output."
+        ),
+    ] = None,
     base_url: BaseUrlOption = None,
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
@@ -448,11 +476,24 @@ def pipeline_runs_logs(
     """Print Tangle API container logs for an execution id."""
     specs = {
         "execution_id": (execution_id,),
+        "stream": (stream, None),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
 
     def action(manager: PipelineRunManager, args: ArgsContainer) -> object:
+        if args.stream:
+            try:
+                for line in manager.stream_logs(args.execution_id):
+                    print(line, flush=True)
+            except BrokenPipeError:
+                # The downstream reader closed the pipe (e.g. `... | head`).
+                # Point stdout at devnull so the interpreter's exit-time flush
+                # of the closed pipe cannot raise a second BrokenPipeError.
+                devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull_fd, sys.stdout.fileno())
+                os.close(devnull_fd)
+            return None
         result = manager.logs(args.execution_id)
         if isinstance(result, dict) and isinstance(result.get("log_text"), str):
             print(result["log_text"], end="" if result["log_text"].endswith("\n") else "\n")

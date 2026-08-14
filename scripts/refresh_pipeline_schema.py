@@ -42,6 +42,36 @@ def fetch_tangle_structures() -> str:
     return response.text
 
 
+def _narrow_task_condition_schema(value: Any) -> None:
+    """Align generated ``isEnabled`` schemas with backend evaluation support.
+
+    The pinned Pydantic model types task conditions like general arguments and
+    therefore includes ``DynamicDataArgument``. The backend condition evaluator
+    only supports constants, graph inputs, and task outputs, so keep refreshes
+    from widening the vendored validation contract accidentally.
+    """
+    if isinstance(value, dict):
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            condition = properties.get("isEnabled")
+            if isinstance(condition, dict) and isinstance(
+                condition.get("anyOf"), list
+            ):
+                condition["anyOf"] = [
+                    variant
+                    for variant in condition["anyOf"]
+                    if not (
+                        isinstance(variant, dict)
+                        and variant.get("$ref") == "#/$defs/DynamicDataArgument"
+                    )
+                ]
+        for nested in value.values():
+            _narrow_task_condition_schema(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _narrow_task_condition_schema(nested)
+
+
 def generate_schema(source_text: str) -> dict[str, Any]:
     import pydantic
 
@@ -64,7 +94,7 @@ def generate_schema(source_text: str) -> dict[str, Any]:
     adapter = pydantic.TypeAdapter(graph_spec)
     adapter.rebuild(_types_namespace=namespace)
     graph_schema = adapter.json_schema()
-    return {
+    schema = {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "Tangle Pipeline Schema (generated from TangleML)",
         "type": "object",
@@ -90,6 +120,8 @@ def generate_schema(source_text: str) -> dict[str, Any]:
             "generatedBy": "scripts/refresh_pipeline_schema.py",
         },
     }
+    _narrow_task_condition_schema(schema)
+    return schema
 
 
 def main() -> None:
