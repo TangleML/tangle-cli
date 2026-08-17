@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import sys
 from typing import Annotated, Any
 
 from cyclopts import App, Parameter
@@ -32,6 +34,10 @@ from .pipeline_run_manager import (
     PipelineRunError,
     PipelineRunHooks,
     PipelineRunManager,
+    TaskStatusesFailed,
+    merge_secret_run_args,
+    normalize_arg_secret_config,
+    parse_arg_secret_entries,
     parse_json_or_key_values,
     parse_key_value_entries,
 )
@@ -134,6 +140,17 @@ def pipeline_runs_submit(
         Parameter(help="Pipeline argument as KEY=VALUE. Repeat for multiple.", negative_iterable=()),
     ] = None,
     args_json: Annotated[str | None, Parameter(help="Pipeline arguments as a JSON object.")] = None,
+    arg_secret: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--arg-secret",
+            help=(
+                "Pipeline argument bound to a Tangle secret as INPUT=SECRET_NAME. "
+                "Repeat for multiple."
+            ),
+            negative_iterable=(),
+        ),
+    ] = None,
     annotation: Annotated[
         list[str] | None,
         Parameter(help="Run annotation as KEY=VALUE. Repeat for multiple.", negative_iterable=()),
@@ -185,6 +202,8 @@ def pipeline_runs_submit(
         "arg": (arg, None),
         "args_json": (args_json, None),
         "args_config": ("args", None, None, True),
+        "arg_secret": (arg_secret, None),
+        "arg_secrets_config": ("arg_secrets", None, None, True),
         "annotation": (annotation, None),
         "hydrate": (hydrate, True),
         "dry_run": (dry_run, None),
@@ -197,8 +216,11 @@ def pipeline_runs_submit(
     }
 
     def action(manager: PipelineRunManager, args: ArgsContainer) -> dict[str, Any]:
+        run_args = parse_json_or_key_values(args.args_json or args.args_config, args.arg)
+        secret_names = normalize_arg_secret_config(args.arg_secrets_config)
+        secret_names.update(parse_arg_secret_entries(args.arg_secret))
         kwargs = {
-            "run_args": parse_json_or_key_values(args.args_json or args.args_config, args.arg),
+            "run_args": merge_secret_run_args(run_args, secret_names),
             "annotations": parse_key_value_entries(args.annotation),
             "hydrate": bool(args.hydrate),
             "run_as": args.run_as,
@@ -355,10 +377,95 @@ def pipeline_runs_wait(
     )
 
 
+@app.command(name="task-status")
+def pipeline_runs_task_status(
+    root_execution_id: str | None = None,
+    *,
+    base_url: BaseUrlOption = None,
+    token: TokenOption = None,
+    auth_header: AuthHeaderOption = None,
+    header: HeaderOption = None,
+    config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
+) -> None:
+    """Print the {task_name: status} map for a root execution id, without polling.
+
+    Walks the root execution's child task executions. A leaf/root-only execution
+    reports a single ``{"root": status}`` entry; unresolved children are UNKNOWN.
+    """
+    specs = {
+        "root_execution_id": (root_execution_id,),
+        "log_type": (log_type, "console"),
+        **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
+    }
+    _run_manager_action(
+        config,
+        base_url,
+        specs,
+        lambda manager, args: manager.task_statuses(args.root_execution_id),
+    )
+
+
+@app.command(name="task-wait")
+def pipeline_runs_task_wait(
+    root_execution_id: str | None = None,
+    *,
+    max_wait: float = 1800.0,
+    poll_interval: float = 5.0,
+    allow_failure: bool = False,
+    base_url: BaseUrlOption = None,
+    token: TokenOption = None,
+    auth_header: AuthHeaderOption = None,
+    header: HeaderOption = None,
+    config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
+) -> None:
+    """Poll a root execution's task-status map until all tasks are terminal.
+
+    Prints the final {task_name: status} map. Exit codes: 0 when every task
+    ends in a non-failure terminal status, 2 when any task fails and
+    --allow-failure is not set (the map is still printed), and non-zero on
+    timeout or API errors.
+    """
+    specs = {
+        "root_execution_id": (root_execution_id,),
+        "max_wait": (max_wait, 1800.0),
+        "poll_interval": (poll_interval, 5.0),
+        "allow_failure": (allow_failure, False),
+        "log_type": (log_type, "console"),
+        **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
+    }
+
+    def action(manager: PipelineRunManager, args: ArgsContainer) -> dict[str, Any] | None:
+        try:
+            return manager.wait_for_task_statuses(
+                args.root_execution_id,
+                max_wait=float(args.max_wait),
+                poll_interval=float(args.poll_interval),
+                allow_failure=bool(args.allow_failure),
+            )
+        except TaskStatusesFailed as exc:
+            # Print the full final map (failures retained on the exception drive
+            # the non-zero exit code) so succeeded/skipped tasks are not dropped.
+            print(str(exc), file=sys.stderr)
+            print_json(exc.statuses)
+            raise SystemExit(2) from exc
+
+    _run_manager_action(config, base_url, specs, action)
+
+
 @app.command(name="logs")
 def pipeline_runs_logs(
     execution_id: str | None = None,
     *,
+    stream: Annotated[
+        bool | None,
+        Parameter(
+            help="Follow the live log stream instead of fetching a one-shot snapshot. "
+            "The follow has no read timeout and stays open silently while the "
+            "container emits no output."
+        ),
+    ] = None,
     base_url: BaseUrlOption = None,
     token: TokenOption = None,
     auth_header: AuthHeaderOption = None,
@@ -369,11 +476,24 @@ def pipeline_runs_logs(
     """Print Tangle API container logs for an execution id."""
     specs = {
         "execution_id": (execution_id,),
+        "stream": (stream, None),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
 
     def action(manager: PipelineRunManager, args: ArgsContainer) -> object:
+        if args.stream:
+            try:
+                for line in manager.stream_logs(args.execution_id):
+                    print(line, flush=True)
+            except BrokenPipeError:
+                # The downstream reader closed the pipe (e.g. `... | head`).
+                # Point stdout at devnull so the interpreter's exit-time flush
+                # of the closed pipe cannot raise a second BrokenPipeError.
+                devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull_fd, sys.stdout.fileno())
+                os.close(devnull_fd)
+            return None
         result = manager.logs(args.execution_id)
         if isinstance(result, dict) and isinstance(result.get("log_text"), str):
             print(result["log_text"], end="" if result["log_text"].endswith("\n") else "\n")

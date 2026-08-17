@@ -291,6 +291,20 @@ def _validate_task_inputs(
 
     errors: list[str] = []
     full_task_name = f"{path_prefix}{task_name}" if path_prefix else task_name
+
+    if "isEnabled" in task_spec:
+        condition = task_spec["isEnabled"]
+        error = _validate_graph_input_ref(
+            condition, graph_inputs, full_task_name, "isEnabled"
+        )
+        if error:
+            errors.append(error)
+        error = _validate_task_output_ref(
+            condition, tasks, task_outputs, full_task_name, "isEnabled"
+        )
+        if error:
+            errors.append(error)
+
     component_spec = _get_component_spec(task_spec)
     if not component_spec:
         return errors
@@ -497,6 +511,20 @@ def _validate_graph_spec(
                 if referenced_task not in task_names:
                     errors.append(
                         f"{task_path}.arguments references unknown task {referenced_task!r}"
+                    )
+                else:
+                    edges.add((referenced_task, str(task_name)))
+
+        # A task-output condition is a real scheduling dependency, just like a
+        # task-output argument. Include it in dangling-reference and cycle
+        # checks so local validation matches backend ordering semantics.
+        if "isEnabled" in raw_task:
+            for referenced_task in _extract_task_output_refs(
+                raw_task["isEnabled"]
+            ):
+                if referenced_task not in task_names:
+                    errors.append(
+                        f"{task_path}.isEnabled references unknown task {referenced_task!r}"
                     )
                 else:
                     edges.add((referenced_task, str(task_name)))

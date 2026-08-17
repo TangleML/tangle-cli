@@ -12,15 +12,17 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import math
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+import requests
 import yaml
 
 from .handler import TangleCliHandler
@@ -32,9 +34,42 @@ from .pipelines import collect_pipeline_spec_errors
 from .pipeline_run_search import PipelineRunSearch
 from .utils import dump_yaml
 
-_TERMINAL_STATUSES = ("FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "SKIPPED", "SUCCEEDED", "INVALID")
-_ACTIVE_STATUSES = ("RUNNING", "CANCELLING", "CANCELING", "PENDING", "QUEUED")
+# Precedence order for reducing a mixed terminal aggregate to a single status:
+# failure terminals must precede the non-failure terminals SKIPPED and SUCCEEDED
+# so a mixed aggregate (e.g. {SKIPPED, INVALID}) reduces to the failure instead
+# of masking it (a fully-SKIPPED map still reduces to SKIPPED).
+_TERMINAL_PRECEDENCE = ("FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED", "INVALID", "SKIPPED", "SUCCEEDED")
+# Membership set for is_terminal_status.
+_TERMINAL_STATUSES = frozenset(_TERMINAL_PRECEDENCE)
+# Nonterminal statuses outrank any terminal count when reducing an aggregate;
+# WAITING_FOR_UPSTREAM/UNINITIALIZED are backend enum members and nonterminal.
+_ACTIVE_STATUSES = (
+    "RUNNING",
+    "CANCELLING",
+    "CANCELING",
+    "PENDING",
+    "QUEUED",
+    "WAITING_FOR_UPSTREAM",
+    "UNINITIALIZED",
+)
 _FAILURE_EARLY_EXIT_STATUSES = ("FAILED", "SYSTEM_ERROR")
+# The only terminals that are not per-task failures; every other terminal makes
+# a root-execution `task-wait` exit non-zero. A single SKIPPED task (e.g. a
+# conditional branch) is not a failure, unlike a run whose reduced status is
+# SKIPPED at the run level.
+_NON_FAILURE_TERMINAL_STATUSES = frozenset({"SKIPPED", "SUCCEEDED"})
+_TASK_FAILURE_STATUSES = _TERMINAL_STATUSES - _NON_FAILURE_TERMINAL_STATUSES
+# A child execution's status is unknown until its state row is written; 404
+# means "wrong endpoint type" (container vs graph) and transient 5xx can be
+# returned while the orchestrator is still settling. Both fall through to the
+# next endpoint / report UNKNOWN so the wait loop polls again.
+_RETRYABLE_EXEC_STATE_STATUSES = frozenset({404, 500, 502, 503, 504})
+# An unbounded task-wait (max_wait=None) has no deadline to stop retrying a
+# failing root details fetch, so give up after this many consecutive server
+# errors instead of hiding a persistent outage behind endless retries.
+_MAX_UNBOUNDED_ROOT_FETCH_FAILURES = 3
+_UNKNOWN_TASK_STATUS = "UNKNOWN"
+_ROOT_TASK_NAME = "root"
 _EXECUTION_STATE_TIMINGS_METADATA_KEY = "execution_state_timings"
 _EXECUTION_STATE_TIMING_MONOTONIC_METADATA_KEY = "_execution_state_timing_monotonic"
 _SUBMISSION_ID_ANNOTATION_KEY = "tangle-cli/submission-id"
@@ -52,6 +87,56 @@ class UnsupportedPipelineRunFeatureError(PipelineRunError):
 
 class AmbiguousPipelineRunRecoveryError(PipelineRunError):
     """Raised when submit recovery finds multiple runs for one submission id."""
+
+
+class TransientServerError(PipelineRunError):
+    """An HTTP 5xx failure that a deadline-bounded polling loop may retry.
+
+    One-shot callers (e.g. ``task-status``) still fail fast on it like any
+    other PipelineRunError.
+    """
+
+
+def _transport_error(context: str, exc: requests.RequestException) -> PipelineRunError:
+    """Wrap a transport/HTTP failure as a clean CLI-surfaced PipelineRunError."""
+
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is not None:
+        message = f"{context}: request failed with HTTP {status_code}"
+        if status_code >= 500:
+            return TransientServerError(message)
+        return PipelineRunError(message)
+    return PipelineRunError(f"{context}: {exc}")
+
+
+class TaskStatusesFailed(PipelineRunError):
+    """Raised when a root execution reaches terminal state with failed tasks."""
+
+    def __init__(self, root_execution_id: str, statuses: dict[str, str], failures: dict[str, str]):
+        self.root_execution_id = root_execution_id
+        self.statuses = statuses
+        self.failures = failures
+        summary = ", ".join(f"{name}={status}" for name, status in sorted(failures.items()))
+        super().__init__(
+            f"Root execution {root_execution_id} had {len(failures)} failed task(s): {summary}"
+        )
+
+
+def _describe_http_error(exc: requests.HTTPError) -> str:
+    """Summarize an HTTP status failure with the attempted request target."""
+
+    response = exc.response
+    if response is None:
+        return str(exc)
+    request = response.request
+    target = (
+        f"{request.method} {request.url}"
+        if request is not None and request.url
+        else (response.url or "Tangle API")
+    )
+    reason = f" {response.reason}" if response.reason else ""
+    return f"HTTP {response.status_code}{reason} for {target}"
 
 
 @dataclass
@@ -599,6 +684,14 @@ class PipelineRunHooks:
         """Hook for alternate TD log providers; OSS uses the Tangle API only."""
         return client.executions_container_log(execution_id)
 
+    def stream_logs(self, client: Any, execution_id: str) -> Iterable[str]:
+        """Hook for alternate TD log providers; OSS streams via the Tangle API.
+
+        Failures to open the stream must raise from this call; exceptions raised
+        while iterating are reported as mid-stream interruptions.
+        """
+        return client.iter_execution_container_log_lines(execution_id)
+
 
 @dataclass
 class PipelineRunManager(TangleCliHandler):
@@ -740,6 +833,25 @@ class PipelineRunManager(TangleCliHandler):
         return bool(status and status.upper() in _TERMINAL_STATUSES)
 
     @staticmethod
+    def _validate_prepared_body(body: dict[str, Any]) -> dict[str, Any]:
+        """Fail fast on malformed prepared bodies, returning the componentRef.
+
+        Locator-style bodies (a componentRef with ``name``/``digest`` and no
+        inline ``spec``) are valid; only the ``root_task``/``componentRef``
+        mappings themselves are required.
+        """
+
+        root_task = body.get("root_task")
+        if not isinstance(root_task, dict):
+            raise PipelineRunError("Prepared submit body must contain a 'root_task' mapping")
+        component_ref = root_task.get("componentRef")
+        if not isinstance(component_ref, dict):
+            raise PipelineRunError(
+                "Prepared submit body 'root_task' must contain a 'componentRef' mapping"
+            )
+        return component_ref
+
+    @staticmethod
     def status_counts_from_run(run: Mapping[str, Any]) -> dict[str, int]:
         stats = run.get("execution_status_stats")
         if not isinstance(stats, Mapping):
@@ -817,31 +929,40 @@ class PipelineRunManager(TangleCliHandler):
         for status in _ACTIVE_STATUSES:
             if int(status_counts.get(status, 0) or 0) > 0:
                 return status
-        for status in _TERMINAL_STATUSES:
+        for status in _TERMINAL_PRECEDENCE:
             if int(status_counts.get(status, 0) or 0) > 0:
                 return status
         return None
 
     @staticmethod
+    def _status_from_container_state(state: Mapping[str, Any] | Any) -> str | None:
+        plain = PipelineRunManager.to_plain(state)
+        if isinstance(plain, Mapping):
+            status = plain.get("status")
+            if isinstance(status, str) and status:
+                return status
+        return None
+
+    @classmethod
+    def _status_from_graph_state(cls, state: Mapping[str, Any] | Any) -> str | None:
+        # A nested graph/subpipeline execution carries no direct ``status``; its
+        # status is derived from child execution counts the same way run-level
+        # graph polling does.
+        direct = cls._status_from_container_state(state)
+        if direct is not None:
+            return direct
+        return cls.status_from_counts(cls.status_counts_from_graph_state(cls.to_plain(state)))
+
+    @staticmethod
     def status_from_run(run: Mapping[str, Any]) -> str | None:
         summary = run.get("execution_summary")
-        if isinstance(summary, Mapping) and summary.get("has_ended") is True:
-            stats = run.get("execution_status_stats")
-            if isinstance(stats, Mapping):
-                for status in ("FAILED", "SYSTEM_ERROR", "CANCELLED", "CANCELED"):
-                    if int(stats.get(status, 0) or 0) > 0:
-                        return status
-                if int(stats.get("SUCCEEDED", 0) or 0) > 0:
-                    return "SUCCEEDED"
-            return "ENDED"
         stats = run.get("execution_status_stats")
         if isinstance(stats, Mapping):
-            for status in _ACTIVE_STATUSES:
-                if int(stats.get(status, 0) or 0) > 0:
-                    return status
-            for status in _TERMINAL_STATUSES:
-                if int(stats.get(status, 0) or 0) > 0:
-                    return status
+            status = PipelineRunManager.status_from_counts(stats)
+            if status is not None:
+                return status
+        if isinstance(summary, Mapping) and summary.get("has_ended") is True:
+            return "ENDED"
         return None
 
     @staticmethod
@@ -1122,7 +1243,7 @@ class PipelineRunManager(TangleCliHandler):
         notify_submit_error: bool = True,
     ) -> dict[str, Any]:
         self.normalize_submit_body_in_place(body)
-        pipeline_spec = body["root_task"]["componentRef"]["spec"]
+        pipeline_spec = self._validate_prepared_body(body).get("spec")
         submit_context = context or PipelineRunContext(
             pipeline_path=pipeline_path,
             start_time=time.time(),
@@ -1260,6 +1381,211 @@ class PipelineRunManager(TangleCliHandler):
 
     def logs(self, execution_id: str) -> dict[str, Any]:
         return self.to_plain(self.hooks.fetch_logs(self.client, execution_id))
+
+    def _exec_status(self, execution_id: str, *, deadline: float | None = None) -> str | None:
+        """Resolve a single execution's status, trying container then graph state.
+
+        404 means the execution is the other kind (container vs graph); a
+        transient 5xx means the state row is still being written. Both cases
+        fall through to the next endpoint and, if neither resolves, return
+        ``None`` so the caller reports UNKNOWN. Once past ``deadline`` (a
+        ``time.monotonic()`` timestamp) no further requests are issued. A
+        request already in flight remains subject to the client's transport
+        timeout and can finish after the wait deadline.
+        """
+
+        endpoints = (
+            (self.client.executions_container_state, self._status_from_container_state),
+            (self.client.executions_graph_execution_state, self._status_from_graph_state),
+        )
+        context = f"Resolving status for execution {execution_id}"
+        last_server_error: int | None = None
+        for endpoint, extract_status in endpoints:
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+            try:
+                state = endpoint(execution_id)
+            except requests.HTTPError as exc:
+                response = exc.response
+                if response is not None and response.status_code in _RETRYABLE_EXEC_STATE_STATUSES:
+                    if response.status_code >= 500:
+                        last_server_error = response.status_code
+                    continue
+                raise _transport_error(context, exc) from exc
+            except requests.RequestException as exc:
+                raise _transport_error(context, exc) from exc
+            status = extract_status(state)
+            if status is not None:
+                return status
+        if last_server_error is not None:
+            # Without this a wait that times out reports UNKNOWN with no hint
+            # that the state API was failing the whole time.
+            self.logger.warn(
+                f"Status for execution {execution_id} is UNKNOWN: state endpoints "
+                f"kept failing with HTTP {last_server_error}"
+            )
+        return None
+
+    def task_statuses(
+        self, root_execution_id: str, *, deadline: float | None = None
+    ) -> dict[str, str]:
+        """Return a ``{task_name: status}`` map for a root execution.
+
+        Walks ``child_task_execution_ids`` from the root execution details and
+        resolves each child's status. A leaf/root-only execution (no children)
+        reports a single ``{"root": status}`` entry; unresolved child statuses
+        are reported as ``UNKNOWN``. A missing root id (404) is a clean
+        not-found error; other transport/HTTP failures surface cleanly too.
+        Past ``deadline`` (a ``time.monotonic()`` timestamp), no new requests
+        are issued and the root is reported as ``UNKNOWN``. A request already
+        in flight remains subject to the client's transport timeout and can
+        finish after the wait deadline.
+        """
+
+        if deadline is not None and time.monotonic() >= deadline:
+            return {_ROOT_TASK_NAME: _UNKNOWN_TASK_STATUS}
+        try:
+            details = self.to_plain(self.client.executions_details(root_execution_id))
+        except requests.HTTPError as exc:
+            response = exc.response
+            if response is not None and response.status_code == 404:
+                raise PipelineRunError(f"Root execution {root_execution_id} not found") from exc
+            raise _transport_error(f"Fetching root execution {root_execution_id}", exc) from exc
+        except requests.RequestException as exc:
+            raise _transport_error(f"Fetching root execution {root_execution_id}", exc) from exc
+        children = details.get("child_task_execution_ids") if isinstance(details, Mapping) else None
+        if not isinstance(children, Mapping) or not children:
+            return {
+                _ROOT_TASK_NAME: self._exec_status(root_execution_id, deadline=deadline)
+                or _UNKNOWN_TASK_STATUS
+            }
+        return {
+            str(task_name): self._child_status(execution_id, deadline=deadline)
+            for task_name, execution_id in children.items()
+        }
+
+    def _child_status(self, execution_id: Any, *, deadline: float | None = None) -> str:
+        # A None/empty/whitespace-only child id has no execution to query;
+        # report UNKNOWN instead of polling a literal blank id forever.
+        child_id = str(execution_id).strip() if execution_id else ""
+        if not child_id:
+            return _UNKNOWN_TASK_STATUS
+        return self._exec_status(child_id, deadline=deadline) or _UNKNOWN_TASK_STATUS
+
+    def wait_for_task_statuses(
+        self,
+        root_execution_id: str,
+        *,
+        max_wait: float | None = 1800.0,
+        poll_interval: float = 5.0,
+        allow_failure: bool = False,
+    ) -> dict[str, str]:
+        """Poll ``task_statuses`` until every task is terminal.
+
+        Returns the final ``{task_name: status}`` map. Raises
+        ``TaskStatusesFailed`` when any task ends in a failure status unless
+        ``allow_failure`` is set, and ``PipelineRunError`` on timeout.
+        ``max_wait=None`` waits indefinitely.
+        """
+
+        self._validate_wait_params(
+            max_wait=max_wait,
+            poll_interval=poll_interval,
+            timeout_clock="monotonic",
+            allow_zero_poll_interval=False,
+        )
+        deadline = None if max_wait is None else time.monotonic() + max_wait
+        root_fetch_failures = 0
+        while True:
+            try:
+                statuses = self.task_statuses(root_execution_id, deadline=deadline)
+            except TransientServerError as exc:
+                # A 5xx on the root details fetch is tolerated like child-state
+                # 5xx (retried next poll) so one blip cannot abort a long wait.
+                # The deadline still bounds the retries; an unbounded wait gives
+                # up after a few consecutive failures instead of masking a
+                # persistent outage forever.
+                root_fetch_failures += 1
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise
+                if deadline is None and root_fetch_failures >= _MAX_UNBOUNDED_ROOT_FETCH_FAILURES:
+                    raise
+                if root_fetch_failures == 1:
+                    # Warn once per outage, not once per poll, so a long outage
+                    # does not flood the logs.
+                    self.logger.warn(f"{exc}; retrying on the next poll")
+                self._sleep_before_next_poll(poll_interval, deadline)
+                continue
+            root_fetch_failures = 0
+            if statuses and all(self.is_terminal_status(status) for status in statuses.values()):
+                return self._handle_terminal_task_statuses(root_execution_id, statuses, allow_failure)
+            if deadline is not None and time.monotonic() >= deadline:
+                pending = ", ".join(
+                    f"{name}={status}"
+                    for name, status in sorted(statuses.items())
+                    if not self.is_terminal_status(status)
+                )
+                raise PipelineRunError(
+                    f"Root execution {root_execution_id} still has non-terminal tasks "
+                    f"after {max_wait:g}s: {pending}"
+                )
+            self._sleep_before_next_poll(poll_interval, deadline)
+
+    @staticmethod
+    def _sleep_before_next_poll(poll_interval: float, deadline: float | None) -> None:
+        if deadline is None:
+            time.sleep(poll_interval)
+            return
+        # Clamp the final sleep to the remaining budget so the loop times out
+        # at max_wait instead of overshooting by up to a poll interval.
+        time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+
+    def _handle_terminal_task_statuses(
+        self,
+        root_execution_id: str,
+        statuses: dict[str, str],
+        allow_failure: bool,
+    ) -> dict[str, str]:
+        failures = {
+            name: status
+            for name, status in statuses.items()
+            if status.upper() in _TASK_FAILURE_STATUSES
+        }
+        if failures and not allow_failure:
+            raise TaskStatusesFailed(root_execution_id, statuses, failures)
+        return statuses
+
+    def stream_logs(self, execution_id: str) -> Iterable[str]:
+        try:
+            lines = self.hooks.stream_logs(self.client, execution_id)
+        except requests.HTTPError as exc:
+            # A definitive non-2xx answer to the stream-open request (404 for a
+            # missing execution or endpoint, 403, ...): keep the status and the
+            # attempted target visible, since that is what the caller acts on.
+            raise PipelineRunError(
+                f"Failed to open log stream for execution {execution_id}: "
+                f"{_describe_http_error(exc)}"
+            ) from exc
+        except requests.RequestException as exc:
+            # Non-HTTP transport failures (connection refused, timeout) raise
+            # from the open call itself; surface them as a clean open failure.
+            raise PipelineRunError(
+                f"Failed to open log stream for execution {execution_id}: {exc}"
+            ) from exc
+        return self._relabel_stream_drops(lines, execution_id)
+
+    @staticmethod
+    def _relabel_stream_drops(lines: Iterable[str], execution_id: str) -> Iterable[str]:
+        try:
+            yield from lines
+        except requests.RequestException as exc:
+            # The stream opened (the hook call succeeded), so a transport
+            # failure here is a drop of the live follow, possibly before the
+            # first line arrived. Surface it as an interruption rather than a
+            # fetch failure, which would wrongly imply the initial open failed.
+            raise PipelineRunError(
+                f"Log stream for execution {execution_id} was interrupted: {exc}"
+            ) from exc
 
     def search_runs(
         self,
@@ -1452,6 +1778,36 @@ class PipelineRunManager(TangleCliHandler):
             execution_state_timings=execution_state_timings,
         )
 
+    @staticmethod
+    def _validate_wait_params(
+        *,
+        max_wait: float | None,
+        poll_interval: float,
+        timeout_clock: str,
+        allow_zero_poll_interval: bool,
+    ) -> None:
+        """Validate wait/poll parameters before submission.
+
+        The CLI wait/run commands and the programmatic API share this path, so
+        error messages name both the parameter and its CLI flag.
+        """
+
+        # NaN/inf pass the sign checks below (NaN compares False, inf is
+        # "positive") and would become a never-firing deadline or a raw
+        # ValueError from time.sleep; reject them up front. An unbounded wait is
+        # spelled max_wait=None, not an explicit inf.
+        if max_wait is not None:
+            if not math.isfinite(max_wait):
+                raise PipelineRunError("max_wait (--max-wait) must be a finite number")
+            if max_wait < 0:
+                raise PipelineRunError("max_wait (--max-wait) must be non-negative")
+        if not math.isfinite(poll_interval):
+            raise PipelineRunError("poll_interval (--poll-interval) must be a finite number")
+        if poll_interval < 0 or (poll_interval == 0 and not allow_zero_poll_interval):
+            raise PipelineRunError("poll_interval (--poll-interval) must be positive")
+        if timeout_clock not in {"monotonic", "wall"}:
+            raise PipelineRunError("timeout_clock must be 'monotonic' or 'wall'")
+
     def wait_for_completion(
         self,
         run_id: str,
@@ -1467,12 +1823,12 @@ class PipelineRunManager(TangleCliHandler):
         wait_context = context or PipelineRunContext(run_id=run_id, start_time=time.time())
         if exit_on_first_failure:
             wait_context.metadata["exit_on_first_failure"] = True
-        if max_wait is not None and max_wait < 0:
-            raise PipelineRunError("--max-wait must be non-negative")
-        if poll_interval < 0 or (poll_interval == 0 and not allow_zero_poll_interval):
-            raise PipelineRunError("--poll-interval must be positive")
-        if timeout_clock not in {"monotonic", "wall"}:
-            raise PipelineRunError("timeout_clock must be 'monotonic' or 'wall'")
+        self._validate_wait_params(
+            max_wait=max_wait,
+            poll_interval=poll_interval,
+            timeout_clock=timeout_clock,
+            allow_zero_poll_interval=allow_zero_poll_interval,
+        )
         enforce_max_wait = max_wait is not None and self.hooks.should_enforce_max_wait(wait_context)
         poll_started_at = time.monotonic()
         deadline_now: Callable[[], float] = time.time if timeout_clock == "wall" else time.monotonic
@@ -1751,6 +2107,15 @@ class PipelineRunManager(TangleCliHandler):
 
         if max_attempts < 1:
             raise PipelineRunError("max_attempts must be at least 1")
+        if wait:
+            # Validate wait/poll params up front so an invalid request never
+            # submits a run it can't wait on.
+            self._validate_wait_params(
+                max_wait=max_wait,
+                poll_interval=poll_interval,
+                timeout_clock=timeout_clock,
+                allow_zero_poll_interval=allow_zero_poll_interval,
+            )
         last_error: Exception | None = None
         previous_context: PipelineRunContext | None = None
         attempts: list[PipelineRunContext] = []
@@ -1797,7 +2162,9 @@ class PipelineRunManager(TangleCliHandler):
             context.metadata["submission_id"] = submission_id
             if metadata_factory is not None:
                 context.metadata.update(metadata_factory(attempt, previous_context, last_error))
-            pipeline_spec = body.get("root_task", {}).get("componentRef", {}).get("spec")
+            # Validate before the tolerant spec extraction so a malformed body
+            # raises PipelineRunError instead of an AttributeError.
+            pipeline_spec = self._validate_prepared_body(body).get("spec")
             context.submit_body = body
             context.pipeline_spec = pipeline_spec if isinstance(pipeline_spec, dict) else None
             if context.pipeline_spec is not None:
@@ -2076,6 +2443,111 @@ class PipelineRunManager(TangleCliHandler):
         )
 
 
+def _build_default_manager(*, logger: Logger | None = None) -> PipelineRunManager:
+    """Construct a manager backed by the native ``TangleApiClient``.
+
+    Imported lazily so the lightweight top-level package and local-only SDK
+    commands stay native-free. Credentials/base URL come from the standard
+    ``TangleApiClient`` environment defaults.
+    """
+
+    try:
+        from .client import TangleApiClient
+    except ModuleNotFoundError as exc:
+        # Catch both the top-level package and any missing submodule (e.g. a
+        # partially-installed ``tangle_api.generated``).
+        if exc.name is not None and (exc.name == "tangle_api" or exc.name.startswith("tangle_api.")):
+            raise PipelineRunError(
+                "Native generated Tangle API bindings are required to submit a prepared "
+                "body without an explicit client. Install tangle-cli[native], provide a "
+                "local tangle_api.generated package, or pass client=/manager=."
+            ) from exc
+        raise
+
+    hooks = PipelineRunHooks(logger=logger) if logger is not None else PipelineRunHooks()
+    return PipelineRunManager(client=TangleApiClient(), hooks=hooks, logger=logger or hooks.logger)
+
+
+def submit_and_wait_prepared_body(
+    body: dict[str, Any],
+    *,
+    manager: PipelineRunManager | None = None,
+    client: Any | None = None,
+    logger: Logger | None = None,
+    wait: bool = True,
+    max_wait: float | None = 600.0,
+    poll_interval: float = 10.0,
+    use_graph_state: bool = False,
+    allow_zero_poll_interval: bool = False,
+    timeout_clock: str = "monotonic",
+    exit_on_first_failure: bool = False,
+    metadata: dict[str, Any] | None = None,
+    submit_recovery_attempts: int = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
+) -> dict[str, Any]:
+    """Submit an already-prepared API submit body and optionally wait for completion.
+
+    Thin wrapper over :meth:`PipelineRunManager.run_prepared_body` for callers
+    that already hold a fully formed submit ``body`` (``{"root_task": {...}}``);
+    it reuses the existing submit/wait/poll and submit-recovery logic and never
+    mutates ``body``. Provide ``manager`` to reuse a configured manager,
+    ``client`` to wrap an existing API client, or neither to build a
+    :class:`tangle_cli.client.TangleApiClient` from the environment (requires
+    the native extra). ``logger`` applies only when this helper constructs the
+    manager (the ``client`` and default paths); a supplied ``manager`` keeps
+    its own configured logger and ``logger`` is ignored.
+
+    Returns a dict with ``response``, ``run_id``, ``root_execution_id``, and
+    ``wait`` (when ``wait=True``); the result is JSON-serializable whenever the
+    API responses are. With ``wait=True``, a submit response carrying no run id
+    raises :class:`PipelineRunError`; use ``wait=False`` to inspect such
+    responses.
+    """
+
+    if manager is not None and client is not None:
+        raise PipelineRunError("Pass at most one of manager= or client=")
+
+    if manager is None:
+        if client is not None:
+            hooks = PipelineRunHooks(logger=logger) if logger is not None else PipelineRunHooks()
+            manager = PipelineRunManager(client=client, hooks=hooks, logger=logger or hooks.logger)
+        else:
+            manager = _build_default_manager(logger=logger)
+
+    raw = manager.run_prepared_body(
+        body,
+        wait=wait,
+        max_wait=max_wait,
+        poll_interval=poll_interval,
+        use_graph_state=use_graph_state,
+        allow_zero_poll_interval=allow_zero_poll_interval,
+        timeout_clock=timeout_clock,
+        exit_on_first_failure=exit_on_first_failure,
+        metadata=metadata,
+        submit_recovery_attempts=submit_recovery_attempts,
+    )
+
+    context: PipelineRunContext | None = raw.get("context")
+    result: dict[str, Any] = {
+        "response": raw.get("response"),
+        "run_id": context.run_id if context is not None else None,
+        "root_execution_id": context.root_execution_id if context is not None else None,
+    }
+    if "wait" in raw:
+        result["wait"] = raw["wait"]
+    elif wait:
+        # The underlying run skips waiting when the submit response carries no
+        # run id; surface that instead of silently returning without waiting.
+        raise PipelineRunError(
+            "Run was submitted but the submit response did not include a run id, "
+            "so completion cannot be awaited; use wait=False to inspect the response."
+        )
+    return result
+
+
+# Short public alias; ``submit_and_wait_prepared_body`` is the definition.
+submit_and_wait = submit_and_wait_prepared_body
+
+
 def parse_key_value_entries(entries: list[str] | None) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for entry in entries or []:
@@ -2100,3 +2572,80 @@ def parse_json_or_key_values(
         result.update(loaded)
     result.update(parse_key_value_entries(entries))
     return result
+
+
+def secret_argument_value(secret_name: str) -> dict[str, Any]:
+    """Return the OSS dynamic-data payload for a Tangle secret reference."""
+
+    return {"dynamicData": {"secret": {"name": secret_name}}}
+
+
+def parse_arg_secret_entries(entries: list[str] | None) -> dict[str, str]:
+    """Parse ``INPUT=SECRET_NAME`` secret references into a mapping.
+
+    Trimmed input and secret names must be non-empty, and an input may not be
+    repeated. Raising here keeps validation before any file read or network
+    call in the submit path.
+    """
+
+    parsed: dict[str, str] = {}
+    for entry in entries or []:
+        if "=" not in entry:
+            raise PipelineRunError(f"Expected INPUT=SECRET_NAME for --arg-secret, got {entry!r}")
+        raw_input, raw_secret = entry.split("=", 1)
+        input_name = raw_input.strip()
+        secret_name = raw_secret.strip()
+        if not input_name or not secret_name:
+            raise PipelineRunError(
+                f"--arg-secret requires a non-empty input and secret name, got {entry!r}"
+            )
+        if input_name in parsed:
+            raise PipelineRunError(f"Duplicate --arg-secret for input {input_name!r}")
+        parsed[input_name] = secret_name
+    return parsed
+
+
+def normalize_arg_secret_config(value: Any) -> dict[str, str]:
+    """Normalize a config ``arg_secrets`` mapping of input -> secret name."""
+
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise PipelineRunError("arg_secrets config must be a mapping of INPUT to SECRET_NAME")
+    normalized: dict[str, str] = {}
+    for raw_input, raw_secret in value.items():
+        input_name = str(raw_input).strip()
+        if not isinstance(raw_secret, str):
+            raise PipelineRunError(
+                f"arg_secrets[{raw_input!r}] must be a secret name string, "
+                f"got {type(raw_secret).__name__}"
+            )
+        secret_name = raw_secret.strip()
+        if not input_name or not secret_name:
+            raise PipelineRunError("arg_secrets entries require a non-empty input and secret name")
+        normalized[input_name] = secret_name
+    return normalized
+
+
+def merge_secret_run_args(
+    run_args: dict[str, Any],
+    secret_names: Mapping[str, str],
+) -> dict[str, Any]:
+    """Merge secret references into run args, rejecting input conflicts.
+
+    An input may be supplied as a plain value (``--arg`` / ``--args-json`` /
+    config ``args``) or as a secret reference (``--arg-secret`` / config
+    ``arg_secrets``), never both. Overlap is rejected rather than silently
+    overwriting one form with the other.
+    """
+
+    conflicts = sorted(set(run_args) & set(secret_names))
+    if conflicts:
+        raise PipelineRunError(
+            "Input(s) given as both a value and a secret reference: "
+            f"{', '.join(conflicts)}. Use only one of --arg/--args-json or --arg-secret per input."
+        )
+    merged = dict(run_args)
+    for input_name, secret_name in secret_names.items():
+        merged[input_name] = secret_argument_value(secret_name)
+    return merged
