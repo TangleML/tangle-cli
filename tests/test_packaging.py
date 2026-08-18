@@ -40,7 +40,7 @@ def _write_import_stubs(path: Path) -> None:
     _write_runtime_stubs(path)
     (path / "cyclopts.py").write_text(
         "class App:\n"
-        "    def __init__(self, *args, **kwargs): pass\n"
+        "    def __init__(self, *args, **kwargs): self._meta = None\n"
         "    def command(self, obj=None, **kwargs):\n"
         "        if obj is not None:\n"
         "            return obj\n"
@@ -48,6 +48,11 @@ def _write_import_stubs(path: Path) -> None:
         "        return decorator\n"
         "    def __call__(self, *args, **kwargs): pass\n"
         "    def default(self, fn): return fn\n"
+        "    @property\n"
+        "    def meta(self):\n"
+        "        if self._meta is None:\n"
+        "            self._meta = App()\n"
+        "        return self._meta\n"
         "\n"
         "def Parameter(*args, **kwargs): return object()\n",
         encoding="utf-8",

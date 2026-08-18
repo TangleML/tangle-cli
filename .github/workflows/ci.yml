@@ -5,8 +5,14 @@ on:
   push:
 
 jobs:
-  test:
+  test-matrix:
+    name: test (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
 
     steps:
       - name: Check out repository
@@ -15,7 +21,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -29,4 +35,20 @@ jobs:
         run: git diff --check
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run --python ${{ matrix.python-version }} pytest
+
+  test:
+    name: test
+    needs: test-matrix
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require all supported Python tests to pass
+        env:
+          MATRIX_RESULT: ${{ needs.test-matrix.result }}
+        run: |
+          if [ "$MATRIX_RESULT" != "success" ]; then
+            echo "The supported-Python test matrix finished with: $MATRIX_RESULT" >&2
+            exit 1
+          fi

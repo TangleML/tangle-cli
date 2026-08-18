@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import sys
 import urllib.parse
 from pathlib import Path
@@ -16,6 +17,20 @@ DEFAULT_API_URL = "http://localhost:8000"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _MISSING = object()
+
+# Canonical resolved TLS verification value: ``True``/``False`` or a CA bundle
+# path. Both requests and httpx transports adapt this single contract.
+VerifyValue = bool | str
+VerifyArgument = bool | str | os.PathLike[str] | None
+_VERIFY_UNSET = object()
+_TLS_FALSE_VALUES = frozenset({"0", "false", "no"})
+
+# Process-wide TLS override set from global CLI flags (``--ca-bundle`` /
+# ``--verify-tls`` / ``--no-verify-tls``). It sits between an explicit
+# ``verify=`` argument and the environment variables in :func:`resolve_verify`,
+# so a single resolver serves every transport, including the schema discovery
+# that runs before normal command dispatch.
+_CLI_VERIFY_OVERRIDE: Any = _VERIFY_UNSET
 _SENSITIVE_HEADER_NAMES = {"authorization", "cloud-auth", "cookie", "x-api-key"}
 _SENSITIVE_KEY_RE = re.compile(
     r"(authorization|authentication|(^|[-_])auth($|[-_])|cloud[-_]?auth|cookie|x[-_]?api[-_]?key|token|secret|password|credential|pre[-_]?signed[-_]?url|signed[-_]?url)",
@@ -38,6 +53,115 @@ def tangle_verbose_enabled() -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_verify_flag(raw: str) -> bool:
+    """Interpret ``TANGLE_API_VERIFY_TLS``.
+
+    Only the case/space-insensitive values ``0``, ``false``, and ``no`` disable
+    verification; any other nonempty value keeps it enabled.
+    """
+
+    return raw.strip().lower() not in _TLS_FALSE_VALUES
+
+
+def _validate_ca_bundle(path: str, source: str) -> str:
+    """Return an existing CA bundle path or fail before any network request."""
+
+    candidate = Path(path).expanduser()
+    if not candidate.is_file():
+        raise SystemExit(
+            f"{source} points to a CA bundle that does not exist: {path!r}. "
+            "Provide a path to an existing PEM file, or unset it to use the "
+            "system trust store."
+        )
+    return str(candidate)
+
+
+def _coerce_explicit_verify(value: bool | str | os.PathLike[str]) -> VerifyValue:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (str, os.PathLike)):
+        return _validate_ca_bundle(os.fspath(value), "verify")
+    raise SystemExit("verify must be a bool or a path to a CA bundle file")
+
+
+def configure_cli_verify(
+    ca_bundle: str | os.PathLike[str] | None = None,
+    verify_tls: bool | None = None,
+) -> None:
+    """Install (or clear) the process-wide TLS override from global CLI flags.
+
+    ``ca_bundle`` is a path to a PEM trust store; ``verify_tls`` is the tri-state
+    ``--verify-tls`` / ``--no-verify-tls`` flag where ``None`` means the flag was
+    not supplied. A ``--ca-bundle`` combined with an explicit
+    ``--no-verify-tls`` is contradictory and fails fast before any network
+    request. Passing neither clears any previously installed override.
+
+    The resolved value is validated here so an invalid or missing CA bundle
+    fails before dynamic schema discovery. It is consulted by
+    :func:`resolve_verify` for every transport.
+    """
+
+    global _CLI_VERIFY_OVERRIDE
+    if ca_bundle is not None:
+        if verify_tls is False:
+            raise SystemExit(
+                "--ca-bundle cannot be combined with --no-verify-tls: a CA "
+                "bundle only takes effect when verification is enabled. Drop "
+                "one of the two flags."
+            )
+        _CLI_VERIFY_OVERRIDE = _validate_ca_bundle(os.fspath(ca_bundle), "--ca-bundle")
+        return
+    if verify_tls is not None:
+        _CLI_VERIFY_OVERRIDE = bool(verify_tls)
+        return
+    _CLI_VERIFY_OVERRIDE = _VERIFY_UNSET
+
+
+def resolve_verify(verify: Any = _VERIFY_UNSET) -> Any:
+    """Resolve the effective TLS verification setting.
+
+    Precedence, highest to lowest: an explicit ``verify`` argument, the global
+    CLI override (``--ca-bundle`` / ``--verify-tls`` / ``--no-verify-tls``), a
+    nonempty ``TANGLE_API_CA_BUNDLE``, ``TANGLE_API_VERIFY_TLS``, then a secure
+    enabled default. When none of these are set, ``_VERIFY_UNSET`` is returned
+    so callers can preserve library and caller defaults (for example requests'
+    ``REQUESTS_CA_BUNDLE``/``CURL_CA_BUNDLE`` handling and a caller-supplied
+    ``Session.verify``). Empty environment values are treated as unset.
+    """
+
+    if verify is not _VERIFY_UNSET and verify is not None:
+        return _coerce_explicit_verify(verify)
+    if _CLI_VERIFY_OVERRIDE is not _VERIFY_UNSET:
+        return _CLI_VERIFY_OVERRIDE
+    ca_bundle = os.environ.get("TANGLE_API_CA_BUNDLE", "")
+    if ca_bundle.strip():
+        return _validate_ca_bundle(ca_bundle.strip(), "TANGLE_API_CA_BUNDLE")
+    flag = os.environ.get("TANGLE_API_VERIFY_TLS", "")
+    if flag.strip():
+        return _parse_verify_flag(flag)
+    return _VERIFY_UNSET
+
+
+def resolve_verify_default(verify: Any = _VERIFY_UNSET) -> VerifyValue:
+    """Like :func:`resolve_verify`, but fall back to the secure ``True`` default."""
+
+    resolved = resolve_verify(verify)
+    return True if resolved is _VERIFY_UNSET else resolved
+
+
+def httpx_verify(verify: Any = _VERIFY_UNSET) -> bool | ssl.SSLContext:
+    """Adapt the resolved verify value to what httpx expects.
+
+    httpx 0.28 deprecates string CA-bundle paths, so a path is turned into an
+    :class:`ssl.SSLContext`; booleans pass through unchanged.
+    """
+
+    resolved = resolve_verify_default(verify)
+    if isinstance(resolved, bool):
+        return resolved
+    return ssl.create_default_context(cafile=resolved)
 
 
 def _redact_headers(headers: dict[str, Any] | None) -> dict[str, Any]:
@@ -280,6 +404,7 @@ def request_operation(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     allow_body_file_references: bool = False,
     include_env_credentials: bool = True,
+    verify: Any = _VERIFY_UNSET,
 ) -> httpx.Response:
     """Dispatch one normalized OpenAPI operation as an HTTP request.
 
@@ -306,6 +431,7 @@ def request_operation(
         content=content,
         headers=request_headers,
         timeout=timeout,
+        verify=httpx_verify(verify),
     )
     if tangle_verbose_enabled():
         log_http_exchange(
