@@ -70,7 +70,12 @@ from .api_transport import (
     default_auth_header,
     default_base_url,
     default_token,
+    describe_request_error,
+    format_http_status_error,
+    format_request_error,
+    http_status_line,
     request_operation,
+    sanitize_url,
 )
 from .cli_helpers import api_arg_specs, load_args_or_exit
 from .cli_options import (
@@ -185,14 +190,11 @@ def _register_refresh_command(api_app: App) -> None:
                     include_env_credentials=not base_url_from_config,
                 )
             except httpx.HTTPStatusError as exc:
-                message = f"HTTP {exc.response.status_code} {exc.response.reason_phrase}"
-                raise SystemExit(
-                    f"Failed to fetch {_openapi_url(normalized_base_url)}: {message}"
-                ) from exc
+                # Never echo the /openapi.json response body: an auth failure can
+                # reflect the credentials we just sent. Status line only.
+                raise SystemExit(_schema_fetch_error_message(normalized_base_url, exc)) from exc
             except httpx.RequestError as exc:
-                raise SystemExit(
-                    f"Failed to fetch {_openapi_url(normalized_base_url)}: {exc}"
-                ) from exc
+                raise SystemExit(_schema_fetch_error_message(normalized_base_url, exc)) from exc
             path_count = len(schema.get("paths", {}))
             print(f"Cached OpenAPI schema for {normalized_base_url}")
             print(f"Path: {path}")
@@ -452,11 +454,13 @@ def _invoke_operation_once(
             include_env_credentials=include_env_credentials,
         )
     except httpx.HTTPStatusError as exc:
-        message = exc.response.text or exc.response.reason_phrase
-        print(message, file=sys.stderr)
-        raise SystemExit(exc.response.status_code) from exc
+        # One-line, credential-safe failure with a non-zero exit. The prior code
+        # raised the HTTP status as the exit code, but exit codes are 8-bit, so a
+        # status was truncated (404 -> 148, 500 -> 244) and multiples of 256
+        # reported success. A string exit prints to stderr and exits 1.
+        raise SystemExit(format_http_status_error(exc)) from exc
     except httpx.RequestError as exc:
-        raise SystemExit(f"Failed to call {exc.request.url}: {exc}") from exc
+        raise SystemExit(format_request_error(exc)) from exc
     except TypeError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -695,6 +699,23 @@ def _validate_schema_source(value: str) -> str:
     if normalized not in {"auto", "official", "cache"}:
         raise SystemExit("--schema-source must be 'auto', 'official', or 'cache'")
     return normalized
+
+
+def _schema_fetch_error_message(base_url: str, exc: Exception) -> str:
+    """One-line, credential-safe failure for an /openapi.json fetch.
+
+    The response body is deliberately omitted for HTTP status errors so an auth
+    failure cannot reflect the credentials that were just sent.
+    """
+
+    target = sanitize_url(_openapi_url(base_url))
+    if isinstance(exc, httpx.HTTPStatusError):
+        reason = http_status_line(exc)
+    elif isinstance(exc, httpx.RequestError):
+        reason = describe_request_error(exc)
+    else:
+        reason = exc.__class__.__name__
+    return f"Failed to fetch {target}: {reason}"
 
 
 def _schema_fetch_failure_message(base_url: str, exc: Exception) -> str:
