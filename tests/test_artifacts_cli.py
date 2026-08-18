@@ -5,6 +5,7 @@ import importlib
 import json
 import sys
 from typing import Any
+from unittest.mock import ANY
 
 from tangle_cli import artifacts as artifacts_module
 from tangle_cli import artifacts_cli, cli
@@ -80,6 +81,7 @@ def test_sdk_artifacts_get_cli_config_auth_and_env_isolation(monkeypatch, tmp_pa
             "header": ["X-Config: yes"],
             "include_env_credentials": False,
             "command_name": "artifact commands",
+            "logger": ANY,
         }
     ]
     assert get_calls == [
