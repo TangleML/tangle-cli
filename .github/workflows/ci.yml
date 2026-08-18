@@ -5,7 +5,8 @@ on:
   push:
 
 jobs:
-  test:
+  test-matrix:
+    name: test (${{ matrix.python-version }})
     runs-on: ubuntu-latest
 
     strategy:
@@ -35,3 +36,19 @@ jobs:
 
       - name: Run tests
         run: uv run --python ${{ matrix.python-version }} pytest
+
+  test:
+    name: test
+    needs: test-matrix
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require all supported Python tests to pass
+        env:
+          MATRIX_RESULT: ${{ needs.test-matrix.result }}
+        run: |
+          if [ "$MATRIX_RESULT" != "success" ]; then
+            echo "The supported-Python test matrix finished with: $MATRIX_RESULT" >&2
+            exit 1
+          fi
