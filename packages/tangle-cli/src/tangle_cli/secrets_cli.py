@@ -58,7 +58,9 @@ ForceOption = Annotated[
 app = App(name="secrets", help="Manage Tangle secrets.")
 
 
-def _client(args: ArgsContainer, *, cli_base_url: str | None, command_name: str) -> LazyTangleApiClient:
+def _client(
+    args: ArgsContainer, *, cli_base_url: str | None, command_name: str, logger: Logger | None = None
+) -> LazyTangleApiClient:
     return LazyTangleApiClient(
         base_url=args.base_url,
         token=args.token,
@@ -66,6 +68,7 @@ def _client(args: ArgsContainer, *, cli_base_url: str | None, command_name: str)
         header=args.header,
         include_env_credentials=include_env_credentials_for_args(args, cli_base_url),
         command_name=command_name,
+        logger=logger,
     )
 
 
@@ -79,7 +82,7 @@ def _run_secret_action(
     for args in load_args_or_exit(config, **specs):
         logger, finalize_logs = logger_for_log_type(getattr(args, "log_type", "console"))
         try:
-            client = _client(args, cli_base_url=cli_base_url, command_name="secret commands")
+            client = _client(args, cli_base_url=cli_base_url, command_name="secret commands", logger=logger)
             try:
                 results.append(fn(client, args, logger))
             except SecretValueError as exc:

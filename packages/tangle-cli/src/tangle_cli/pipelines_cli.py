@@ -232,6 +232,7 @@ def pipelines_hydrate(
                 ),
                 header=_header_entries(header, config_values),
                 include_env_credentials=include_env_credentials,
+                logger=logger,
             ),
         )
     except PipelineValidationError as exc:
