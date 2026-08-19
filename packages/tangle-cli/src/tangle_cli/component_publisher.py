@@ -164,7 +164,15 @@ class ComponentPublisher(TangleCliHandler):
         self._git_root = str(git_root or git_info.get("_git_root") or "") or None
         self.git_remote_sha = git_remote_sha or git_info.get("git_remote_sha")
         self.git_remote_branch = git_remote_branch or git_info.get("git_remote_branch")
-        self.git_remote_url = git_remote_url or git_info.get("git_remote_url")
+        resolved_git_remote_url = git_remote_url or git_info.get("git_remote_url")
+        # Sanitize here as well as in get_git_info: a caller-supplied
+        # --git-remote-url bypasses get_git_info's normalization, so this is the
+        # single choke point that guarantees no credentials are persisted.
+        self.git_remote_url = (
+            utils._normalize_git_url(resolved_git_remote_url)
+            if resolved_git_remote_url
+            else resolved_git_remote_url
+        )
         self.git_repo = git_repo
 
     def _component_spec_model(self) -> type[Any]:

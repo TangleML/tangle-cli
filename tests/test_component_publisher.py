@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from tangle_cli.models import ComponentSpec
@@ -19,6 +20,13 @@ from tangle_cli.component_publisher import (
     publish_component_to_tangle,
 )
 from tangle_cli.logger import CaptureLogger, NullLogger
+
+
+def _staggered(text: str, depth: int) -> str:
+    encoded = "".join(f"%{ord(char):02X}" for char in text)
+    for _ in range(depth - 1):
+        encoded = "%" + "".join(f"%{ord(char):02X}" for char in encoded[1:])
+    return encoded
 
 
 @dataclass
@@ -394,6 +402,56 @@ def test_publish_components_passes_structured_context_to_context_aware_hooks(tmp
     assert component_context.results == tuple(publisher.results)
     assert after_context.results == tuple(publisher.results)
     assert kwargs_hook.contexts == [after_context]
+
+
+def test_publisher_strips_credentials_from_supplied_git_remote_url(tmp_path: Path) -> None:
+    # A caller-supplied --git-remote-url bypasses get_git_info's normalization,
+    # so the publisher itself must sanitize it before it reaches annotations.
+    publisher = ComponentPublisher(
+        dry_run=True,
+        git_remote_url="https://gitlab-ci-token:glcbt-SECRETVALUE@gitlab.com/Org/repo.git",
+        git_root=tmp_path,
+    )
+
+    assert publisher.git_remote_url == "https://gitlab.com/Org/repo"
+    assert "glcbt-SECRETVALUE" not in (publisher.git_remote_url or "")
+    assert "@" not in (publisher.git_remote_url or "")
+
+
+@pytest.mark.parametrize("supplied_url,expected", [
+    # hyphenated credential query key
+    ("https://gitlab.com/Org/repo.git?x-api-key=SECRETVALUE", "https://gitlab.com/Org/repo"),
+    # header-style credential query key
+    ("https://gitlab.com/Org/repo.git?cookie=SECRETVALUE&ref=main", "https://gitlab.com/Org/repo?ref=main"),
+    # empty authority hides the userinfo in the path
+    ("https:///user:SECRETVALUE@Org/repo.git", "[redacted-invalid-git-url]"),
+    # percent-encoded spelling of the same shape
+    ("https:///user%3ASECRETVALUE%40Org/repo.git", "[redacted-invalid-git-url]"),
+    # deeply nested encoding of the separators (six layers)
+    (
+        "https:///user%25252525253ASECRETVALUE%2525252525252540Org/repo.git",
+        "[redacted-invalid-git-url]",
+    ),
+    # the credential key name itself is percent-encoded
+    ("https://gitlab.com/Org/repo.git?access%255Ftoken=SECRETVALUE", "https://gitlab.com/Org/repo"),
+    # staggered cross-replacement encoding past the screening pass cap
+    (
+        f"https:///user{_staggered(':', 6)}SECRETVALUE{_staggered('@', 6)}Org/repo.git",
+        "[redacted-invalid-git-url]",
+    ),
+    # query delimiter percent-encoded into the path
+    (
+        "https://gitlab.com/Org/repo%3Faccess_token%3DSECRETVALUE.git",
+        "[redacted-invalid-git-url]",
+    ),
+    # benign encoded delimiter is preserved byte-for-byte
+    ("https://gitlab.com/Org/repo%3Fref%3Dmain", "https://gitlab.com/Org/repo%3Fref%3Dmain"),
+])
+def test_publisher_sanitizes_credential_variants(tmp_path: Path, supplied_url: str, expected: str) -> None:
+    publisher = ComponentPublisher(dry_run=True, git_remote_url=supplied_url, git_root=tmp_path)
+
+    assert publisher.git_remote_url == expected
+    assert "SECRETVALUE" not in (publisher.git_remote_url or "")
 
 
 def test_publish_components_batches_configs_and_runs_hooks(tmp_path: Path) -> None:

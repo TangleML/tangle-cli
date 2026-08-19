@@ -11,6 +11,7 @@ import yaml
 
 from tangle_cli.handler import TangleCliHandler
 from tangle_cli.models import ComponentInfo, ComponentSpec
+from tangle_cli.utils import _normalize_git_url
 
 if TYPE_CHECKING:
     from tangle_cli.client import TangleApiClient
@@ -416,7 +417,8 @@ class ComponentInspector(TangleCliHandler):
         if ann.get("git_remote_url") and (
             ann.get("component_yaml_path") or ann.get("git_relative_dir")
         ):
-            return True, f"git source metadata links to {ann['git_remote_url']}"
+            safe_url = _normalize_git_url(ann["git_remote_url"])
+            return True, f"git source metadata links to {safe_url}"
 
         impl = spec.implementation or {}
         container = impl.get("container", {})
@@ -446,6 +448,10 @@ def _resolve_git_source(spec: ComponentSpec) -> dict[str, Any] | None:
     git_url = annotations.get("git_remote_url")
     if not git_url:
         return None
+
+    # Server-supplied annotations may still carry credentials in the remote
+    # URL; strip them before building any browsable/emitted links.
+    git_url = _normalize_git_url(git_url)
 
     sha = annotations.get("git_remote_sha", "")
     branch = annotations.get("git_remote_branch", "main")
