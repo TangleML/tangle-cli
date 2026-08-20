@@ -1157,6 +1157,7 @@ class PipelineHydrator(TangleCliHandler):
             search_names,
             verbose=False,
             published_by=publisher,
+            include_deprecated=bool(version_constraint),
         )
         if not candidates:
             self.log.info(f"   Resolve: no candidates for name={component_name}")

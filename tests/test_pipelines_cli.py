@@ -1410,6 +1410,47 @@ def test_pipeline_hydrator_resolve_config_name_uses_filters(tmp_path: Path):
             "components": ["Thing", "[Official] Thing"],
             "verbose": False,
             "published_by": "alice@example.com",
+            "include_deprecated": True,
+        }
+    ]
+
+
+def test_pipeline_hydrator_resolve_config_name_without_version_excludes_deprecated(
+    tmp_path: Path,
+):
+    from tangle_cli.pipeline_hydrator import PipelineHydrator
+
+    calls = []
+
+    class FakeClient:
+        def find_existing_components(self, components, **kwargs):
+            calls.append({"components": components, **kwargs})
+            return [SimpleNamespace(digest="sha256:active", version="2.0")]
+
+        def get_component_spec(self, digest):
+            assert digest == "sha256:active"
+            return SimpleNamespace(
+                data={
+                    "name": "Thing",
+                    "metadata": {"annotations": {"version": "2.0"}},
+                    "implementation": {"container": {"image": "active"}},
+                }
+            )
+
+    digest, spec = PipelineHydrator(client=FakeClient())._resolve_from_config(
+        {"name": "Thing"},
+        "Pipeline.task",
+        tmp_path,
+    )
+
+    assert digest == "sha256:active"
+    assert spec["implementation"]["container"]["image"] == "active"
+    assert calls == [
+        {
+            "components": ["Thing", "[Official] Thing"],
+            "verbose": False,
+            "published_by": None,
+            "include_deprecated": False,
         }
     ]
 
