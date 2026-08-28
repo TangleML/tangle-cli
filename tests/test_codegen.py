@@ -1023,3 +1023,164 @@ def test_generate_operations_uses_concrete_return_annotations() -> None:
     assert "response_model=self._response_model('FooResponse', FooResponse)" in operations
     assert "def things_delete(self, id: Any) -> None:" in operations
     assert "def unknown_list(self) -> Any:" in operations
+
+
+def _renamed_parameter_schema() -> dict:
+    """Schema whose body/query/path names collide with generated Python locals."""
+
+    return {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/admin/notices": {
+                "post": {
+                    "operationId": "create_notice",
+                    "parameters": [
+                        {
+                            "name": "order.by",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                        },
+                        {
+                            "name": "token",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                        },
+                    ],
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["body"],
+                                    "properties": {
+                                        "body": {"type": "string"},
+                                        "title": {"type": "string"},
+                                        "variant": {"type": "string"},
+                                    },
+                                }
+                            }
+                        }
+                    },
+                }
+            },
+            "/api/admin/notices/{notice-id}": {
+                "patch": {
+                    "operationId": "update_notice",
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"body": {"type": "string"}},
+                                }
+                            }
+                        }
+                    },
+                }
+            },
+        },
+        "components": {"schemas": {}},
+    }
+
+
+def test_generate_operations_uses_wire_names_for_renamed_parameters(monkeypatch, tmp_path) -> None:
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "renamed_param_api"
+    openapi.write_text(json.dumps(_renamed_parameter_schema()), encoding="utf-8")
+
+    codegen.generate(openapi, out)
+
+    operations = (out / "operations.py").read_text(encoding="utf-8")
+    post = operations.split("def admin_notices(", 1)[1].split("    def ", 1)[0]
+    patch = operations.split("def admin_patch_notices(", 1)[1].split("__all__", 1)[0]
+
+    # Python locals stay collision-free, wire keys stay schema-faithful.
+    assert "def admin_notices(self, body_2: Any, " in operations
+    assert "'body_2'" not in operations
+    assert "'body': body_2" in post
+    assert "'order.by': order_by" in post
+    assert "'token': token_2" in post
+    assert "'notice-id': notice_id" in patch
+    assert "'body': body_2" in patch
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    generated_operations = importlib.import_module("renamed_param_api.operations")
+
+    class Client(generated_operations.GeneratedTangleApiOperations):
+        def __init__(self) -> None:
+            self.calls = []
+
+        def _request_json(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return {"ok": True}
+
+    client = Client()
+    client.admin_notices("notice text", title="Heads up", variant="info")
+    client.admin_notices("notice text", order_by="created_at", token_2="t0ken")
+    client.admin_patch_notices("abc123", body_2="updated text")
+
+    create = client.calls[0][1]
+    assert create["json_data"] == {
+        "body": "notice text",
+        "title": "Heads up",
+        "variant": "info",
+    }
+    assert create["params"] == {"order.by": None, "token": None}
+    assert client.calls[1][1]["params"] == {"order.by": "created_at", "token": "t0ken"}
+    assert client.calls[2][1]["path_params"] == {"notice-id": "abc123"}
+    assert client.calls[2][1]["json_data"] == {"body": "updated text"}
+
+
+def test_generate_runtime_type_ignore_covers_required_mypy_error_codes(tmp_path) -> None:
+    runtime = codegen.generate_runtime()
+
+    assert "ConfigDict = None  # type: ignore[misc, assignment]" in runtime
+    assert "# type: ignore[assignment]" not in runtime
+
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "runtime_api"
+    openapi.write_text(json.dumps(_schema()), encoding="utf-8")
+
+    codegen.generate(openapi, out)
+
+    assert (out / "runtime.py").read_text(encoding="utf-8") == runtime
+
+
+def test_generate_operations_preserves_empty_wire_names(tmp_path) -> None:
+    openapi = tmp_path / "openapi.json"
+    out = tmp_path / "empty_name_api"
+    openapi.write_text(
+        json.dumps({
+            "openapi": "3.1.0",
+            "paths": {
+                "/api/oddities": {
+                    "post": {
+                        "operationId": "create_oddity",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": [""],
+                                        "properties": {"": {"type": "string"}},
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            },
+            "components": {"schemas": {}},
+        }),
+        encoding="utf-8",
+    )
+
+    codegen.generate(openapi, out)
+
+    operations = (out / "operations.py").read_text(encoding="utf-8")
+
+    # An empty JSON property name is schema-valid and must not be replaced by
+    # the generated Python local name.
+    assert "**{'': " in operations

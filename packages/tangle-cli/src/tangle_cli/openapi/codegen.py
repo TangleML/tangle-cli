@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .parser import (
     DEFAULT_OPENAPI_PATH,
@@ -384,7 +384,7 @@ from pydantic import BaseModel
 try:
     from pydantic import ConfigDict
 except ImportError:  # pragma: no cover - pydantic v1 fallback
-    ConfigDict = None  # type: ignore[assignment]
+    ConfigDict = None  # type: ignore[misc, assignment]
 
 
 class TangleGeneratedModel(BaseModel):
@@ -464,6 +464,21 @@ def generate_models(
     lines.append("")
     return "\n".join(lines)
 
+
+class _ParamName(NamedTuple):
+    """Pair a generated Python parameter name with its OpenAPI wire name.
+
+    ``local_name`` is the collision-avoided Python identifier used in the
+    generated method signature; ``wire_name`` is the schema/OpenAPI name that
+    must be used as the JSON/query/path key sent to the backend. They differ
+    whenever the parser had to rename a field (for example a request-body field
+    literally named ``body`` becomes the local ``body_2``).
+    """
+
+    local_name: str
+    wire_name: str
+
+
 def _method_name(group_name: str, command_name: str) -> str:
     return f"{_safe_identifier(group_name)}_{_safe_identifier(command_name)}"
 
@@ -481,7 +496,7 @@ def _param_signature(
     has_request_body: bool,
     *,
     raw_body_override: bool = False,
-) -> tuple[str, list[str], list[str], list[str], set[str], bool]:
+) -> tuple[str, list[_ParamName], list[_ParamName], list[_ParamName], set[str], bool]:
     required: list[Any] = []
     optional: list[Any] = []
     for parameter in parameters:
@@ -489,25 +504,32 @@ def _param_signature(
     ordered = required + optional
     seen: set[str] = set()
     signature_parts: list[str] = []
-    path_names: list[str] = []
-    query_names: list[str] = []
-    body_names: list[str] = []
+    path_names: list[_ParamName] = []
+    query_names: list[_ParamName] = []
+    body_names: list[_ParamName] = []
     required_body_names: set[str] = set()
     for parameter in ordered:
         name = _safe_identifier(parameter.local_name)
         if name in seen:
             continue
         seen.add(name)
+        # Collision-avoiding Python locals (e.g. ``body_2``) must never leak into
+        # the emitted wire payload; the schema field name is the wire key. Only
+        # a missing name falls back to the local identifier, so schema-valid
+        # empty property names keep their exact wire spelling.
+        original_name = getattr(parameter, "original_name", None)
+        wire_name = name if original_name is None else str(original_name)
+        entry = _ParamName(local_name=name, wire_name=wire_name)
         if parameter.required:
             signature_parts.append(f"{name}: Any")
         else:
             signature_parts.append(f"{name}: Any = None")
         if parameter.location == "path":
-            path_names.append(name)
+            path_names.append(entry)
         elif parameter.location == "query":
-            query_names.append(name)
+            query_names.append(entry)
         elif parameter.location == "body":
-            body_names.append(name)
+            body_names.append(entry)
             if parameter.required:
                 required_body_names.add(name)
     include_body = has_request_body
@@ -517,27 +539,27 @@ def _param_signature(
     return ", ".join(signature_parts), path_names, query_names, body_names, required_body_names, include_body
 
 
-def _dict_literal(names: list[str]) -> str:
+def _dict_literal(names: list[_ParamName]) -> str:
     if not names:
         return "None"
-    return "{" + ", ".join(f"{name!r}: {name}" for name in names) + "}"
+    return "{" + ", ".join(f"{name.wire_name!r}: {name.local_name}" for name in names) + "}"
 
 
-def _body_dict_literal(names: list[str], required_names: set[str]) -> str:
+def _body_dict_literal(names: list[_ParamName], required_names: set[str]) -> str:
     if not names:
         return "None"
-    optional_names = [name for name in names if name not in required_names]
+    optional_names = [name for name in names if name.local_name not in required_names]
     if not optional_names:
         return _dict_literal(names)
     optional_literal = _dict_literal(optional_names)
     optional_expr = f"key: value for key, value in {optional_literal}.items() if value is not None"
     if not required_names:
         return "{" + optional_expr + "}"
-    required_literal = _dict_literal([name for name in names if name in required_names])
+    required_literal = _dict_literal([name for name in names if name.local_name in required_names])
     return "{" + f"**{required_literal}, **{{{optional_expr}}}" + "}"
 
 
-def _merged_body_dict_literal(names: list[str], required_names: set[str]) -> str:
+def _merged_body_dict_literal(names: list[_ParamName], required_names: set[str]) -> str:
     """Return request JSON with generic body fields overridden by named fields."""
 
     return f"{{**(body or {{}}), **{_body_dict_literal(names, required_names)}}}"

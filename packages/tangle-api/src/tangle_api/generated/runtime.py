@@ -9,7 +9,7 @@ from pydantic import BaseModel
 try:
     from pydantic import ConfigDict
 except ImportError:  # pragma: no cover - pydantic v1 fallback
-    ConfigDict = None  # type: ignore[assignment]
+    ConfigDict = None  # type: ignore[misc, assignment]
 
 
 class TangleGeneratedModel(BaseModel):
