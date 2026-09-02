@@ -16,8 +16,9 @@ ergonomics (``.bind`` / ``.named`` / ``.with_annotations`` and call-site
 kwargs). Calling the handle inside an active ``@pipeline`` trace records
 ONE parent task (never the child's internals) and returns a
 :class:`tangle_cli.python_pipeline.placeholders.TaskOutputProxy`. Tangle only
-supports conditional execution for container-component tasks, so the reserved
-call-site ``is_enabled=`` metadata keyword is rejected on subpipeline boundary
+supports conditional execution and execution options for container-component
+tasks, so the reserved call-site ``is_enabled=``, ``execution_options=`` and
+``max_cache_staleness=`` metadata keywords are rejected on subpipeline boundary
 (graph-component) tasks.
 
 The child body is NOT executed into the parent's :class:`GraphBuilder`.
@@ -128,6 +129,10 @@ class SubpipelineRef:
         evaluate conditions on graph-component tasks. A child graph input with
         that name remains available through ``.bind(is_enabled=...)``, matching
         the reserved-metadata collision convention used by ``CallableRef``.
+        ``execution_options`` / ``max_cache_staleness`` are rejected for the
+        same reason: caching and retries apply to the container executions
+        inside the child graph, so silently emitting them on the boundary task
+        would look like a setting that is not actually applied.
         """
         import sys
 
@@ -153,6 +158,17 @@ class SubpipelineRef:
                 "the child declares a graph input named 'is_enabled', pass that "
                 "input with .bind(is_enabled=...)."
             )
+
+        for reserved in ("execution_options", "max_cache_staleness"):
+            if reserved in kwargs:
+                raise CompileError(
+                    f"subpipeline tasks do not support call-site {reserved}= "
+                    "because Tangle execution options (caching, retries) "
+                    "apply to container-component tasks. Set "
+                    f"{reserved}= on the tasks inside the child pipeline. If "
+                    f"the child declares a graph input named {reserved!r}, pass "
+                    f"that input with .bind({reserved}=...)."
+                )
 
         # Resolve the parent task ID. ``.named(...)`` always wins over the
         # AST-derived auto ID.

@@ -263,8 +263,7 @@
       "additionalProperties": true,
       "properties": {
         "cachingStrategy": { "$ref": "#/$defs/CachingStrategySpec" },
-        "retryStrategy":   { "$ref": "#/$defs/RetryStrategySpec" },
-        "timeout":         { "type": "string", "description": "Go-style duration, e.g. `30m`, `2h`." }
+        "retryStrategy":   { "$ref": "#/$defs/RetryStrategySpec" }
       }
     },
 
@@ -274,7 +273,7 @@
       "properties": {
         "maxCacheStaleness": {
           "type": ["string", "null"],
-          "description": "Maximum allowed cache age, e.g. `P7D` (ISO-8601) or `7d`."
+          "description": "Maximum allowed cache age as an RFC3339 duration, e.g. `P7D`; `P0D` never reuses a cached result."
         }
       }
     },
@@ -282,9 +281,9 @@
     "RetryStrategySpec": {
       "type": "object",
       "additionalProperties": true,
+      "required": ["maxRetries"],
       "properties": {
-        "maxRetries": { "type": "integer", "minimum": 0 },
-        "backoff":    { "type": "string", "description": "Go-style duration, e.g. `30s`." }
+        "maxRetries": { "type": "integer", "minimum": 0 }
       }
     }
   }

@@ -413,6 +413,56 @@ def collision(runtime_condition: In[str]) -> Out[str]:
 
 The bound value remains under `arguments.is_enabled`; the call-site value emits as `isEnabled`. Tangle does not evaluate conditions on graph-component tasks, so `subpipeline(...)(is_enabled=...)` is rejected with guidance to condition tasks inside the child pipeline. A child graph input with that name remains available through `subpipeline(...).bind(is_enabled=...)(...)`. There is no `condition` alias.
 
+##### Task execution options and caching
+
+Tangle caches task results, so a task that reads state which changes between runs (a run's `createdBy`, wall-clock time, an external table that the graph does not depend on) must opt out of caching explicitly. Use the reserved task-call metadata keyword `max_cache_staleness=`:
+
+```python
+@pipeline("Scheduled-run gate")
+def scheduled_gate() -> Out[str]:
+    is_scheduled = read_runtime_state(
+        name="CLOUD_PIPELINES_PIPELINE_RUN_CREATED_BY",
+        max_cache_staleness="P0D",
+    )
+    return is_scheduled.Output
+```
+
+This emits the canonical task field rather than a component argument:
+
+```yaml
+executionOptions:
+  cachingStrategy:
+    maxCacheStaleness: P0D
+```
+
+`P0D` means "never reuse a cached result"; any other ISO-8601 duration (`P7D`) caps how stale a reusable result may be. For the rest of `ExecutionOptionsSpec`, use the general `execution_options=` passthrough:
+
+```python
+uploaded = flaky_upload(
+    payload=data.Output,
+    execution_options={"retryStrategy": {"maxRetries": 3}},
+)
+```
+
+Both keywords may be combined; `max_cache_staleness=` wins over a `cachingStrategy.maxCacheStaleness` supplied through `execution_options=`, and every other passthrough field is preserved. A mapping passed as `execution_options=` is never mutated, so one shared constant can be reused across tasks.
+
+Tangle models exactly two execution-option groups today — `cachingStrategy.maxCacheStaleness` and `retryStrategy.maxRetries` (required whenever `retryStrategy` is present). Any other key is rejected at compile time: the backend ignores unmodeled keys silently, so accepting one would advertise a setting that never takes effect.
+
+Execution options are STATIC compile-time settings, so `max_cache_staleness` takes an RFC3339 duration string and `retryStrategy.maxRetries` a non-negative integer. Graph inputs, task outputs, `dynamic_secret(...)`, and `raw(...)` values are rejected because the backend does not resolve them for `executionOptions`. Passing an empty `execution_options={}` is an error — omit the keyword instead.
+
+If a component itself declares an input named `max_cache_staleness` or `execution_options`, bind that component argument separately while using the call-site keyword for task metadata:
+
+```python
+result = work.bind(max_cache_staleness="component-input-value")(
+    message="hello",
+    max_cache_staleness="P0D",
+)
+```
+
+The bound value remains under `arguments.max_cache_staleness`; the call-site value emits as `executionOptions`. Tangle applies caching and retries to container-component tasks, so `subpipeline(...)(max_cache_staleness=...)` and `subpipeline(...)(execution_options=...)` are rejected with guidance to set them on tasks inside the child pipeline. A child graph input with either name remains available through `subpipeline(...).bind(...)`.
+
+See `examples/python_pipeline/execution_options_pipeline.py` for a runnable example.
+
 ##### Task images, dependencies, and image IDs
 
 Use `@task(image="...")` to write the component image directly. Use `dependencies_from="pyproject.toml"` when generated components need to install Python dependencies. Several tasks can share one authoring-only `TaskEnv`:

@@ -92,6 +92,32 @@ def test_pipeline_dehydrator_preserves_is_enabled_round_trip(tmp_path: Path) -> 
     }
 
 
+def test_pipeline_dehydrator_preserves_execution_options_round_trip(
+    tmp_path: Path,
+) -> None:
+    task = _task(
+        "Leaf Component",
+        "digest-1",
+        canonical_url="https://example.test/leaf.yaml",
+    )
+    task["executionOptions"] = {
+        "cachingStrategy": {"maxCacheStaleness": "P0D"},
+        "retryStrategy": {"maxRetries": 3},
+    }
+    data = _pipeline({"task": task})
+
+    result = PipelineDehydrator(
+        {"": DehydrateChoice.URL}, output_file=tmp_path / "out.yaml"
+    ).dehydrate(data)
+
+    assert result["implementation"]["graph"]["tasks"]["task"][
+        "executionOptions"
+    ] == {
+        "cachingStrategy": {"maxCacheStaleness": "P0D"},
+        "retryStrategy": {"maxRetries": 3},
+    }
+
+
 def test_pipeline_dehydrator_construction_is_auth_env_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Auth-free dehydration construction must not require TANGLE_API_URL."""
 

@@ -7,6 +7,7 @@ directly against ``tangle_cli.pipeline_compiler``. CLI coverage targets the
 cyclopts ``compile`` command (``tangle sdk pipelines compile``) and the
 ``compile_pipeline_file`` facade.
 """
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import tangle_cli
 from tangle_cli import cli
 from tangle_cli.pipeline_compiler import (
     IMAGE_IDS,
@@ -818,6 +820,252 @@ def test_compile_rejects_unsupported_is_enabled_values(
     assert not out.exists()
 
 
+def test_compile_emits_execution_options_and_collision_escape(tmp_path):
+    """Task execution options use canonical ``executionOptions`` without
+    stealing a bound component input of the same Python name."""
+    out = tmp_path / "compiled.yaml"
+    _provide_noop(out)
+    src = tmp_path / "execution_options_pipeline.py"
+    src.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, ref\n"
+        "\n"
+        "@pipeline('Execution Options Pipeline')\n"
+        "def execution_options_pipeline() -> Out[str]:\n"
+        "    no_cache = ref(url='file://./noop.yaml')(\n"
+        "        max_cache_staleness='P0D'\n"
+        "    )\n"
+        "    passthrough = ref(url='file://./noop.yaml')(\n"
+        "        execution_options={'retryStrategy': {'maxRetries': 3}}\n"
+        "    )\n"
+        "    narrow_wins = ref(url='file://./noop.yaml')(\n"
+        "        execution_options={\n"
+        "            'retryStrategy': {'maxRetries': 1},\n"
+        "            'cachingStrategy': {'maxCacheStaleness': 'P7D'},\n"
+        "        },\n"
+        "        max_cache_staleness='P0D',\n"
+        "    )\n"
+        "    plain = ref(url='file://./noop.yaml')(message='plain')\n"
+        "    collision = ref(url='file://./noop.yaml').bind(\n"
+        "        max_cache_staleness='component-value'\n"
+        "    )(max_cache_staleness='P0D', depends_on=plain)\n"
+        "    return collision\n",
+        encoding="utf-8",
+    )
+
+    compile_pipeline(src, out)
+    tasks = yaml.safe_load(out.read_text())["implementation"]["graph"]["tasks"]
+
+    assert tasks["No Cache"]["executionOptions"] == {
+        "cachingStrategy": {"maxCacheStaleness": "P0D"}
+    }
+    assert tasks["Passthrough"]["executionOptions"] == {
+        "retryStrategy": {"maxRetries": 3},
+    }
+    # The narrow keyword overrides the passthrough's cache field and leaves
+    # every other execution option intact.
+    assert tasks["Narrow Wins"]["executionOptions"] == {
+        "retryStrategy": {"maxRetries": 1},
+        "cachingStrategy": {"maxCacheStaleness": "P0D"},
+    }
+    # A bound component input of the same name stays a component argument.
+    assert (
+        tasks["Collision"]["arguments"]["max_cache_staleness"]
+        == "component-value"
+    )
+    assert tasks["Collision"]["executionOptions"] == {
+        "cachingStrategy": {"maxCacheStaleness": "P0D"}
+    }
+    assert "executionOptions" not in tasks["Plain"]
+
+
+def test_compile_omits_execution_options_when_not_authored(multi_arg_args):
+    data, _produce, _consume = multi_arg_args
+    tasks = data["implementation"]["graph"]["tasks"]
+    assert all("executionOptions" not in task for task in tasks.values())
+
+
+@pytest.mark.parametrize(
+    ("expression", "message_fragment"),
+    [
+        ("max_cache_staleness=None", "unsupported max_cache_staleness value type"),
+        ("max_cache_staleness=0", "unsupported max_cache_staleness value type"),
+        (
+            "max_cache_staleness=dynamic_secret('TOKEN')",
+            "unsupported max_cache_staleness value type",
+        ),
+        ("execution_options=None", "unsupported execution_options value type"),
+        ("execution_options='P0D'", "unsupported execution_options value type"),
+        (
+            "execution_options={'cachingStrategy': raw('{{runtime}}')}",
+            "unsupported execution_options value type",
+        ),
+        (
+            "execution_options={'cachingStrategy': dynamic_secret('TOKEN')}",
+            "unsupported execution_options value type",
+        ),
+        ("execution_options={}", "execution_options={} is empty"),
+        # Keys the backend does not model are silently dropped server-side,
+        # so the authoring surface must reject them instead of advertising a
+        # setting that never takes effect.
+        (
+            "execution_options={'timeout': '30m'}",
+            "unknown execution_options key 'timeout'",
+        ),
+        (
+            "execution_options={'retryStrategy': {'maxRetries': 3, "
+            "'backoff': '30s'}}",
+            "unknown execution_options.retryStrategy field 'backoff'",
+        ),
+        (
+            "execution_options={'cachingStrategy': {'maxStaleness': 'P0D'}}",
+            "unknown execution_options.cachingStrategy field 'maxStaleness'",
+        ),
+        # ``maxRetries`` is a required backend field.
+        (
+            "execution_options={'retryStrategy': {}}",
+            "execution_options.retryStrategy requires 'maxRetries'",
+        ),
+        # A malformed group must be reported, never silently replaced by the
+        # narrow keyword's merge.
+        (
+            "execution_options={'cachingStrategy': 'bad'}",
+            "execution_options.cachingStrategy must be a mapping",
+        ),
+        (
+            "execution_options={'cachingStrategy': None}, "
+            "max_cache_staleness='P0D'",
+            "execution_options.cachingStrategy must be a mapping",
+        ),
+        (
+            "execution_options={'cachingStrategy': 'bad'}, "
+            "max_cache_staleness='P0D'",
+            "execution_options.cachingStrategy must be a mapping",
+        ),
+    ],
+)
+def test_compile_rejects_unsupported_execution_options(
+    expression, message_fragment, tmp_path
+):
+    out = tmp_path / "compiled.yaml"
+    _provide_noop(out)
+    src = tmp_path / "bad_execution_options_pipeline.py"
+    src.write_text(
+        "from tangle_cli.python_pipeline import (\n"
+        "    Out, dynamic_secret, pipeline, raw, ref,\n"
+        ")\n"
+        "\n"
+        "@pipeline('Bad Execution Options Pipeline')\n"
+        "def bad_execution_options_pipeline() -> Out[str]:\n"
+        f"    bad = ref(url='file://./noop.yaml')({expression})\n"
+        "    return bad\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CompileError) as exc:
+        compile_pipeline(src, out)
+
+    assert message_fragment in str(exc.value)
+    assert not out.exists()
+
+
+def test_compile_execution_options_does_not_mutate_authored_mapping(tmp_path):
+    """The ``max_cache_staleness`` merge must not write back into a shared
+    mapping the pipeline author reuses across tasks."""
+    out = tmp_path / "compiled.yaml"
+    _provide_noop(out)
+    src = tmp_path / "shared_execution_options_pipeline.py"
+    src.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, ref\n"
+        "\n"
+        "SHARED = {'retryStrategy': {'maxRetries': 3}}\n"
+        "\n"
+        "@pipeline('Shared Execution Options Pipeline')\n"
+        "def shared_execution_options_pipeline() -> Out[str]:\n"
+        "    first = ref(url='file://./noop.yaml')(\n"
+        "        execution_options=SHARED, max_cache_staleness='P0D'\n"
+        "    )\n"
+        "    second = ref(url='file://./noop.yaml')(\n"
+        "        execution_options=SHARED, depends_on=first\n"
+        "    )\n"
+        "    return second\n",
+        encoding="utf-8",
+    )
+
+    compile_pipeline(src, out)
+    tasks = yaml.safe_load(out.read_text())["implementation"]["graph"]["tasks"]
+
+    assert tasks["First"]["executionOptions"] == {
+        "retryStrategy": {"maxRetries": 3},
+        "cachingStrategy": {"maxCacheStaleness": "P0D"},
+    }
+    assert tasks["Second"]["executionOptions"] == {
+        "retryStrategy": {"maxRetries": 3}
+    }
+
+
+def test_execution_option_fields_match_generated_schema():
+    """The emit-time allowlist must track the schema generated from the pinned
+    backend models, so a backend field addition cannot silently stay
+    unauthorable (and a removed one cannot stay advertised).
+
+    ``pipeline_schema.json`` is regenerated by
+    ``scripts/refresh_pipeline_schema.py`` from
+    ``cloud_pipelines_backend.component_structures``, so it — not the
+    hand-maintained dehydrated schema — is the source of truth here.
+    """
+    from tangle_cli.python_pipeline.emit import (
+        _EXECUTION_OPTION_FIELDS,
+        _REQUIRED_EXECUTION_OPTION_FIELDS,
+    )
+
+    schema_path = (
+        Path(tangle_cli.__file__).parent / "schemas" / "pipeline_schema.json"
+    )
+    defs = json.loads(schema_path.read_text(encoding="utf-8"))["$defs"]
+
+    expected_groups = set(defs["ExecutionOptionsSpec"]["properties"])
+    assert set(_EXECUTION_OPTION_FIELDS) == expected_groups
+
+    group_to_spec = {
+        "cachingStrategy": "CachingStrategySpec",
+        "retryStrategy": "RetryStrategySpec",
+    }
+    for group, spec_name in group_to_spec.items():
+        spec = defs[spec_name]
+        assert _EXECUTION_OPTION_FIELDS[group] == frozenset(spec["properties"])
+        assert _REQUIRED_EXECUTION_OPTION_FIELDS.get(
+            group, frozenset()
+        ) == frozenset(spec.get("required", ()))
+
+
+def test_compile_emits_execution_options_for_task_authored_components(tmp_path):
+    """``@task``-authored tasks take the same reserved keyword as ``ref(...)``."""
+    src = tmp_path / "task_execution_options_pipeline.py"
+    src.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "\n"
+        "@task(image='python:3.12')\n"
+        "def read_runtime_env(name: str) -> str:\n"
+        "    return name\n"
+        "\n"
+        "@pipeline('Task Execution Options Pipeline')\n"
+        "def task_execution_options_pipeline() -> Out[str]:\n"
+        "    gate = read_runtime_env(\n"
+        "        name='CREATED_BY', max_cache_staleness='P0D'\n"
+        "    )\n"
+        "    return gate.Output\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "compiled.yaml"
+    compile_pipeline(src, out)
+    tasks = yaml.safe_load(out.read_text())["implementation"]["graph"]["tasks"]
+
+    assert tasks["Gate"]["executionOptions"] == {
+        "cachingStrategy": {"maxCacheStaleness": "P0D"}
+    }
+
+
 # ---------------------------------------------------------------------------
 # PipelineCompiler handler + ZONE_ROOT_MARKERS seam.
 
@@ -1159,6 +1407,38 @@ def test_compile_subpipeline_rejects_is_enabled_task_metadata(tmp_path):
     assert "subpipeline tasks do not support call-site is_enabled=" in message
     assert "container-component tasks" in message
     assert ".bind(is_enabled=...)" in message
+
+
+@pytest.mark.parametrize(
+    ("reserved", "expression"),
+    [
+        ("execution_options", "execution_options={'timeout': '30m'}"),
+        ("max_cache_staleness", "max_cache_staleness='P0D'"),
+    ],
+)
+def test_compile_subpipeline_rejects_execution_options_task_metadata(
+    reserved, expression, tmp_path
+):
+    src = tmp_path / "execution_options_subpipeline.py"
+    source = (FIXTURES / "subpipeline_pipeline.py").read_text(encoding="utf-8")
+    src.write_text(
+        source.replace(
+            "(seed=parent_wait_token)",
+            f"(seed=parent_wait_token, {expression})",
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy(FIXTURES / "config.yaml", tmp_path / "config.yaml")
+
+    with pytest.raises(CompileError) as exc:
+        compile_pipeline(
+            src, tmp_path / "compiled.yaml", pipeline_name="Parent Pipeline"
+        )
+
+    message = str(exc.value)
+    assert f"subpipeline tasks do not support call-site {reserved}=" in message
+    assert "container-component tasks" in message
+    assert f".bind({reserved}=...)" in message
 
 
 def test_compile_subpipeline_preserves_bound_is_enabled_graph_input(tmp_path):

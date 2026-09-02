@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import CompileError
-from .graph import IS_ENABLED_UNSET
+from .graph import EXECUTION_OPTIONS_UNSET, IS_ENABLED_UNSET
 
 _UNWRAPPED_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -296,6 +296,8 @@ class CallableRef:
         self,
         *,
         is_enabled: Any = IS_ENABLED_UNSET,
+        execution_options: Any = EXECUTION_OPTIONS_UNSET,
+        max_cache_staleness: Any = EXECUTION_OPTIONS_UNSET,
         **kwargs: Any,
     ) -> Any:
         """Trace-mode invocation.
@@ -313,7 +315,21 @@ class CallableRef:
         input named ``is_enabled``, bind that input with
         ``ref(...).bind(is_enabled=...)``; bound kwargs remain component
         arguments while the reserved call-site keyword remains task metadata,
-        so both may be used on the same task. Edge kwargs (``wait_for`` /
+        so both may be used on the same task.
+
+        ``execution_options`` and ``max_cache_staleness`` follow the same
+        reserved-keyword convention and are emitted as the canonical
+        ``executionOptions`` task field. ``execution_options`` takes the whole
+        ``ExecutionOptionsSpec`` mapping (``cachingStrategy`` and
+        ``retryStrategy`` — the only groups Tangle models);
+        ``max_cache_staleness`` is the narrow knob for
+        ``cachingStrategy.maxCacheStaleness`` (e.g. ``"P0D"`` to never reuse
+        cached results) and wins when both supply that field.
+        A component input named ``execution_options`` or
+        ``max_cache_staleness`` is bound the same way, with
+        ``ref(...).bind(max_cache_staleness=...)``.
+
+        Edge kwargs (``wait_for`` /
         ``depends_on``) and regular kwargs share one ``arguments`` dict in the
         IR; the value-vs-key dispatch happens at emit time. ``.bind(...)``
         kwargs are merged in last so call-site kwargs win on conflict (same
@@ -377,6 +393,8 @@ class CallableRef:
             arguments=merged,
             annotations=dict(self.annotations) if self.annotations else None,
             is_enabled=is_enabled,
+            execution_options=execution_options,
+            max_cache_staleness=max_cache_staleness,
         )
         builder.add_task(node)
 
