@@ -15,6 +15,11 @@ from typing import Any, Literal
 # instead of being silently omitted.
 IS_ENABLED_UNSET = object()
 
+# Distinguishes omitted task execution options from an explicitly supplied
+# value, so ``execution_options=None`` / ``max_cache_staleness=None`` fail
+# closed in the emitter instead of being silently dropped.
+EXECUTION_OPTIONS_UNSET = object()
+
 
 @dataclass
 class EdgeRef:
@@ -37,6 +42,11 @@ class TaskNode:
     ``arguments`` values may be plain strings, TaskOutputProxy objects, or
     GraphInputPlaceholder objects. ``is_enabled`` is separate task metadata;
     the emitter normalizes and serializes it as ``isEnabled`` when supplied.
+
+    ``execution_options`` (general passthrough) and ``max_cache_staleness``
+    (narrow ergonomic knob) are likewise task metadata, not component inputs.
+    The emitter merges them — the narrow keyword wins — and serializes the
+    result as the canonical ``executionOptions`` task field.
     """
 
     task_id: str
@@ -46,6 +56,8 @@ class TaskNode:
     arguments: dict[str, Any] = field(default_factory=dict)
     annotations: dict[str, str] | None = None
     is_enabled: Any = IS_ENABLED_UNSET
+    execution_options: Any = EXECUTION_OPTIONS_UNSET
+    max_cache_staleness: Any = EXECUTION_OPTIONS_UNSET
 
 
 @dataclass

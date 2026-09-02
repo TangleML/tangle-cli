@@ -131,6 +131,52 @@ def test_validate_dehydrated_data_rejects_unsupported_is_enabled(condition):
         validate_dehydrated_data(data)
 
 
+@pytest.mark.parametrize(
+    "execution_options",
+    [
+        {"cachingStrategy": {"maxCacheStaleness": "P0D"}},
+        {"cachingStrategy": {"maxCacheStaleness": None}},
+        {"retryStrategy": {"maxRetries": 0}},
+        {
+            "cachingStrategy": {"maxCacheStaleness": "P7D"},
+            "retryStrategy": {"maxRetries": 3},
+        },
+    ],
+)
+def test_validate_dehydrated_data_accepts_supported_execution_options(
+    execution_options,
+):
+    data = _valid_pipeline()
+    data["implementation"]["graph"]["tasks"]["load"][
+        "executionOptions"
+    ] = execution_options
+    validate_dehydrated_data(data)
+
+
+@pytest.mark.parametrize(
+    "execution_options",
+    [
+        # ``maxRetries`` is required by the backend's RetryStrategySpec, so a
+        # partial retry strategy must not pass the dehydrated schema either.
+        {"retryStrategy": {}},
+        {"retryStrategy": {"backoff": "30s"}},
+        {"retryStrategy": {"maxRetries": -1}},
+        {"retryStrategy": {"maxRetries": "3"}},
+        {"cachingStrategy": {"maxCacheStaleness": 0}},
+        {"cachingStrategy": "P0D"},
+    ],
+)
+def test_validate_dehydrated_data_rejects_unsupported_execution_options(
+    execution_options,
+):
+    data = _valid_pipeline()
+    data["implementation"]["graph"]["tasks"]["load"][
+        "executionOptions"
+    ] = execution_options
+    with pytest.raises(SchemaValidationError):
+        validate_dehydrated_data(data)
+
+
 # ---------------------------------------------------------------------------
 # Template-delimiter output contract.
 

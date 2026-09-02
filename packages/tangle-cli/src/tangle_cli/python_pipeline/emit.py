@@ -4,7 +4,7 @@ Canonical top-level key order:
     name, description, metadata, inputs, outputs, implementation
 
 Per-task key order:
-    annotations?, componentRef, arguments?, isEnabled?
+    annotations?, componentRef, arguments?, isEnabled?, executionOptions?
 
 Argument values are emitted in the runnable ``ArgumentValue`` shape,
 dispatched purely on the VALUE's runtime type — never on the argument
@@ -34,11 +34,18 @@ The literal key the user wrote (``wait_for``, ``depends_on``,
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from .dynamic_data import DynamicData
 from .errors import CompileError, InvalidArgumentTypeError
-from .graph import IS_ENABLED_UNSET, EdgeRef, GraphBuilder, TaskNode
+from .graph import (
+    EXECUTION_OPTIONS_UNSET,
+    IS_ENABLED_UNSET,
+    EdgeRef,
+    GraphBuilder,
+    TaskNode,
+)
 from .placeholders import GraphInputPlaceholder, TaskOutputProxy
 from .raw import Raw
 
@@ -141,7 +148,7 @@ def _emit_task(
     node: TaskNode, task_path: str, exempt_paths: set[str]
 ) -> dict[str, Any]:
     """Build the per-task body dict in canonical key order:
-    ``annotations?, componentRef, arguments?, isEnabled?``.
+    ``annotations?, componentRef, arguments?, isEnabled?, executionOptions?``.
 
     ``task_path`` is this task's dot-delimited JSON path
     (``implementation.graph.tasks.<task_id>``); each argument's path is
@@ -166,6 +173,10 @@ def _emit_task(
 
     if node.is_enabled is not IS_ENABLED_UNSET:
         body["isEnabled"] = _emit_is_enabled(node.is_enabled)
+
+    execution_options = _emit_execution_options(node)
+    if execution_options is not None:
+        body["executionOptions"] = execution_options
 
     return body
 
@@ -313,6 +324,171 @@ def _emit_is_enabled(value: Any) -> Any:
         f"unsupported is_enabled value type {type(value).__name__!r}. "
         "Task conditions only support bool, string constants, graphInput, "
         "or taskOutput; booleans are serialized as lowercase strings."
+    )
+
+
+# The fields the BACKEND actually models on ``ExecutionOptionsSpec`` —
+# mirrored from ``cloud_pipelines_backend.component_structures`` and vendored
+# into ``schemas/pipeline_schema.json`` (kept honest by
+# ``test_execution_option_fields_match_generated_schema``).
+#
+# This allowlist exists because the backend's pydantic models leave ``extra``
+# unset, i.e. ``extra="ignore"``: an unmodeled key such as ``timeout`` or
+# ``retryStrategy.backoff`` is SILENTLY DROPPED server-side rather than
+# rejected. Accepting one here would let an author believe a timeout/backoff
+# is in effect when nothing applies it, so the passthrough fails closed.
+_EXECUTION_OPTION_FIELDS: dict[str, frozenset[str]] = {
+    "cachingStrategy": frozenset({"maxCacheStaleness"}),
+    "retryStrategy": frozenset({"maxRetries"}),
+}
+
+# ``RetryStrategySpec.max_retries`` is a required (non-Optional) backend field,
+# so a retryStrategy without it is a submit-time validation failure.
+_REQUIRED_EXECUTION_OPTION_FIELDS: dict[str, frozenset[str]] = {
+    "retryStrategy": frozenset({"maxRetries"}),
+}
+
+
+def _emit_execution_options(node: TaskNode) -> dict[str, Any] | None:
+    """Merge the reserved execution-option keywords into ``executionOptions``.
+
+    ``execution_options=`` is the general passthrough for the modeled
+    ``ExecutionOptionsSpec`` (``cachingStrategy`` and ``retryStrategy``).
+    ``max_cache_staleness=`` is the narrow ergonomic knob for the common
+    "do not cache this task" case and WINS over any
+    ``cachingStrategy.maxCacheStaleness`` supplied through the passthrough.
+
+    Returns ``None`` when neither keyword was authored, so the key is omitted
+    entirely. Unlike arguments and ``isEnabled``, execution options are STATIC
+    compile-time settings: graph inputs, task outputs, dynamic data, and raw
+    values are rejected because the backend does not resolve them here. Keys
+    the backend does not model are rejected too — see
+    :data:`_EXECUTION_OPTION_FIELDS`.
+    """
+    options_value = node.execution_options
+    staleness = node.max_cache_staleness
+
+    if (
+        options_value is EXECUTION_OPTIONS_UNSET
+        and staleness is EXECUTION_OPTIONS_UNSET
+    ):
+        return None
+
+    options: dict[str, Any] = {}
+    if options_value is not EXECUTION_OPTIONS_UNSET:
+        if not isinstance(options_value, Mapping):
+            raise InvalidArgumentTypeError(
+                "unsupported execution_options value type "
+                f"{type(options_value).__name__!r}. Task execution options must "
+                "be a mapping such as "
+                '{"cachingStrategy": {"maxCacheStaleness": "P0D"}}.'
+            )
+        options = _normalize_execution_option_value(
+            options_value, "execution_options"
+        )
+        _validate_execution_option_fields(options)
+
+    if staleness is not EXECUTION_OPTIONS_UNSET:
+        if not isinstance(staleness, str):
+            raise InvalidArgumentTypeError(
+                "unsupported max_cache_staleness value type "
+                f"{type(staleness).__name__!r}. Task cache staleness must be a "
+                "duration string such as 'P0D' (never reuse cached results) or "
+                "'P7D'."
+            )
+        caching = options.get("cachingStrategy")
+        if not isinstance(caching, dict):
+            caching = {}
+        # The narrow keyword is the authoritative source for this one field.
+        caching["maxCacheStaleness"] = staleness
+        options["cachingStrategy"] = caching
+
+    if not options:
+        raise CompileError(
+            "execution_options={} is empty; omit the keyword instead of "
+            "passing an empty mapping so the task emits no executionOptions."
+        )
+    return options
+
+
+def _validate_execution_option_fields(options: dict[str, Any]) -> None:
+    """Reject execution-option keys the Tangle backend does not model.
+
+    The backend ignores (silently discards) unknown keys, so a typo or an
+    aspirational field would compile, submit, and quietly do nothing. Failing
+    at compile time keeps the passthrough as fail-closed as every other value
+    the Python authoring surface emits.
+    """
+    for group, value in options.items():
+        known_fields = _EXECUTION_OPTION_FIELDS.get(group)
+        if known_fields is None:
+            supported = ", ".join(sorted(_EXECUTION_OPTION_FIELDS))
+            raise InvalidArgumentTypeError(
+                f"unknown execution_options key {group!r}. Tangle models only "
+                f"{supported}; unmodeled keys are silently ignored by the "
+                "backend, so they are rejected here instead of looking like "
+                "a setting that never takes effect."
+            )
+        if not isinstance(value, dict):
+            raise InvalidArgumentTypeError(
+                f"execution_options.{group} must be a mapping; got "
+                f"{type(value).__name__!r}."
+            )
+        unknown = sorted(set(value) - known_fields)
+        if unknown:
+            supported = ", ".join(sorted(known_fields))
+            raise InvalidArgumentTypeError(
+                f"unknown execution_options.{group} field {unknown[0]!r}. "
+                f"Tangle models only {supported} here; unmodeled keys are "
+                "silently ignored by the backend, so they are rejected at "
+                "compile time."
+            )
+        required = _REQUIRED_EXECUTION_OPTION_FIELDS.get(group, frozenset())
+        missing = sorted(required - set(value))
+        if missing:
+            raise InvalidArgumentTypeError(
+                f"execution_options.{group} requires {missing[0]!r}. The "
+                "backend rejects a partial "
+                f"{group} spec."
+            )
+
+
+def _normalize_execution_option_value(value: Any, path: str) -> Any:
+    """Recursively validate/normalize one static execution-option value.
+
+    Mappings and sequences are copied (so a caller's dict is never mutated by
+    the ``max_cache_staleness`` merge) and tuples become lists so the result is
+    plain YAML-serializable data. Anything else — a task output, graph input,
+    ``dynamic_secret(...)``, ``raw(...)`` value, or an arbitrary object — is
+    rejected: ``executionOptions`` is applied at submit time, not resolved from
+    the running graph.
+    """
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise InvalidArgumentTypeError(
+                    f"unsupported execution_options key type "
+                    f"{type(key).__name__!r} at {path}. Execution option keys "
+                    "must be strings."
+                )
+            normalized[key] = _normalize_execution_option_value(
+                item, f"{path}.{key}"
+            )
+        return normalized
+    if isinstance(value, (list, tuple)):
+        return [
+            _normalize_execution_option_value(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    raise InvalidArgumentTypeError(
+        f"unsupported execution_options value type {type(value).__name__!r} at "
+        f"{path}. Task execution options are static compile-time settings, so "
+        "only strings, numbers, booleans, null, lists, and nested mappings are "
+        "supported; graph inputs, task outputs, dynamic data, and raw values "
+        "are not evaluated for executionOptions."
     )
 
 
