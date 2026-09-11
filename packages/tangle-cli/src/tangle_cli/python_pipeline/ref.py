@@ -2,7 +2,8 @@
 
 Returns a :class:`CallableRef` that records the user's URL/name/digest
 verbatim. Methods that capture additional metadata (``.bind``,
-``.named``, ``.with_annotations``) are composable, immutable operations
+``.named``, ``.with_annotations``, ``.with_emission``) are composable,
+immutable operations
 the tracer can call. Calling a :class:`CallableRef` inside a live
 ``@pipeline`` trace context records a :class:`TaskNode` into the active
 :class:`GraphBuilder`; calling it outside a trace raises ``RuntimeError``.
@@ -19,6 +20,46 @@ from .errors import CompileError
 from .graph import EXECUTION_OPTIONS_UNSET, IS_ENABLED_UNSET
 
 _UNWRAPPED_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Readiness emission seam, shared with subscription consumers: the annotation
+# key is a wire contract (its value is the ``event_key`` a subscription matches
+# on) and the grammar mirrors the backend's event name — an RFC 1123 label,
+# max 255 chars. Both are defined once, here.
+READINESS_EVENT_ANNOTATION = "tangleml.com/emission/readiness/event"
+MAX_EVENT_NAME_LENGTH = 255
+_EVENT_NAME_RE = re.compile(r"\A[a-z0-9]([a-z0-9-]*[a-z0-9])?\Z")
+
+
+class ReadinessEventNameError(CompileError, ValueError):
+    """Raised when a readiness event name is outside the backend grammar."""
+
+
+def validate_event_name(value: object) -> str:
+    """Return ``value`` unchanged if it is a legal readiness event name.
+
+    Exact ``str`` only, and nothing is normalized (not case, not surrounding
+    whitespace): the value is persisted as the event key a subscription names
+    back byte-for-byte, so a repaired name — or a subclass carrying its own
+    ``__eq__``/``__str__`` — would mean the name in the source and the name
+    that fires are two different strings.
+    """
+    shown = repr(value)
+    if len(shown) > 80:
+        shown = f"{shown[:80]}… ({len(shown)} characters)"
+    if type(value) is not str:
+        raise ReadinessEventNameError(
+            f"readiness event name must be a plain str, got "
+            f"{type(value).__name__} ({shown})"
+        )
+    if not value or len(value) > MAX_EVENT_NAME_LENGTH or not _EVENT_NAME_RE.match(value):
+        raise ReadinessEventNameError(
+            f"{shown} is not a legal readiness event name. Use lowercase letters, "
+            f"digits and '-', starting and ending with a letter or digit, at most "
+            f'{MAX_EVENT_NAME_LENGTH} characters, e.g. "orders-ready". This is the '
+            "backend's grammar for a subscription's event, so a name outside it "
+            "emits an event no subscription is allowed to wait for."
+        )
+    return value
 
 
 def _flatten_unwrapped_arguments(
@@ -211,6 +252,16 @@ class CallableRef:
         for k, v in ann.items():
             merged[k] = v  # type: ignore[assignment]
         return self._replace(annotations=merged)
+
+    def with_emission(self, event: str) -> "CallableRef":
+        """Return a new CallableRef that emits readiness ``event`` when it completes.
+
+        Sugar over the one readiness annotation key: other annotations are
+        preserved and the last ``.with_emission`` wins.
+        """
+        return self.with_annotations(
+            {READINESS_EVENT_ANNOTATION: validate_event_name(event)}
+        )
 
     # ------------------------------------------------------------------
     # @task codegen — materialize() writes the component YAML.

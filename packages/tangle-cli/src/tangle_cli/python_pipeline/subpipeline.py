@@ -37,6 +37,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from .errors import CompileError
+from .ref import READINESS_EVENT_ANNOTATION, validate_event_name
 
 if TYPE_CHECKING:  # pragma: no cover
     from .pipeline import PipelineFn
@@ -89,6 +90,17 @@ class SubpipelineRef:
         for k, v in ann.items():
             merged[k] = v  # type: ignore[assignment]
         return replace(self, annotations=merged)
+
+    def with_emission(self, event: str) -> "SubpipelineRef":
+        """Return a new handle that emits readiness ``event`` when the PARENT
+        subpipeline task completes.
+
+        Sugar over the one readiness annotation key: other annotations are
+        preserved and the last ``.with_emission`` wins.
+        """
+        return self.with_annotations(
+            {READINESS_EVENT_ANNOTATION: validate_event_name(event)}
+        )
 
     def override_config(self, **kwargs: Any) -> "SubpipelineRef":
         """Return a new handle with compile-time cfg overrides for the direct
