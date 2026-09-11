@@ -43,15 +43,20 @@ def validate_event_name(value: object) -> str:
     ``__eq__``/``__str__`` — would mean the name in the source and the name
     that fires are two different strings.
     """
-    shown = repr(value)
-    if len(shown) > 80:
-        shown = f"{shown[:80]}… ({len(shown)} characters)"
+    # The exact-type gate comes FIRST and the rejected value is not inspected:
+    # a hostile ``__repr__`` on a non-str (or on a str subclass) must not get to
+    # run inside a validator whose contract is to raise only
+    # ``ReadinessEventNameError``.
     if type(value) is not str:
         raise ReadinessEventNameError(
-            f"readiness event name must be a plain str, got "
-            f"{type(value).__name__} ({shown})"
+            f"readiness event name must be a plain str, got {type(value).__name__}"
         )
     if not value or len(value) > MAX_EVENT_NAME_LENGTH or not _EVENT_NAME_RE.match(value):
+        # Truncate before repr so a huge name is neither fully materialized nor
+        # able to bury the sentence explaining why it was refused.
+        shown = repr(value[:80])
+        if len(value) > 80:
+            shown = f"{shown}… ({len(value)} characters)"
         raise ReadinessEventNameError(
             f"{shown} is not a legal readiness event name. Use lowercase letters, "
             f"digits and '-', starting and ending with a letter or digit, at most "

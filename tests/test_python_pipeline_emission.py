@@ -184,6 +184,32 @@ def test_with_emission_rejects_str_subclasses(make_handle):
         make_handle().with_emission(Event("orders-ready"))
 
 
+@HANDLES
+def test_rejected_non_str_repr_is_never_executed(make_handle):
+    """The exact-type gate precedes any inspection of the rejected value."""
+
+    class HostileRepr:
+        def __repr__(self):
+            raise RuntimeError("boom")
+
+    with pytest.raises(ReadinessEventNameError) as exc:
+        make_handle().with_emission(HostileRepr())
+
+    assert "HostileRepr" in str(exc.value)
+
+
+@HANDLES
+def test_rejected_str_subclass_repr_is_never_executed(make_handle):
+    class HostileEvent(str):
+        def __repr__(self):
+            raise RuntimeError("boom")
+
+    with pytest.raises(ReadinessEventNameError) as exc:
+        make_handle().with_emission(HostileEvent("orders-ready"))
+
+    assert "plain str" in str(exc.value)
+
+
 def test_error_message_names_the_grammar_and_elides_huge_values():
     with pytest.raises(ReadinessEventNameError) as exc:
         validate_event_name("X" * 5000)
