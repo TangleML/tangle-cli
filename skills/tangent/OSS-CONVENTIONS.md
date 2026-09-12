@@ -84,6 +84,7 @@ OSS replacement. **Verbs/flags below were verified against the `tangle-cli` sour
 | `<deploy-cli> pipeline-run submit p.yaml -f c.yaml --hydrate --no-wait` | `tangle sdk pipeline-runs submit p.yaml [--arg K=V \| --args-json JSON] [--annotation K=V]` — **hydrate is the default; there is NO `--no-wait` (submit never waits); there is NO `-f config.yaml` (use `--arg`/`--args-json`, or `--config` for CLI-option defaults)** |
 | `… submit … (submit-as-is, no version resolution)` | `tangle sdk pipeline-runs submit p.yaml --no-hydrate` |
 | `… submit … --dry-run` (preview payload) | `tangle sdk pipeline-runs submit p.yaml --dry-run` (prints the submit body, creates no run) |
+| `… ship/submit a Python-authored pipeline` | `tangle sdk pipeline-runs submit-from-python p.py [--pipeline NAME] [--override K=V] [--image ID=REF]` plus the usual run flags — compiles, hydrates (always), submits, then deletes the compiled bundle; never waits (use `pipelines compile` to keep the YAML) |
 | `<deploy-cli> pipeline-run details RUN_ID --state` | `tangle sdk pipeline-runs details RUN_ID --include-execution-state` |
 | `… details … --implementations` | `… details … --include-implementations` |
 | `… details … --include-annotations` | `… details … --include-annotations` (unchanged) |

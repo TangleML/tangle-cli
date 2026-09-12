@@ -5,7 +5,9 @@ import io
 import json
 import math
 import os
+import shutil
 import sys
+import textwrap
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -3945,3 +3947,790 @@ def test_pipeline_runs_logs_stream_missing_endpoint_is_clean(monkeypatch) -> Non
     message = str(exc_info.value)
     assert "404" in message
     assert "/api/executions/exec-1/stream_container_log" in message
+
+
+# ---------------------------------------------------------------------------
+# submit-from-python: compile + hydrate + submit in one step.
+#
+# The adversarial surface for this command is artifact lifecycle (never leave
+# compiled YAML behind, never delete anything else), artifact locality (the
+# bundle must compile next to the script or relative refs break), and config
+# handling (a silently dropped config key would submit something the author
+# did not author).
+
+COMPILE_FIXTURES = Path(__file__).parent / "fixtures" / "python_pipeline"
+
+_REF_PIPELINE_SOURCE = """
+from tangle_cli.python_pipeline import Out, pipeline, ref
+
+
+@pipeline("Noop Pipeline")
+def noop_pipeline(cfg) -> Out[str]:
+    return ref(url="file://./noop.yaml").named(cfg.task_id)()
+"""
+
+_INPUT_PIPELINE_SOURCE = """
+from tangle_cli.python_pipeline import In, Out, pipeline, ref
+
+
+@pipeline("Input Pipeline")
+def input_pipeline(parent_wait_token: In[str], cfg) -> Out[str]:
+    return ref(url="file://./noop.yaml").named(cfg.task_id)(wait_for=parent_wait_token)
+"""
+
+_TWO_PIPELINE_SOURCE = """
+from tangle_cli.python_pipeline import Out, pipeline, ref
+
+
+@pipeline("First Pipeline")
+def first_pipeline(cfg) -> Out[str]:
+    return ref(url="file://./noop.yaml").named("first")()
+
+
+@pipeline("Second Pipeline")
+def second_pipeline(cfg) -> Out[str]:
+    return ref(url="file://./noop.yaml").named("second")()
+"""
+
+
+def _python_project(
+    tmp_path: Path,
+    source: str = _REF_PIPELINE_SOURCE,
+    *,
+    name: str = "pipeline.py",
+    cfg: str = "task_id: noop-task\n",
+) -> Path:
+    """Write a compilable project: script + config.yaml + referenced noop.yaml."""
+
+    project = tmp_path / "project"
+    project.mkdir(parents=True, exist_ok=True)
+    shutil.copy(COMPILE_FIXTURES / "noop.yaml", project / "noop.yaml")
+    (project / "config.yaml").write_text(cfg, encoding="utf-8")
+    script = project / name
+    script.write_text(textwrap.dedent(source), encoding="utf-8")
+    return script
+
+
+def _entries(directory: Path) -> set[str]:
+    """Directory contents, ignoring the interpreter's own bytecode cache."""
+
+    return {entry.name for entry in directory.iterdir() if entry.name != "__pycache__"}
+
+
+def _submitted_tasks(body: dict[str, Any]) -> dict[str, Any]:
+    return body["root_task"]["componentRef"]["spec"]["implementation"]["graph"]["tasks"]
+
+
+def test_submit_from_python_is_registered_with_compile_and_run_flags(capsys):
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "--help"])
+    assert "submit-from-python" in capsys.readouterr().out
+
+    run_app(app, ["sdk", "pipeline-runs", "submit-from-python", "--help"])
+    help_text = capsys.readouterr().out
+    for flag in (
+        "--pipeline",
+        "--override",
+        "--image",
+        "--arg",
+        "--args-json",
+        "--arg-secret",
+        "--annotation",
+        "--dry-run",
+        "--run-as",
+        "--trusted-source",
+        "--trusted-hydration",
+        "--submit-recovery-attempts",
+        "--config",
+        "--log-type",
+    ):
+        assert flag in help_text
+    # Hydration is forced (compiled refs are local-only) and submit never waits.
+    assert "--no-hydrate" not in help_text
+    assert "--wait" not in help_text
+
+
+def test_submit_from_python_compiles_hydrates_submits_and_cleans_up(monkeypatch, tmp_path: Path, capsys):
+    script = _python_project(tmp_path)
+    before = _entries(script.parent)
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit-from-python", str(script), "--log-type", "none"])
+
+    assert json.loads(capsys.readouterr().out) == {"id": "run-1", "root_execution_id": "exec-1"}
+    body = fake_client.created[0]
+    assert body["root_task"]["componentRef"]["spec"]["name"] == "Noop Pipeline"
+    # Forced hydration inlined the sibling component instead of shipping the
+    # server a local file:// URL it could never read.
+    task = _submitted_tasks(body)["noop-task"]
+    assert task["componentRef"]["spec"]["name"] == "Noop"
+    assert "url" not in task["componentRef"]
+    # Nothing compiled is left behind.
+    assert _entries(script.parent) == before
+
+
+def test_submit_from_python_cleanup_is_stem_scoped_and_keeps_neighbors(
+    monkeypatch, tmp_path: Path, capsys
+):
+    script = _python_project(tmp_path)
+    # A sibling bundle that merely looks like compiler output must survive.
+    decoy = script.parent / "pipeline.yaml"
+    decoy.write_text("name: hand written\n", encoding="utf-8")
+    decoy_sidecar = script.parent / "pipeline.components.yaml"
+    decoy_sidecar.write_text("noop: {}\n", encoding="utf-8")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit-from-python", str(script), "--log-type", "none"])
+
+    capsys.readouterr()
+    assert decoy.read_text(encoding="utf-8") == "name: hand written\n"
+    assert decoy_sidecar.read_text(encoding="utf-8") == "noop: {}\n"
+    assert len(fake_client.created) == 1
+
+
+def test_submit_from_python_removes_artifacts_when_submit_fails(monkeypatch, tmp_path: Path):
+    script = _python_project(tmp_path)
+    before = _entries(script.parent)
+
+    class FailingClient(FakeClient):
+        def pipeline_runs_create(self, body: Any = None) -> dict[str, Any]:
+            self.created.append(body)
+            raise ValueError("submit exploded")
+
+        def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
+            # No run was registered, so post-failure recovery finds nothing and
+            # the original submit error is what reaches the caller.
+            self.list_calls.append(kwargs)
+            return {"pipeline_runs": [], "next_page_token": None}
+
+    fake_client = FailingClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    # The transport error propagates exactly as it does for `submit`; what this
+    # command adds is that the compiled bundle is still gone afterwards.
+    with pytest.raises(ValueError, match="submit exploded"):
+        app(["sdk", "pipeline-runs", "submit-from-python", str(script), "--log-type", "none"])
+
+    assert _entries(script.parent) == before
+
+
+def test_submit_from_python_compile_failure_exits_without_submitting_or_leftovers(
+    monkeypatch, tmp_path: Path
+):
+    script = _python_project(
+        tmp_path,
+        """
+        from tangle_cli.python_pipeline import ref
+
+        some_ref = ref(url="file://./noop.yaml")
+        """,
+    )
+    before = _entries(script.parent)
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "submit-from-python", str(script), "--log-type", "none"])
+
+    assert exc_info.value.code != 0
+    assert "no @pipeline" in str(exc_info.value).lower()
+    assert fake_client.created == []
+    assert _entries(script.parent) == before
+
+
+def test_submit_from_python_dry_run_prints_body_without_creating_a_run(
+    monkeypatch, tmp_path: Path, capsys
+):
+    script = _python_project(tmp_path)
+    before = _entries(script.parent)
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit-from-python",
+            str(script),
+            "--dry-run",
+            "--log-type",
+            "none",
+        ],
+    )
+
+    body = json.loads(capsys.readouterr().out)
+    assert body["root_task"]["componentRef"]["spec"]["name"] == "Noop Pipeline"
+    assert fake_client.created == []
+    assert _entries(script.parent) == before
+
+
+def test_submit_from_python_compile_overrides_and_pipeline_selection_reach_the_compiler(
+    monkeypatch, tmp_path: Path, capsys
+):
+    script = _python_project(tmp_path)
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit-from-python",
+            str(script),
+            "--override",
+            "task_id=overridden-task",
+            "--log-type",
+            "none",
+        ],
+    )
+
+    capsys.readouterr()
+    assert set(_submitted_tasks(fake_client.created[0])) == {"overridden-task"}
+
+    multi = _python_project(tmp_path, _TWO_PIPELINE_SOURCE, name="multi.py")
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit-from-python",
+            str(multi),
+            "--pipeline",
+            "second_pipeline",
+            "--log-type",
+            "none",
+        ],
+    )
+
+    capsys.readouterr()
+    assert fake_client.created[1]["root_task"]["componentRef"]["spec"]["name"] == "Second Pipeline"
+
+
+def test_submit_from_python_image_override_reaches_the_compiled_bundle(
+    monkeypatch, tmp_path: Path, capsys
+):
+    script = _python_project(
+        tmp_path,
+        """
+        from tangle_cli.python_pipeline import Out, pipeline, task
+
+
+        @task(image_id="eval-slim")
+        def scored(greeting: str = "hello"):
+            print(greeting)
+
+
+        @pipeline("Image Pipeline")
+        def image_pipeline(cfg) -> Out[str]:
+            run_scored = scored()
+            return run_scored
+        """,
+        name="image_pipeline.py",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit-from-python",
+            str(script),
+            "--image",
+            "eval-slim=registry.example/eval-slim@sha256:abc",
+            "--trusted-hydration",
+            "--log-type",
+            "none",
+        ],
+    )
+
+    capsys.readouterr()
+    # The bundle is gone, so the override has to be visible in what was
+    # actually submitted: hydration inlines the component sidecar.
+    submitted = json.dumps(fake_client.created[0])
+    assert "registry.example/eval-slim@sha256:abc" in submitted
+    # (`generated/` is the compiler's own python-task output, not bundle state.)
+    assert [name for name in _entries(script.parent) if name.startswith(".tangle-submit-")] == []
+
+
+def test_submit_from_python_run_flags_reach_the_submit_body(monkeypatch, tmp_path: Path, capsys):
+    script = _python_project(tmp_path, _INPUT_PIPELINE_SOURCE, name="input_pipeline.py")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipeline-runs",
+            "submit-from-python",
+            str(script),
+            "--arg",
+            "parent_wait_token=token",
+            "--annotation",
+            "team=oss",
+            "--log-type",
+            "none",
+        ],
+    )
+
+    capsys.readouterr()
+    body = fake_client.created[0]
+    assert body["root_task"]["arguments"] == {"parent_wait_token": "token"}
+    assert body["annotations"]["team"] == "oss"
+
+
+def test_submit_from_python_multi_config_compiles_and_submits_each_entry(
+    monkeypatch, tmp_path: Path, capsys
+):
+    script = _python_project(tmp_path)
+    before = _entries(script.parent)
+    config = tmp_path / "submit.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "_defaults": {"script_path": str(script), "log_type": "none"},
+                "configs": [
+                    {"override": ["task_id=first-task"], "annotation": ["run=one"]},
+                    {"override": ["task_id=second-task"], "annotation": ["run=two"]},
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit-from-python", "--config", str(config)])
+
+    capsys.readouterr()
+    assert len(fake_client.created) == 2
+    assert set(_submitted_tasks(fake_client.created[0])) == {"first-task"}
+    assert set(_submitted_tasks(fake_client.created[1])) == {"second-task"}
+    assert fake_client.created[0]["annotations"]["run"] == "one"
+    assert fake_client.created[1]["annotations"]["run"] == "two"
+    assert _entries(script.parent) == before
+
+
+@pytest.mark.parametrize(
+    "key, value, expected",
+    [
+        ("hydrate", False, "always hydrates"),
+        ("pipeline_path", "pipeline.yaml", "use script_path"),
+    ],
+)
+def test_submit_from_python_config_rejects_unsupported_keys(
+    monkeypatch, tmp_path: Path, key: str, value: Any, expected: str
+):
+    script = _python_project(tmp_path)
+    config = tmp_path / "submit.yaml"
+    config.write_text(
+        yaml.safe_dump({"script_path": str(script), "log_type": "none", key: value}),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "submit-from-python", "--config", str(config)])
+
+    assert expected in str(exc_info.value)
+    assert fake_client.created == []
+
+
+def test_submit_from_python_uses_selected_config_branch(monkeypatch, tmp_path: Path, capsys):
+    script = _python_project(tmp_path)
+    config = tmp_path / "submit.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "_select": {
+                    "env": "TANGLE_ENV",
+                    "cases": {
+                        "prod": {
+                            "script_path": str(script),
+                            "log_type": "none",
+                            "override": ["task_id=prod-task"],
+                        },
+                        "dev": {
+                            "script_path": str(script),
+                            "log_type": "none",
+                            "override": ["task_id=dev-task"],
+                        },
+                    },
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TANGLE_ENV", "dev")
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit-from-python", "--config", str(config)])
+
+    capsys.readouterr()
+    assert set(_submitted_tasks(fake_client.created[0])) == {"dev-task"}
+
+
+def test_submit_from_python_requires_a_script(monkeypatch):
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: FakeClient())
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "submit-from-python", "--log-type", "none"])
+
+    assert "script_path is required" in str(exc_info.value)
+
+
+def _multi_config(tmp_path: Path, script: Path, second: dict[str, Any]) -> Path:
+    config = tmp_path / "submit.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "_defaults": {"log_type": "none"},
+                "configs": [
+                    {"script_path": str(script), "override": ["task_id=first-task"]},
+                    {"script_path": str(script), **second},
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return config
+
+
+@pytest.mark.parametrize(
+    "second, expected",
+    [
+        ({"override": ["malformed"]}, "--override entries must use KEY=VALUE syntax"),
+        ({"image": ["eval-slim="]}, "--image entries must use ID=REF syntax"),
+        ({"arg_secret": ["broken"]}, "INPUT=SECRET"),
+        # An input given as BOTH a literal and a secret reference is only
+        # detected once the two are merged.
+        (
+            {"arg": ["api_key=value"], "arg_secret": ["api_key=SECRET"]},
+            "both a value and a secret reference",
+        ),
+        ({"log_type": "verbose"}, "--log-type must be one of"),
+        ({"script_path": "/nonexistent/pipeline.py"}, "Pipeline script not found"),
+    ],
+)
+def test_submit_from_python_late_entry_input_errors_block_every_submit(
+    monkeypatch, tmp_path: Path, second: dict[str, Any], expected: str
+):
+    """A bad value in the LAST entry must not land after the first has submitted."""
+
+    script = _python_project(tmp_path)
+    config = _multi_config(tmp_path, script, second)
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "submit-from-python", "--config", str(config)])
+
+    assert expected in str(exc_info.value)
+    assert fake_client.created == []
+
+
+def test_submit_from_python_late_compile_error_blocks_every_submit(
+    monkeypatch, tmp_path: Path, capsys
+):
+    """Every entry is compiled/hydrated/frozen before the first run is created.
+
+    A compile failure in the LAST entry must therefore create no runs at all,
+    not just fail after the earlier entries were already submitted.
+    """
+
+    script = _python_project(tmp_path)
+    before = _entries(script.parent)
+    config = _multi_config(tmp_path, script, {"pipeline": "does_not_exist"})
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "submit-from-python", "--config", str(config)])
+
+    capsys.readouterr()
+    assert "does_not_exist" in str(exc_info.value)
+    assert fake_client.created == []
+    assert _entries(script.parent) == before
+
+
+def test_submit_from_python_prepares_every_entry_before_the_first_submit(
+    monkeypatch, tmp_path: Path, capsys
+):
+    """Preparation of all entries strictly precedes the first API write."""
+
+    script = _python_project(tmp_path)
+    config = _multi_config(tmp_path, script, {"override": ["task_id=second-task"]})
+    events: list[str] = []
+    real_build_submit_body = PipelineRunManager.build_submit_body
+
+    def spy_build_submit_body(self, pipeline_path, **kwargs):
+        events.append("prepare")
+        return real_build_submit_body(self, pipeline_path, **kwargs)
+
+    class RecordingClient(FakeClient):
+        def pipeline_runs_create(self, body: Any = None) -> dict[str, Any]:
+            events.append("submit")
+            return super().pipeline_runs_create(body)
+
+    monkeypatch.setattr(PipelineRunManager, "build_submit_body", spy_build_submit_body)
+    fake_client = RecordingClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit-from-python", "--config", str(config)])
+
+    capsys.readouterr()
+    assert events == ["prepare", "prepare", "submit", "submit"]
+    assert set(_submitted_tasks(fake_client.created[0])) == {"first-task"}
+    assert set(_submitted_tasks(fake_client.created[1])) == {"second-task"}
+
+
+def test_submit_from_python_accepts_a_symlinked_script(monkeypatch, tmp_path: Path, capsys):
+    script = _python_project(tmp_path)
+    links = tmp_path / "links"
+    links.mkdir()
+    alias = links / "pipeline.py"
+    alias.symlink_to(script)
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit-from-python", str(alias), "--log-type", "none"])
+
+    capsys.readouterr()
+    assert fake_client.created[0]["root_task"]["componentRef"]["spec"]["name"] == "Noop Pipeline"
+    assert _entries(links) == {"pipeline.py"}
+
+
+class _PathRecordingHooks(PipelineRunHooks):
+    """Records what every run-lifecycle callback sees as ``pipeline_path``."""
+
+    seen: list[tuple[str, Path | None, bool]] = []
+
+    @classmethod
+    def _record(cls, stage: str, context: Any) -> None:
+        raw = getattr(context, "pipeline_path", None)
+        path = Path(raw) if raw else None
+        cls.seen.append((stage, path, bool(path and path.exists())))
+
+    def before_run_lifecycle(self, context):
+        self._record("before", context)
+        return super().before_run_lifecycle(context)
+
+    def around_run(self, context):
+        self._record("around", context)
+        return super().around_run(context)
+
+    def before_submit_context(self, context):
+        self._record("before_submit", context)
+        return super().before_submit_context(context)
+
+    def after_submit_context(self, context):
+        self._record("after_submit", context)
+        return super().after_submit_context(context)
+
+    def on_submit_error(self, error, *, context):
+        self._record("submit_error", context)
+        return super().on_submit_error(error, context=context)
+
+    def after_run_lifecycle(self, context, *, success, error=None):
+        self._record("after", context)
+        return super().after_run_lifecycle(context, success=success, error=error)
+
+
+@pytest.fixture
+def path_recording_hooks(monkeypatch):
+    _PathRecordingHooks.seen = []
+    monkeypatch.setattr(pipeline_runs_cli, "PipelineRunHooks", _PathRecordingHooks)
+    return _PathRecordingHooks
+
+
+def test_submit_from_python_removes_the_bundle_when_closing_it_fails(monkeypatch, tmp_path: Path):
+    """The temp file exists from allocation on, so even a failing close cleans up."""
+
+    import tempfile as tempfile_module
+
+    script = _python_project(tmp_path)
+    before = _entries(script.parent)
+    real_factory = tempfile_module.NamedTemporaryFile
+    created: list[str] = []
+
+    class ClosesBadly:
+        def __init__(self, handle):
+            self._handle = handle
+            self.name = handle.name
+            created.append(handle.name)
+
+        def close(self):
+            self._handle.close()
+            raise OSError("close failed")
+
+    monkeypatch.setattr(
+        tempfile_module, "NamedTemporaryFile", lambda *a, **k: ClosesBadly(real_factory(*a, **k))
+    )
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: FakeClient())
+    app = cli.build_app()
+
+    with pytest.raises(OSError, match="close failed"):
+        app(["sdk", "pipeline-runs", "submit-from-python", str(script), "--log-type", "none"])
+
+    assert not Path(created[0]).exists()
+    assert _entries(script.parent) == before
+
+
+def test_submit_from_python_hooks_see_an_existing_bundle_for_every_entry(
+    monkeypatch, tmp_path: Path, capsys, path_recording_hooks
+):
+    """Freezing the body must not strip the path-backed lifecycle context.
+
+    Submission used to run inside ``compiled_bundle``, so downstream hooks
+    (mutex, notification, source policy) could read ``context.pipeline_path``
+    off disk. Preparing all entries first must preserve that, for the LAST
+    entry as much as the first.
+    """
+
+    script = _python_project(tmp_path)
+    before = _entries(script.parent)
+    config = _multi_config(tmp_path, script, {"override": ["task_id=second-task"]})
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: FakeClient())
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipeline-runs", "submit-from-python", "--config", str(config)])
+
+    capsys.readouterr()
+    stages = {stage for stage, _, _ in path_recording_hooks.seen}
+    assert stages == {"before", "around", "before_submit", "after_submit", "after"}
+    missing = [
+        (stage, path) for stage, path, existed in path_recording_hooks.seen if not existed
+    ]
+    assert missing == [], f"hooks saw missing pipeline_path values: {missing}"
+    observed = {path for _, path, _ in path_recording_hooks.seen}
+    # Two entries -> two distinct temp bundles, each visible to its own run,
+    # each hidden and beside the script so relative refs resolved.
+    assert len(observed) == 2
+    assert all(path.name.startswith(".tangle-submit-") for path in observed)
+    assert all(path.parent == script.parent for path in observed)
+    # ...and every one of them is cleaned up once the command returns.
+    assert _entries(script.parent) == before
+
+
+def test_submit_from_python_hooks_see_an_existing_bundle_when_submit_fails(
+    monkeypatch, tmp_path: Path, path_recording_hooks
+):
+    script = _python_project(tmp_path)
+    before = _entries(script.parent)
+
+    class FailingClient(FakeClient):
+        def pipeline_runs_create(self, body: Any = None) -> dict[str, Any]:
+            self.created.append(body)
+            raise ValueError("submit exploded")
+
+        def pipeline_runs_list(self, **kwargs: Any) -> dict[str, Any]:
+            self.list_calls.append(kwargs)
+            return {"pipeline_runs": [], "next_page_token": None}
+
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: FailingClient())
+    app = cli.build_app()
+
+    with pytest.raises(ValueError, match="submit exploded"):
+        app(["sdk", "pipeline-runs", "submit-from-python", str(script), "--log-type", "none"])
+
+    # The error callbacks are as entitled to a readable bundle as the happy path.
+    assert [stage for stage, _, _ in path_recording_hooks.seen][-1] == "after"
+    assert all(existed for _, _, existed in path_recording_hooks.seen)
+    assert _entries(script.parent) == before
+
+
+def test_submit_from_python_rejects_a_misspelled_config_key_in_a_later_entry(
+    monkeypatch, tmp_path: Path
+):
+    """A dropped `overide:` would submit the ORIGINAL pipeline, silently."""
+
+    script = _python_project(tmp_path)
+    config = _multi_config(tmp_path, script, {"overide": ["task_id=intended"]})
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "submit-from-python", "--config", str(config)])
+
+    assert "did you mean 'override'" in str(exc_info.value)
+    assert fake_client.created == []
+
+
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        # A non-int budget crashes an ambiguous submit before its recovery
+        # lookup, so a possibly-created run is never reconciled.
+        ({"submit_recovery_attempts": "oops"}, "submit_recovery_attempts must be"),
+        ({"submit_recovery_attempts": -1}, "submit_recovery_attempts must be"),
+        # bool("false") is True, which would silently allow all hydration.
+        ({"trusted_hydration_cli": "false"}, "trusted_hydration_cli must be a boolean"),
+    ],
+)
+def test_submit_from_python_rejects_unsafe_config_types(
+    monkeypatch, tmp_path: Path, entry: dict[str, Any], expected: str
+):
+    script = _python_project(tmp_path)
+    config = tmp_path / "submit.yaml"
+    config.write_text(
+        yaml.safe_dump({"script_path": str(script), "log_type": "none", **entry}),
+        encoding="utf-8",
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "submit-from-python", "--config", str(config)])
+
+    assert expected in str(exc_info.value)
+    assert fake_client.created == []
+
+
+def test_submit_from_python_reports_an_unwritable_script_directory(monkeypatch, tmp_path: Path):
+    """Allocation failures use the command's error contract, not a traceback."""
+
+    import tempfile as tempfile_module
+
+    script = _python_project(tmp_path)
+
+    def refuse(*args: Any, **kwargs: Any):
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr(tempfile_module, "NamedTemporaryFile", refuse)
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: FakeClient())
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["sdk", "pipeline-runs", "submit-from-python", str(script), "--log-type", "none"])
+
+    assert "Cannot create a compile output" in str(exc_info.value)

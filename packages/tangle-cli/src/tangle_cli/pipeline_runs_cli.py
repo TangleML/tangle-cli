@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import pathlib
+import shutil
 import sys
-from typing import Annotated, Any
+import tempfile
+from contextlib import ExitStack, contextmanager, suppress
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Iterator
 
 from cyclopts import App, Parameter
 
@@ -17,6 +21,8 @@ from .cli_helpers import (
     include_env_credentials_for_args,
     load_args_or_exit,
     optional_path,
+    parse_image_overrides,
+    parse_overrides,
     print_json,
 )
 from .cli_options import (
@@ -42,6 +48,10 @@ from .pipeline_run_manager import (
     parse_key_value_entries,
 )
 from .pipeline_run_search import normalize_query_input, parse_annotation
+from .pipelines import PipelineValidationError, compile_pipeline_file
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .pipeline_compiler import CompileResult
 
 app = App(name="pipeline-runs", help="Submit and inspect Tangle pipeline runs.")
 annotations_app = App(name="annotations", help="Work with pipeline-run annotations.")
@@ -118,6 +128,56 @@ def _run_manager_action(config: str | None, cli_base_url: str | None, specs: dic
                 print_json(result)
         finally:
             finalize_logs()
+
+
+def _run_prepared_manager_actions(
+    config: str | None,
+    cli_base_url: str | None,
+    specs: dict[str, tuple[Any, ...]],
+    prepare,
+    submit,
+    *,
+    precheck: Callable[[ArgsContainer], None] | None = None,
+):
+    """Prepare EVERY config entry, then submit the prepared results in order.
+
+    ``prepare(manager, args, artifacts)`` returns one entry's frozen payload and
+    may register cleanup on the shared ``artifacts`` stack; ``submit`` performs
+    the single API write. Splitting the phases means a failure while preparing
+    any entry submits nothing. Artifacts outlive preparation because run
+    lifecycle hooks read the compiled path during submission.
+    """
+
+    loaded = load_args_or_exit(config, **specs)
+    if precheck is not None:
+        for args in loaded:
+            precheck(args)
+
+    with ExitStack() as log_finalizers:
+        entries: list[tuple[ArgsContainer, PipelineRunManager]] = []
+        for args in loaded:
+            try:
+                logger, finalize_logs = logger_for_log_type(getattr(args, "log_type", "console"))
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            log_finalizers.callback(finalize_logs)
+            entries.append((args, _manager(args, cli_base_url=cli_base_url, logger=logger)))
+
+        prepared: list[Any] = []
+        with ExitStack() as artifacts:
+            for args, manager in entries:
+                try:
+                    prepared.append(prepare(manager, args, artifacts))
+                except PipelineRunError as exc:
+                    raise SystemExit(str(exc)) from exc
+
+            for (args, manager), payload in zip(entries, prepared):
+                try:
+                    result = submit(manager, args, payload)
+                except PipelineRunError as exc:
+                    raise SystemExit(str(exc)) from exc
+                if result is not None:
+                    print_json(result)
 
 
 def _run_annotation_action(config: str | None, cli_base_url: str | None, specs: dict[str, tuple[Any, ...]], fn):
@@ -245,6 +305,356 @@ def pipeline_runs_submit(
         return result["response"]
 
     _run_manager_action(config, base_url, specs, action)
+
+
+#: Config fields this command understands. Used only to catch MISSPELLINGS of
+#: supported keys (`overide:`), which would otherwise be dropped silently and
+#: submit something other than what was authored. Unrelated keys in a shared
+#: config file are deliberately left alone.
+_SUBMIT_FROM_PYTHON_CONFIG_KEYS = frozenset(
+    "script_path pipeline override image arg args args_json arg_secret arg_secrets "
+    "annotation dry_run run_as trusted_source trusted_hydration trusted_hydration_cli "
+    "submit_recovery_attempts log_type base_url token auth_header header".split()
+)
+
+#: Keys that are valid for other commands but must never be honored here,
+#: because silently ignoring them would change what actually gets submitted.
+_SUBMIT_FROM_PYTHON_REJECTED_CONFIG_KEYS = {
+    "hydrate": (
+        "submit-from-python always hydrates the compiled bundle; "
+        "its relative refs are meaningless to the server otherwise"
+    ),
+    "pipeline_path": (
+        "submit-from-python compiles a Python script; "
+        "use script_path (and --pipeline to pick the root @pipeline function)"
+    ),
+}
+
+_LOG_TYPES = ("console", "none", "file")
+
+#: Dot-prefixed so the throwaway bundle stays hidden next to the user's sources.
+_TEMP_BUNDLE_PREFIX = ".tangle-submit-"
+
+
+@contextmanager
+def _compiled_bundle(
+    script: pathlib.Path,
+    *,
+    overrides: dict[str, str],
+    image_overrides: dict[str, str],
+    pipeline_name: str | None,
+    logger: Logger,
+) -> Iterator[CompileResult]:
+    """Compile *script* to a throwaway bundle beside it, always removing it.
+
+    The bundle cannot live in a temp directory: the compiler derives every
+    relative URL from the output path, so author-written refs such as
+    ``ref(url="file://./component.yaml")`` only resolve when the bundle sits in
+    the script's own (physically resolved) directory. The name is allocated
+    with an exclusive create, so concurrent compiles never collide.
+    """
+
+    script_path = script.resolve()
+    try:
+        handle = tempfile.NamedTemporaryFile(
+            dir=script_path.parent, prefix=_TEMP_BUNDLE_PREFIX, suffix=".yaml", delete=False
+        )
+    except OSError as exc:
+        raise PipelineValidationError(
+            f"Cannot create a compile output in {script_path.parent}: {exc}"
+        ) from exc
+    root = pathlib.Path(handle.name)
+    closed = False
+    try:
+        handle.close()
+        closed = True
+        result = compile_pipeline_file(
+            script_path,
+            root,
+            overrides=overrides,
+            pipeline_name=pipeline_name,
+            image_overrides=image_overrides,
+            logger=logger,
+        )
+        for warning in result.warnings:
+            logger.warn(warning)
+        yield result
+    finally:
+        # Cleanup is stem-scoped and must never mask the primary error.
+        if not closed:
+            with suppress(Exception):
+                handle.close()
+        for path in (root, root.with_name(root.stem + ".components.yaml")):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warn(f"Could not remove compile artifact {path}: {exc}")
+        shutil.rmtree(root.with_name(root.stem + ".subgraphs"), ignore_errors=True)
+
+
+def _misspelled_config_key(key: str) -> str | None:
+    """Return the supported field *key* looks like a typo of, if any."""
+
+    if key.startswith("_") or key in _SUBMIT_FROM_PYTHON_CONFIG_KEYS:
+        return None
+    normalized = "".join(char for char in key.lower() if char.isalnum())
+    for known in _SUBMIT_FROM_PYTHON_CONFIG_KEYS:
+        if normalized == known.replace("_", ""):
+            return known
+    close = difflib.get_close_matches(key, sorted(_SUBMIT_FROM_PYTHON_CONFIG_KEYS), n=1, cutoff=0.85)
+    return close[0] if close else None
+
+
+def _resolve_run_arguments(args: ArgsContainer) -> dict[str, Any]:
+    """Resolve one entry's run arguments: literals plus secret bindings.
+
+    Pure, so the precheck and the preparation phase share one implementation
+    and an ``--arg``/``--arg-secret`` conflict is caught before any submit.
+    """
+
+    run_args = parse_json_or_key_values(args.args_json or args.args_config, args.arg)
+    secret_names = normalize_arg_secret_config(args.arg_secrets_config)
+    secret_names.update(parse_arg_secret_entries(args.arg_secret))
+    return merge_secret_run_args(run_args, secret_names)
+
+
+def _check_submit_from_python_inputs(args: ArgsContainer) -> None:
+    """Validate one entry before ANY entry is compiled or submitted.
+
+    Only deterministic, side-effect-free checks belong here: they run for every
+    config entry up front, so a malformed value in the last entry cannot land
+    after earlier entries were already submitted.
+    """
+
+    config = getattr(args, "_config", {})
+    if isinstance(config, dict):
+        for key, reason in _SUBMIT_FROM_PYTHON_REJECTED_CONFIG_KEYS.items():
+            if key in config:
+                raise SystemExit(
+                    f"Config error: '{key}' is not supported by submit-from-python: {reason}"
+                )
+        for key in config:
+            if (suggestion := _misspelled_config_key(str(key))) is not None:
+                raise SystemExit(
+                    f"Config error: unknown submit-from-python field '{key}'; "
+                    f"did you mean '{suggestion}'?"
+                )
+
+    # Safety-sensitive values reach retry/trust logic, where a wrong type is
+    # worse than a rejected config: a non-int recovery budget crashes an
+    # ambiguous submit before its recovery lookup, and a truthy string silently
+    # enables allow-all hydration.
+    attempts = getattr(args, "submit_recovery_attempts", None)
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+        raise SystemExit("Config error: submit_recovery_attempts must be a non-negative integer")
+    trusted_hydration = getattr(args, "trusted_hydration_cli", None)
+    if trusted_hydration is not None and not isinstance(trusted_hydration, bool):
+        raise SystemExit("Config error: trusted_hydration_cli must be a boolean")
+
+    if getattr(args, "log_type", "console") not in _LOG_TYPES:
+        raise SystemExit(f"--log-type must be one of: {', '.join(_LOG_TYPES)}")
+
+    try:
+        parse_overrides(args.override)
+        parse_image_overrides(args.image)
+        _resolve_run_arguments(args)
+        parse_key_value_entries(args.annotation)
+    except PipelineRunError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.script_path is not None and not pathlib.Path(args.script_path).exists():
+        raise SystemExit(f"Pipeline script not found: {args.script_path}")
+
+
+@app.command(name="submit-from-python")
+def pipeline_runs_submit_from_python(
+    script_path: pathlib.Path | None = None,
+    *,
+    pipeline: Annotated[
+        str | None,
+        Parameter(
+            name="--pipeline",
+            help="Select the root @pipeline function by name when the file defines several.",
+        ),
+    ] = None,
+    override: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--override",
+            help="Compile-time config override as KEY=VALUE. Repeat for multiple.",
+            negative_iterable=(),
+        ),
+    ] = None,
+    image: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--image",
+            help=(
+                "Compile-time image-id override as ID=REF for @task(image_id=ID). "
+                "Repeat for multiple IDs."
+            ),
+            negative_iterable=(),
+        ),
+    ] = None,
+    arg: Annotated[
+        list[str] | None,
+        Parameter(help="Pipeline argument as KEY=VALUE. Repeat for multiple.", negative_iterable=()),
+    ] = None,
+    args_json: Annotated[str | None, Parameter(help="Pipeline arguments as a JSON object.")] = None,
+    arg_secret: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--arg-secret",
+            help=(
+                "Pipeline argument bound to a Tangle secret as INPUT=SECRET_NAME. "
+                "Repeat for multiple."
+            ),
+            negative_iterable=(),
+        ),
+    ] = None,
+    annotation: Annotated[
+        list[str] | None,
+        Parameter(help="Run annotation as KEY=VALUE. Repeat for multiple.", negative_iterable=()),
+    ] = None,
+    dry_run: Annotated[
+        bool | None,
+        Parameter(help="Compile, hydrate and print the submit payload without creating a run."),
+    ] = None,
+    run_as: Annotated[
+        str | None,
+        Parameter(help="Downstream extension point; unsupported by the OSS default hooks."),
+    ] = None,
+    trusted_source: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--trusted-source",
+            help="Trusted local_from_python source root or glob. Repeat for multiple.",
+            negative_iterable=(),
+        ),
+    ] = None,
+    trusted_hydration: Annotated[
+        bool | None,
+        Parameter(
+            name="--trusted-hydration",
+            help="Allow all local_from_python execution during hydration for trusted inputs.",
+        ),
+    ] = None,
+    base_url: BaseUrlOption = None,
+    token: TokenOption = None,
+    auth_header: AuthHeaderOption = None,
+    header: HeaderOption = None,
+    config: ConfigOption = None,
+    submit_recovery_attempts: Annotated[
+        int,
+        Parameter(
+            help=(
+                "Number of post-failed-submit recovery lookups before resubmitting; "
+                "higher values wait longer for delayed run registration."
+            )
+        ),
+    ] = _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS,
+    log_type: LogTypeOption = "console",
+) -> None:
+    """Compile a Python-authored pipeline and submit it as a run.
+
+    Equivalent to ``pipelines compile`` followed by ``pipeline-runs submit``,
+    without leaving compiled YAML behind. The bundle is compiled next to the
+    script (so relative ``file://`` refs keep resolving), hydrated, submitted,
+    and then removed — also on dry runs and failures. Use ``pipelines compile``
+    when the compiled YAML itself is what you want.
+
+    Compile-time values and run-time values are distinct: ``--override
+    KEY=VALUE`` sets ``cfg`` values consumed while the graph is built and
+    ``--image ID=REF`` resolves ``@task(image_id=ID)``, while ``--arg`` /
+    ``--args-json`` / ``--arg-secret`` set pipeline arguments for the run.
+
+    Hydration is always on: the compiled bundle's refs point at local sidecars
+    the server cannot read. Submission never waits; use ``pipeline-runs wait``.
+
+    A multi-entry ``--config`` prepares EVERY entry first — compile once,
+    hydrate, merge run arguments and secrets, validate, freeze the submit body
+    — and only then submits the frozen bodies in order. A failure while
+    preparing any entry therefore creates no runs and leaves no artifacts.
+    """
+
+    specs = {
+        "script_path": ("script_path", script_path, None, False, True, optional_path),
+        "pipeline": (pipeline, None),
+        "override": (override, None),
+        "image": (image, None),
+        "arg": (arg, None),
+        "args_json": (args_json, None),
+        "args_config": ("args", None, None, True),
+        "arg_secret": (arg_secret, None),
+        "arg_secrets_config": ("arg_secrets", None, None, True),
+        "annotation": (annotation, None),
+        "dry_run": (dry_run, None),
+        "run_as": (run_as, None),
+        "trusted_source": (trusted_source, None),
+        "trusted_hydration_cli": ("trusted_hydration_cli", trusted_hydration, None, False),
+        "submit_recovery_attempts": (submit_recovery_attempts, _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS),
+        "log_type": (log_type, "console"),
+        **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
+    }
+
+    def prepare(
+        manager: PipelineRunManager, args: ArgsContainer, artifacts: ExitStack
+    ) -> tuple[dict[str, Any], pathlib.Path]:
+        """Compile once, hydrate, validate, and freeze this entry's submit body.
+
+        The compiled path travels with the body so run lifecycle hooks keep the
+        path-backed context they had when submission happened inside the
+        bundle; that is why the bundle outlives preparation.
+        """
+
+        try:
+            compiled = artifacts.enter_context(
+                _compiled_bundle(
+                    args.script_path,
+                    overrides=parse_overrides(args.override),
+                    image_overrides=parse_image_overrides(args.image),
+                    pipeline_name=args.pipeline,
+                    logger=manager.logger,
+                )
+            )
+            body = manager.build_submit_body(
+                compiled.pipeline_path,
+                run_args=_resolve_run_arguments(args),
+                annotations=parse_key_value_entries(args.annotation),
+                hydrate=True,
+                run_as=args.run_as,
+            )
+            return body, compiled.pipeline_path
+        except PipelineValidationError as exc:
+            raise SystemExit(str(exc)) from exc
+
+    def submit(
+        manager: PipelineRunManager,
+        args: ArgsContainer,
+        prepared: tuple[dict[str, Any], pathlib.Path],
+    ) -> dict[str, Any]:
+        body, pipeline_path = prepared
+        if args.dry_run:
+            return body
+        # The body is already hydrated and validated, so the run is created
+        # without recompiling; submission-id stamping and the ambiguous-submit
+        # recovery lookup still happen inside the run lifecycle.
+        return manager.run_prepared_body(
+            body,
+            pipeline_path=pipeline_path,
+            submit_recovery_attempts=args.submit_recovery_attempts,
+        )["response"]
+
+    _run_prepared_manager_actions(
+        config,
+        base_url,
+        specs,
+        prepare,
+        submit,
+        precheck=_check_submit_from_python_inputs,
+    )
 
 
 @app.command(name="details")
