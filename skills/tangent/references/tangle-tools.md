@@ -390,7 +390,7 @@ environment default. There is no `auth` command group.
 | `--token` | `TANGLE_API_TOKEN` | Bearer-token shorthand. |
 | `--auth-header` | `TANGLE_API_AUTH_HEADER`, `TANGLE_AUTH_HEADER` | Full `Authorization` value such as `Bearer …` or `Basic …`. |
 | `-H` / `--header` | `TANGLE_API_HEADERS` | Extra headers. Repeatable as CLI flags; env accepts a JSON object or newline-separated `Name: value` entries. |
-| `--config` | — | YAML/JSON defaults (single object, a list, or `_defaults` + `configs`). |
+| `--config` | — | YAML/JSON defaults (single object, a list, or `_defaults` + `configs`), optionally wrapped in a top-level `_select` environment selector with an optional explicit `default` branch. |
 | — | `TANGLE_VERBOSE=1` | Redacted HTTP request/response diagnostics. |
 
 Run links: there is no hosted dashboard URL to assume — use `<base-url>/runs/<id>`
