@@ -11,6 +11,7 @@ import yaml
 
 from tangle_cli import cli
 from tangle_cli.pipeline_hydrator import PipelineHydrator
+from tangle_cli.pipeline_validation import ALLOW_UNDECLARED_TASK_ARGUMENTS_ENV
 from tangle_cli.pipelines import (
     _dependency_edges,
     collect_pipeline_spec_errors,
@@ -491,6 +492,215 @@ def test_component_input_validation_rejects_bad_graph_input_ref():
     assert validate_component_inputs(pipeline) == [
         "Task 'task': input 'query' references non-existent graph input 'missing'"
     ]
+
+
+def test_component_input_validation_rejects_undeclared_argument():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(inputs=[{"name": "query", "type": "String"}])
+            },
+            "arguments": {"query": "shoes", "totally_made_up_arg": "1"},
+        }
+    )
+
+    assert validate_component_inputs(pipeline) == [
+        (
+            "Task 'task': argument 'totally_made_up_arg' is not a declared input of "
+            "component 'Component'. Declared inputs: ['query']"
+        )
+    ]
+
+
+def test_component_input_validation_suggests_nearest_declared_input():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(
+                    inputs=[{"name": "timeout", "type": "Integer", "default": "1000"}]
+                )
+            },
+            "arguments": {"timeouts": "1440"},
+        }
+    )
+
+    assert validate_component_inputs(pipeline) == [
+        (
+            "Task 'task': argument 'timeouts' is not a declared input of "
+            "component 'Component'. Did you mean 'timeout'? Declared inputs: ['timeout']"
+        )
+    ]
+
+
+def test_component_input_validation_suggests_qualified_rename():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(
+                    inputs=[
+                        {
+                            "name": "merchant_match_reference_snapshot_date",
+                            "type": "String",
+                            "optional": True,
+                        }
+                    ]
+                )
+            },
+            "arguments": {"snapshot_date": "2026-09-12"},
+        }
+    )
+
+    assert validate_component_inputs(pipeline) == [
+        (
+            "Task 'task': argument 'snapshot_date' is not a declared input of "
+            "component 'Component'. Did you mean "
+            "'merchant_match_reference_snapshot_date'? Declared inputs: "
+            "['merchant_match_reference_snapshot_date']"
+        )
+    ]
+
+
+def test_component_input_validation_suggests_across_separator_drift():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(inputs=[{"name": "bq-table", "type": "String"}])
+            },
+            "arguments": {"bq_table": "t"},
+        }
+    )
+
+    errors = validate_component_inputs(pipeline)
+
+    assert "Did you mean 'bq-table'?" in errors[0]
+
+
+def test_component_input_validation_omits_hint_for_semantic_rename():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(
+                    inputs=[{"name": "timeout", "type": "Integer", "default": "1000"}]
+                )
+            },
+            "arguments": {"wait": "1440"},
+        }
+    )
+
+    assert validate_component_inputs(pipeline) == [
+        (
+            "Task 'task': argument 'wait' is not a declared input of "
+            "component 'Component'. Declared inputs: ['timeout']"
+        )
+    ]
+
+
+def test_component_input_validation_accepts_fully_declared_arguments():
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(
+                    inputs=[
+                        {"name": "query", "type": "String"},
+                        {"name": "timeout", "type": "Integer", "default": "1000"},
+                    ]
+                )
+            },
+            "arguments": {"query": "shoes", "timeout": "1440"},
+        }
+    )
+
+    assert validate_component_inputs(pipeline) == []
+
+
+@pytest.mark.parametrize(
+    "component_ref",
+    [
+        {"url": "resolve://components.resolve.yaml#Component"},
+        {"name": "Component", "digest": "879a8ddf"},
+        {"text": "not: [valid"},
+    ],
+    ids=["url-only", "digest-pinned", "unparsable-text"],
+)
+def test_component_input_validation_skips_unresolvable_component_spec(component_ref):
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": component_ref,
+            "arguments": {"totally_made_up_arg": "1"},
+        }
+    )
+
+    assert validate_component_inputs(pipeline) == []
+
+
+def test_component_input_validation_skips_undeclared_check_on_malformed_inputs():
+    spec = _component_spec()
+    spec["inputs"] = "not-a-list"
+    pipeline = _single_task_pipeline(
+        {"componentRef": {"spec": spec}, "arguments": {"anything": "1"}}
+    )
+
+    assert validate_component_inputs(pipeline) == []
+
+
+def test_component_input_validation_rejects_arguments_to_input_less_component():
+    pipeline = _single_task_pipeline(
+        {"componentRef": {"spec": _component_spec()}, "arguments": {"anything": "1"}}
+    )
+
+    assert validate_component_inputs(pipeline) == [
+        (
+            "Task 'task': argument 'anything' is not a declared input of "
+            "component 'Component'. Declared inputs: []"
+        )
+    ]
+
+
+def test_component_input_validation_flags_undeclared_arguments_in_nested_graphs():
+    inner = _component_spec(
+        inputs=[{"name": "query", "type": "String"}],
+        implementation={
+            "graph": {
+                "tasks": {
+                    "inner": {
+                        "componentRef": {
+                            "spec": _component_spec(
+                                inputs=[{"name": "query", "type": "String"}]
+                            )
+                        },
+                        "arguments": {
+                            "query": {"graphInput": {"inputName": "query"}},
+                            "snapshot_date": "2026-09-12",
+                        },
+                    }
+                }
+            }
+        },
+    )
+    pipeline = _single_task_pipeline(
+        {"componentRef": {"spec": inner}, "arguments": {"query": "shoes"}}
+    )
+
+    assert validate_component_inputs(pipeline) == [
+        (
+            "Task 'task > inner': argument 'snapshot_date' is not a declared input of "
+            "component 'Component'. Declared inputs: ['query']"
+        )
+    ]
+
+
+def test_component_input_validation_undeclared_check_can_be_disabled(monkeypatch):
+    monkeypatch.setenv(ALLOW_UNDECLARED_TASK_ARGUMENTS_ENV, "1")
+    pipeline = _single_task_pipeline(
+        {
+            "componentRef": {
+                "spec": _component_spec(inputs=[{"name": "query", "type": "String"}])
+            },
+            "arguments": {"query": "shoes", "totally_made_up_arg": "1"},
+        }
+    )
+
+    assert validate_component_inputs(pipeline) == []
 
 
 def test_collect_pipeline_errors_combines_shape_schema_and_input_wiring():
