@@ -7,7 +7,13 @@ from typing import Annotated, Any
 
 from cyclopts import App, Parameter
 
-from .cli_helpers import LazyTangleApiClient, load_config_or_exit, optional_path
+from .cli_helpers import (
+    LazyTangleApiClient,
+    load_config_or_exit,
+    optional_path,
+    parse_image_overrides,
+    parse_overrides,
+)
 from .cli_options import (
     AuthHeaderOption,
     BaseUrlOption,
@@ -123,30 +129,6 @@ def _parse_vars(values: list[str] | dict[str, object] | None) -> dict[str, str]:
         if not key:
             raise SystemExit("--var entries must use KEY=VALUE syntax")
         parsed[key] = parsed_value
-    return parsed
-
-
-def _parse_overrides(values: list[str] | None) -> dict[str, str]:
-    parsed: dict[str, str] = {}
-    for value in values or []:
-        if "=" not in value:
-            raise SystemExit("--override entries must use KEY=VALUE syntax")
-        key, parsed_value = value.split("=", 1)
-        if not key:
-            raise SystemExit("--override entries must use KEY=VALUE syntax")
-        parsed[key] = parsed_value
-    return parsed
-
-
-def _parse_image_overrides(values: list[str] | None) -> dict[str, str]:
-    parsed: dict[str, str] = {}
-    for value in values or []:
-        if "=" not in value:
-            raise SystemExit("--image entries must use ID=REF syntax")
-        image_id, image_ref = value.split("=", 1)
-        if not image_id or not image_ref:
-            raise SystemExit("--image entries must use ID=REF syntax")
-        parsed[image_id] = image_ref
     return parsed
 
 
@@ -299,8 +281,8 @@ def pipelines_compile(
         result = compile_pipeline_file(
             pipeline_path,
             output,
-            overrides=_parse_overrides(override),
-            image_overrides=_parse_image_overrides(image),
+            overrides=parse_overrides(override),
+            image_overrides=parse_image_overrides(image),
             pipeline_name=pipeline,
             logger=logger,
         )

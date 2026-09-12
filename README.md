@@ -386,6 +386,7 @@ Pipeline run API/submit commands live under `sdk pipeline-runs`:
 ```bash
 uv run tangle sdk pipeline-runs submit pipeline.yaml --dry-run
 uv run tangle sdk pipeline-runs submit pipeline.yaml --arg key=value --annotation owner=team
+uv run tangle sdk pipeline-runs submit-from-python pipeline.py --arg key=value
 uv run tangle sdk pipeline-runs wait RUN_ID --max-wait 600 --poll-interval 10
 uv run tangle sdk pipeline-runs logs EXECUTION_ID
 uv run tangle sdk pipeline-runs annotations set RUN_ID key value
@@ -400,6 +401,59 @@ Python-authored pipelines live in normal `.py` files and compile with:
 uv run tangle sdk pipelines compile pipeline.py -o pipeline.yaml
 uv run tangle sdk pipelines compile pipeline.py -o pipeline.yaml --pipeline pipeline_fn_name
 ```
+
+To compile and submit in one step, without keeping the compiled YAML around, use
+`pipeline-runs submit-from-python`:
+
+```bash
+uv run tangle sdk pipeline-runs submit-from-python pipeline.py \
+  --override batch_size=100 \
+  --image eval-slim=registry.example/eval-slim@sha256:... \
+  --arg shop=acme --annotation owner=team
+```
+
+It compiles the script, hydrates the bundle, submits the run, and removes the
+compiled artifacts again — including on dry runs and failures. Its run-tier
+flags are the same as `pipeline-runs submit`; the extra compile-tier flags are
+`--pipeline`, repeatable `--override KEY=VALUE`, and repeatable `--image ID=REF`.
+Use `pipelines compile` instead when the compiled YAML itself is what you want.
+
+The two value tiers are distinct and easy to confuse:
+
+| Flag | Tier | Meaning |
+| --- | --- | --- |
+| `--override KEY=VALUE` | compile | `cfg` value used while the graph is built |
+| `--image ID=REF` | compile | resolves `@task(image_id=ID)` to a registry ref |
+| `--arg` / `--args-json` / `--arg-secret` | run | pipeline arguments for the created run |
+
+Notes:
+
+- Hydration is always on: the compiled bundle references local sidecars
+  (`resolve://./<stem>.components.yaml#…`, `file://<stem>.subgraphs/…`) that the
+  server cannot read. There is no `--no-hydrate` here.
+- The bundle is compiled next to the script (never in `/tmp`) under a unique
+  hidden `.tangle-submit-*.yaml` name, because relative refs such as
+  `ref(url="file://./component.yaml")` resolve against the *output* directory.
+  The name is allocated with an exclusive create, so concurrent compiles of the
+  same script never collide or overwrite a sibling YAML. A symlinked script
+  compiles next to its resolved target, where its `config.yaml` and relative
+  refs actually live.
+- The bundle stays readable until every run has been submitted, so
+  run-lifecycle hooks still see an existing `pipeline_path`; cleanup then
+  removes exactly that stem's files (`.yaml`, `.components.yaml`,
+  `.subgraphs/`) and nothing else.
+- Submission never waits; use `pipeline-runs wait RUN_ID`.
+- With a multi-entry `--config` file, entries may carry different `--override` /
+  `--image` values, and **every entry is fully prepared before any run is
+  created**: each is compiled exactly once, hydrated, merged with its run
+  arguments and secrets, validated, and frozen into a submit body; only then are
+  the frozen bodies submitted in order (no recompilation). An unsupported config
+  key (`hydrate:`, `pipeline_path:`), a malformed `override` / `image` /
+  `arg-secret` value, an input given as both `--arg` and `--arg-secret`, a
+  missing script, or a compile/hydrate error in *any* entry therefore creates no
+  runs and leaves no artifacts behind. A runtime failure while submitting entry
+  N can still follow the successful submits of entries 1..N-1 — that is inherent
+  to creating N runs.
 
 A minimal graph uses `@pipeline` for the graph and `@task` for local Python components. `@task` functions are not executed at compile time; the compiler records call sites, emits a sibling `<output>.components.yaml` with `local_from_python` entries, and rewrites task component refs to that sidecar. Hydrate later regenerates the same component YAML from the Python source.
 

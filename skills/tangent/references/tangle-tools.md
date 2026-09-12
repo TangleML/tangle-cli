@@ -157,6 +157,29 @@ tangle sdk pipeline-runs submit pipeline.yaml \
   --arg K=V --annotation session=YYYY-MM-DD-scenario
 ```
 
+### Submitting a Python-authored pipeline directly
+
+`submit-from-python` compiles a Python pipeline script, hydrates it, submits the
+run, and removes the compiled YAML again (also on `--dry-run` and on failure):
+
+```bash
+tangle sdk pipeline-runs submit-from-python pipeline.py \
+  --override batch_size=100 \
+  --arg model=baseline --annotation session=YYYY-MM-DD-scenario
+```
+
+- Compile-tier flags: `--pipeline NAME` (pick the root `@pipeline` when the file
+  defines several), `--override KEY=VALUE` (`cfg` values), `--image ID=REF`
+  (`@task(image_id=…)`). The bundle is always removed; use `pipelines compile`
+  when you want to keep the YAML.
+- Run-tier flags are identical to `submit` (`--arg`, `--args-json`,
+  `--arg-secret`, `--annotation`, `--dry-run`, auth/config/log options).
+- Hydration is forced (no `--no-hydrate`) and submit still never waits.
+- A multi-entry `--config` prepares every entry (compile once, hydrate, merge
+  args/secrets, validate, freeze the body) before creating any run, so a bad
+  value or compile error in the last entry submits nothing.
+- Do not confuse `--override` (compile time) with `--arg` (run time).
+
 ## Validating & Editing Pipelines
 
 Local pipeline operations live under `pipelines` (NOT `pipeline-runs`):

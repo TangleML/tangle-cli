@@ -1967,3 +1967,71 @@ def test_pipelines_layout_preserves_tasks_and_updates_coordinates(tmp_path: Path
     load_position = json.loads(updated_tasks["load"]["annotations"]["editor.position"])
     assert extract_position == {"x": 0, "y": 0}
     assert load_position["x"] > extract_position["x"]
+
+
+# ---------------------------------------------------------------------------
+# Shared compile-flag parsers.
+#
+# ``--override`` / ``--image`` parsing moved to cli_helpers so
+# ``pipeline-runs submit-from-python`` reuses it instead of copying it. The
+# CLI-visible behavior of ``pipelines compile`` must be unchanged.
+
+
+def test_compile_cli_rejects_malformed_override(tmp_path: Path):
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(
+            [
+                "sdk",
+                "pipelines",
+                "compile",
+                str(tmp_path / "pipeline.py"),
+                "-o",
+                str(tmp_path / "out.yaml"),
+                "--override",
+                "not-a-pair",
+            ]
+        )
+
+    assert "--override entries must use KEY=VALUE syntax" in str(exc_info.value)
+
+
+def test_compile_cli_rejects_malformed_image(tmp_path: Path):
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(
+            [
+                "sdk",
+                "pipelines",
+                "compile",
+                str(tmp_path / "pipeline.py"),
+                "-o",
+                str(tmp_path / "out.yaml"),
+                "--image",
+                "eval-slim=",
+            ]
+        )
+
+    assert "--image entries must use ID=REF syntax" in str(exc_info.value)
+
+
+def test_shared_compile_flag_parsers():
+    from tangle_cli.cli_helpers import parse_image_overrides, parse_overrides
+
+    # An empty override value is meaningful ("set to empty string"); an empty
+    # image ref is not.
+    assert parse_overrides(["a=1", "b=x=y", "c="]) == {"a": "1", "b": "x=y", "c": ""}
+    assert parse_image_overrides(["eval-slim=registry.example/img@sha256:abc"]) == {
+        "eval-slim": "registry.example/img@sha256:abc"
+    }
+    assert parse_overrides(None) == {}
+    assert parse_image_overrides(None) == {}
+
+    for bad in (["nope"], ["=1"]):
+        with pytest.raises(SystemExit):
+            parse_overrides(bad)
+    for bad in (["nope"], ["id="], ["=ref"]):
+        with pytest.raises(SystemExit):
+            parse_image_overrides(bad)

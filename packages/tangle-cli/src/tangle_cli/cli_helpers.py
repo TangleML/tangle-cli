@@ -46,6 +46,39 @@ def optional_path(value: str | pathlib.Path | object | None) -> pathlib.Path | N
     return None
 
 
+def parse_overrides(values: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``--override KEY=VALUE`` compile-time cfg overrides.
+
+    Shared verbatim by ``sdk pipelines compile`` and ``sdk pipeline-runs
+    submit-from-python`` so both accept exactly the same syntax and reject the
+    same mistakes. An empty VALUE is allowed (``--override note=``).
+    """
+
+    parsed: dict[str, str] = {}
+    for value in values or []:
+        if "=" not in value:
+            raise SystemExit("--override entries must use KEY=VALUE syntax")
+        key, parsed_value = value.split("=", 1)
+        if not key:
+            raise SystemExit("--override entries must use KEY=VALUE syntax")
+        parsed[key] = parsed_value
+    return parsed
+
+
+def parse_image_overrides(values: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``--image ID=REF`` compile-time image-id overrides."""
+
+    parsed: dict[str, str] = {}
+    for value in values or []:
+        if "=" not in value:
+            raise SystemExit("--image entries must use ID=REF syntax")
+        image_id, image_ref = value.split("=", 1)
+        if not image_id or not image_ref:
+            raise SystemExit("--image entries must use ID=REF syntax")
+        parsed[image_id] = image_ref
+    return parsed
+
+
 def api_arg_specs(
     *,
     base_url: str | None = None,
