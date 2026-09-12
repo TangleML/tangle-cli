@@ -57,7 +57,7 @@ API-backed commands commonly accept these options. Explicit CLI options win over
 | `--token`, `TANGLE_API_TOKEN` | Bearer token shorthand. |
 | `--auth-header`, `TANGLE_API_AUTH_HEADER`, `TANGLE_AUTH_HEADER` | Full `Authorization` value such as `Bearer ...` or `Basic ...`. |
 | `-H`, `--header`, `TANGLE_API_HEADERS` | Extra headers. Repeatable as CLI flags; env accepts a JSON object or newline-separated `Name: value` entries. |
-| `--config` | YAML/JSON defaults. Many commands accept a single object, a list of objects, or `_defaults` + `configs`. |
+| `--config` | YAML/JSON defaults. Many commands accept a single object, a list of objects, or `_defaults` + `configs`, optionally wrapped in a top-level `_select` environment selector. |
 | `--log-type` | SDK progress logs: `console`, `none`, or `file`. Logs go to stderr or a temp log file so structured stdout stays parseable. |
 | `TANGLE_VERBOSE=1` | Redacted HTTP request/response diagnostics only. This is separate from normal progress logging. |
 | `--ca-bundle` | Global CLI flag: path to a PEM CA bundle used as the TLS trust store for every transport. Overrides `TANGLE_API_CA_BUNDLE`. Place before the subcommand. |
@@ -230,6 +230,56 @@ uv run tangle sdk pipeline-runs submit --config submit.yaml
 
 For generated `tangle api` commands, config keys use generated CLI parameter names such as `base_url`, `schema_source`, `body`, and endpoint parameters like `limit`, `filter`, or `id`.
 
+### Environment-selected configs (`_select`)
+
+Any command that accepts `--config` can pick one of several config documents from an environment variable by making `_select` the top-level node:
+
+```yaml
+_shared: &shared
+  log_type: none
+
+_select:
+  env: TANGLE_ENV
+  cases:
+    dev:
+      <<: *shared
+      base_url: https://api.dev
+    prod:
+      _defaults:
+        <<: *shared
+        base_url: https://api.prod
+      configs:
+        - filter: active
+        - filter: finished
+```
+
+The selected branch is a complete config document — a single object, a list of objects, or `_defaults` + `configs` — and is then loaded exactly as if it had been written on its own. A branch may itself be another `_select` node, which composes multiple dimensions (for example environment and region).
+
+Selection fails closed by default. To opt into a fallback, author an explicit `default` branch:
+
+```yaml
+_select:
+  env: TANGLE_ENV
+  cases:
+    prod:
+      base_url: https://api.prod
+  default:
+    base_url: https://api.dev
+```
+
+With `default`, an unset variable or a value matching no case resolves to that branch; an exact case match always wins over it. Without `default`, both remain errors. `default` is a sibling of `cases`, not an entry inside it: a case *named* `default` stays an ordinary exact-match case. Like any branch, `default` must be a complete valid config shape and may itself be another `_select`; an inner selector does not inherit the outer `default`.
+
+Rules:
+
+- `_select` is the only newly reserved key, and it is an exact key name rather than a prefix. Configs without `_select` are unchanged byte-for-byte and semantically.
+- At a `_select` node, only `_select` and other underscore-prefixed helper keys (YAML anchor holders such as `_shared`) may appear; ordinary sibling keys are rejected.
+- `_select` accepts only `env`, `cases`, and the optional `default`. There are no aliases: `else`, `fallback`, and `defaults` are rejected.
+- The selector shape, the `env` name, every `cases` key, and every case and `default` branch are validated before the environment is read, so a malformed selector fails identically in every environment. Branches are checked as complete config documents with the same rules the loader applies to a whole file, and nested selectors are validated recursively.
+- Only environment *lookups* are lazy. A dormant branch is fully shape-checked, but its `env` variable is never required unless that branch is actually selected. Command-specific field names and types are still validated later, against the selected branch only.
+- Selector nesting is capped at 32 levels, which also stops a self-referential YAML alias. A node shared by several anchors is validated once, so anchor-heavy files stay fast.
+- Matching uses `os.environ[NAME]` exactly: case sensitive, with no trimming, case folding, or interpolation.
+- Fallback exists only where it is authored. Without `default`, an unset variable or an unmatched value is an error; there is never an implicit default or implicit production branch. The raw environment value is never echoed — diagnostics list only the configured case names.
+
 ## API schema cache and dynamic commands
 
 Refresh the local schema cache for a live backend with:
@@ -305,7 +355,7 @@ uv run tangle sdk published-components deprecate sha256:old --superseded-by sha2
 
 `publish` accepts `--image`, `--name`, `--description`, `--annotations` (JSON), `--dry-run`, `--published-by`, generic git metadata fields, generic API auth fields, `--log-type`, and `--config`. By default it scopes version checks and automatic old-version deprecation to the current authenticated user via `users_me()`; use `--published-by` to supply an explicit owner/publisher filter. Publishing fails closed if no owner can be determined.
 
-There is no separate OSS `publish-all` command. To publish multiple components, pass a YAML/JSON config list, or `_defaults` + `configs`, to the same `published-components publish` command; the command aggregates results and exits nonzero if any component errors.
+There is no separate OSS `publish-all` command. To publish multiple components, pass a YAML/JSON config list, or `_defaults` + `configs`, to the same `published-components publish` command; the command aggregates results and exits nonzero if any component errors. A top-level `_select` node can choose between such documents per environment (see [Environment-selected configs](#environment-selected-configs-_select)).
 
 ```yaml
 _defaults:
