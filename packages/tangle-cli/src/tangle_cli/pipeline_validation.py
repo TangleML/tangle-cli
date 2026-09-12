@@ -8,7 +8,9 @@ Validation covers:
 
 from __future__ import annotations
 
+import difflib
 import json
+import os
 from functools import lru_cache
 from importlib import resources
 from typing import Any, Iterable, Mapping
@@ -20,7 +22,15 @@ from .pipeline_spec_utils import _extract_task_output_refs
 PIPELINE_GRAPH_PATH = "implementation.graph"
 TASKS_PATH = f"{PIPELINE_GRAPH_PATH}.tasks"
 
+# Escape hatch for repositories that still carry undeclared task arguments.
+# Set to a truthy value to downgrade the undeclared-argument check to a no-op.
+# Follows the ``TANGLE_*`` boolean env-var convention used elsewhere in the CLI
+# (see ``tangle_verbose_enabled`` / ``TANGLE_TRUSTED_HYDRATION_ALLOW_ALL``).
+ALLOW_UNDECLARED_TASK_ARGUMENTS_ENV = "TANGLE_ALLOW_UNDECLARED_TASK_ARGUMENTS"
+_TRUTHY_ENV_VALUES = ("1", "true", "yes", "on")
+
 __all__ = [
+    "ALLOW_UNDECLARED_TASK_ARGUMENTS_ENV",
     "PipelineValidationError",
     "collect_pipeline_spec_errors",
     "load_pipeline_schema",
@@ -186,6 +196,138 @@ def _get_component_spec(task: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return None
 
 
+def _undeclared_arguments_allowed() -> bool:
+    """Return True when the undeclared-argument check is disabled by env var."""
+
+    value = os.environ.get(ALLOW_UNDECLARED_TASK_ARGUMENTS_ENV, "")
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _name_tokens(name: str) -> list[str]:
+    """Split an input name into lowercase alphanumeric tokens.
+
+    Component authors mix ``snake_case``, ``kebab-case`` and spaces for the
+    same concept, so tokenizing lets the hint survive separator drift.
+    """
+
+    token = ""
+    tokens: list[str] = []
+    for char in name:
+        if char.isalnum():
+            token += char.lower()
+        elif token:
+            tokens.append(token)
+            token = ""
+    if token:
+        tokens.append(token)
+    return tokens
+
+
+def _contains_tokens(haystack: list[str], needle: list[str]) -> bool:
+    """Return True when needle appears as a contiguous run inside haystack."""
+
+    if not needle or len(needle) > len(haystack):
+        return False
+    return any(
+        haystack[start : start + len(needle)] == needle
+        for start in range(len(haystack) - len(needle) + 1)
+    )
+
+
+def _nearest_declared_input(name: str, declared_names: Iterable[str]) -> str | None:
+    """Return the declared input ``name`` most plausibly meant, if any.
+
+    Three deterministic passes over sorted candidates, strongest first:
+
+    1. separator-insensitive equality (``bq_table`` vs ``bq-table``);
+    2. ``difflib`` near-match, which catches ordinary typos;
+    3. token containment, which catches qualification renames such as
+       ``snapshot_date`` -> ``merchant_match_reference_snapshot_date``.
+
+    Semantic renames with no lexical overlap (``wait`` -> ``timeout``) return
+    None on purpose: a wrong hint is worse than none.
+    """
+
+    candidates = sorted(declared_names)
+    tokens = _name_tokens(name)
+    if not tokens:
+        return None
+
+    for candidate in candidates:
+        if _name_tokens(candidate) == tokens:
+            return candidate
+
+    close = difflib.get_close_matches(name, candidates, n=1, cutoff=0.8)
+    if close:
+        return close[0]
+
+    containing = [
+        candidate
+        for candidate in candidates
+        if _contains_tokens(_name_tokens(candidate), tokens)
+        or _contains_tokens(tokens, _name_tokens(candidate))
+    ]
+    if containing:
+        return min(containing, key=lambda candidate: (len(_name_tokens(candidate)), candidate))
+    return None
+
+
+def _suggest_declared_input(name: str, declared_names: Iterable[str]) -> str:
+    """Return a ``Did you mean ...`` clause, or an empty string when unsure.
+
+    Real-world undeclared arguments are overwhelmingly typos or renames, so a
+    nearest-match hint is far more actionable than the declared-input list
+    alone.
+    """
+
+    nearest = _nearest_declared_input(name, declared_names)
+    return f" Did you mean '{nearest}'?" if nearest else ""
+
+
+def _validate_undeclared_arguments(
+    full_task_name: str,
+    component_spec: Mapping[str, Any],
+    component_inputs: Any,
+    task_arguments: Mapping[str, Any],
+    declared_names: set[str],
+) -> list[str]:
+    """Return errors for task arguments the component does not declare.
+
+    Deliberately fails OPEN in the cases where the answer is unknowable rather
+    than wrong:
+
+    * the caller only invokes this when ``_get_component_spec`` resolved a spec,
+      so unhydrated / digest-pinned / URL-only component refs are skipped;
+    * a malformed (non-list) ``inputs`` field is skipped, because the declared
+      set cannot be trusted.
+
+    An empty-but-well-formed ``inputs`` list is NOT skipped: a component that
+    declares no inputs genuinely accepts no arguments.
+
+    ``TaskSpec`` keeps ``annotations``, ``executionOptions`` and ``isEnabled``
+    as siblings of ``arguments`` (see the vendored pipeline schema), so there
+    are no reserved/metadata keys inside ``arguments`` to allowlist.
+    """
+
+    if _undeclared_arguments_allowed():
+        return []
+    if component_inputs is not None and not isinstance(component_inputs, list):
+        return []
+
+    undeclared = sorted(str(name) for name in task_arguments if str(name) not in declared_names)
+    if not undeclared:
+        return []
+
+    component_name = component_spec.get("name") or "<unnamed component>"
+    declared_display = sorted(declared_names)
+    return [
+        f"Task '{full_task_name}': argument '{name}' is not a declared input of "
+        f"component '{component_name}'.{_suggest_declared_input(name, declared_names)} "
+        f"Declared inputs: {declared_display}"
+        for name in undeclared
+    ]
+
+
 def _is_input_required(input_spec: Mapping[str, Any]) -> bool:
     """Return True when a component input is non-optional and lacks a default."""
 
@@ -283,7 +425,8 @@ def _validate_task_inputs(
 ) -> list[str]:
     """Return component-input wiring errors for one task.
 
-    Required component inputs must be present in task arguments. When declared
+    Required component inputs must be present in task arguments, and supplied
+    arguments must correspond to a declared component input. When declared
     inputs are explicitly supplied, graph/task output references are checked
     regardless of whether the input is required. Nested graph component specs
     are validated recursively.
@@ -309,12 +452,26 @@ def _validate_task_inputs(
     if not component_spec:
         return errors
 
-    component_inputs = component_spec.get("inputs", [])
-    if not isinstance(component_inputs, list):
-        component_inputs = []
+    raw_component_inputs = component_spec.get("inputs", [])
+    component_inputs = raw_component_inputs if isinstance(raw_component_inputs, list) else []
     task_arguments = task_spec.get("arguments", {}) or {}
     if not isinstance(task_arguments, Mapping):
         task_arguments = {}
+
+    declared_names = {
+        str(spec["name"])
+        for spec in component_inputs
+        if isinstance(spec, Mapping) and spec.get("name")
+    }
+    errors.extend(
+        _validate_undeclared_arguments(
+            full_task_name,
+            component_spec,
+            raw_component_inputs,
+            task_arguments,
+            declared_names,
+        )
+    )
 
     for input_spec in component_inputs:
         if not isinstance(input_spec, Mapping):
@@ -344,12 +501,7 @@ def _validate_task_inputs(
     implementation = component_spec.get("implementation", {})
     nested_graph = implementation.get("graph") if isinstance(implementation, Mapping) else None
     if isinstance(nested_graph, Mapping):
-        subgraph_inputs = {
-            str(inp.get("name"))
-            for inp in component_inputs
-            if isinstance(inp, Mapping) and inp.get("name")
-        }
-        errors.extend(_validate_graph_inputs(nested_graph, subgraph_inputs, f"{full_task_name} > "))
+        errors.extend(_validate_graph_inputs(nested_graph, declared_names, f"{full_task_name} > "))
 
     return errors
 
@@ -389,7 +541,10 @@ def _validate_graph_inputs(
 
 
 def validate_component_inputs(pipeline_spec: Mapping[str, Any]) -> list[str]:
-    """Return required-input and reference-wiring errors for a pipeline.
+    """Return input-wiring errors for a pipeline.
+
+    Covers missing required inputs, undeclared task arguments, and dangling
+    graph-input / task-output references.
 
     Validation uses embedded component specs when present. If the pipeline has
     no object-shaped implementation graph, this component-input pass returns no

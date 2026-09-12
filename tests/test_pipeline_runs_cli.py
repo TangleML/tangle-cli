@@ -550,8 +550,9 @@ def test_pipeline_runs_submit_dry_run_prints_sanitized_payload(monkeypatch, tmp_
                                 "componentRef": {
                                     "name": "text-component",
                                     "text": (
-                                        "name: Text Component\n_source_dir: /tmp/private\nimplementation:\n"
-                                        "  container:\n    image: busybox\n"
+                                        "name: Text Component\n_source_dir: /tmp/private\n"
+                                        "inputs:\n- {name: config, type: JsonObject}\n"
+                                        "implementation:\n  container:\n    image: busybox\n"
                                     ),
                                 }
                             }
