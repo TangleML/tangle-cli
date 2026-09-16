@@ -1106,6 +1106,90 @@ def test_compile_task_cross_file_variants_are_call_order_independent(tmp_path):
     assert list(forward_sidecar) == list(reverse_sidecar)
 
 
+def _write_mode_spelling_pipeline(project: Path, *, first: str, second: str) -> Path:
+    """One shared function decorated twice, differing only in how ``mode`` is
+    spelled (omitted vs explicit ``"inline"``)."""
+    src = project / "src"
+    pkg = src / "package_a"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "tasks.py").write_text(
+        "def run(model: str) -> str:\n"
+        '    """Run a model.\n\n'
+        "    Metadata:\n"
+        "        Name: Run A\n"
+        '    """\n'
+        "    return model\n",
+        encoding="utf-8",
+    )
+    pipeline_path = src / "pipeline.py"
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from package_a import tasks\n\n"
+        f"run_first = task(image='registry.example/dbt:1'{first})(tasks.run)\n"
+        f"run_second = task(image='registry.example/dbt:1'{second})(tasks.run)\n\n"
+        "@pipeline('Mode Spelling Pipeline')\n"
+        "def mode_spelling_pipeline() -> Out[str]:\n"
+        "    a = run_first.named('a')(model='a')\n"
+        "    b = run_second.named('b')(model='b')\n"
+        "    return b\n",
+        encoding="utf-8",
+    )
+    return pipeline_path
+
+
+def test_compile_task_omitted_mode_and_explicit_inline_are_one_component(tmp_path):
+    """``@task()`` and ``@task(mode="inline")`` generate the SAME component:
+    the hydrator reads ``gen_config.get("mode", "inline")``. They must dedup to
+    one entry keeping the readable legacy fragment, not split into two hashed
+    variants."""
+    project = tmp_path / "project"
+    pipeline_path = _write_mode_spelling_pipeline(
+        project, first="", second=", mode='inline'"
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, project / "compiled.yaml")
+
+    assert list(sidecar) == ["run"]
+    assert fragments == {"a": "run", "b": "run"}
+
+
+def test_compile_task_mode_spelling_representative_is_call_order_independent(tmp_path):
+    """When two spellings of one component meet, the EMITTED form is chosen
+    canonically, so swapping the call order yields byte-identical sidecars."""
+    forward = _write_mode_spelling_pipeline(
+        tmp_path / "forward", first="", second=", mode='inline'"
+    )
+    reverse = _write_mode_spelling_pipeline(
+        tmp_path / "reverse", first=", mode='inline'", second=""
+    )
+
+    forward_sidecar, forward_fragments = _sidecar_and_tasks(
+        forward, tmp_path / "forward" / "compiled.yaml"
+    )
+    reverse_sidecar, reverse_fragments = _sidecar_and_tasks(
+        reverse, tmp_path / "reverse" / "compiled.yaml"
+    )
+
+    assert forward_fragments == reverse_fragments == {"a": "run", "b": "run"}
+    assert forward_sidecar == reverse_sidecar
+    # The canonical representative omits the redundant implicit default.
+    assert "mode" not in forward_sidecar["run"]["local_from_python"]
+
+
+def test_compile_task_explicit_bundle_mode_still_splits_from_inline(tmp_path):
+    """Normalising the implicit default must not blur a REAL mode difference."""
+    project = tmp_path / "project"
+    pipeline_path = _write_mode_spelling_pipeline(
+        project, first="", second=", mode='bundle', resolve_root='.'"
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, project / "compiled.yaml")
+
+    assert len(sidecar) == 2
+    assert fragments["a"] != fragments["b"]
+
+
 # ---------------------------------------------------------------------------
 # Runnable argument-value emission (raw string constant / graphInput /
 # taskOutput). Dispatch is on the VALUE's type, never the argument KEY.

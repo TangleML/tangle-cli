@@ -43,14 +43,16 @@ Expected assertions
    the output directory and not an absolute machine path).
 
 Observed output on this revision (the digests are derived only from
-project-relative values, so they reproduce on any checkout)::
+project-relative values, so they reproduce on any checkout). The sidecar lists
+colliding variants in sorted fragment order, which is why the fat entry appears
+first::
 
-    run-dbt--b196ad73a4   image: python:3.12-slim
-    run-dbt--6024a73044   image: python:3.12
+    run-dbt--573d8d33bd   image: python:3.12
+    run-dbt--e61a70231d   image: python:3.12-slim
 
-    daily_orders     -> resolve://./pipeline.components.yaml#run-dbt--b196ad73a4
-    hourly_sessions  -> resolve://./pipeline.components.yaml#run-dbt--b196ad73a4
-    backfill_orders  -> resolve://./pipeline.components.yaml#run-dbt--6024a73044
+    daily_orders     -> resolve://./pipeline.components.yaml#run-dbt--e61a70231d
+    hourly_sessions  -> resolve://./pipeline.components.yaml#run-dbt--e61a70231d
+    backfill_orders  -> resolve://./pipeline.components.yaml#run-dbt--573d8d33bd
 
 Note on ``file:``: sidecar paths are relative to the OUTPUT directory, so
 compiling into ``/tmp`` (outside the source tree) writes a long ``../../..``

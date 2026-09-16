@@ -1163,19 +1163,30 @@ def _unwrapped_schema_for_task(
         raise CompileError(str(exc)) from exc
 
 
+def _canonical_json(payload: Any) -> str:
+    """Canonical JSON encoding used for hashing and deterministic ordering.
+
+    Args:
+        payload: Any JSON-serialisable structure. Mapping keys are sorted so
+            the encoding never depends on Python dict insertion order.
+
+    Returns:
+        A compact, key-sorted JSON string.
+    """
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def _stable_payload_hash(payload: Any) -> str:
     """Short deterministic SHA-256 prefix for a JSON-serialisable payload.
 
     Args:
-        payload: Any JSON-serialisable structure. Mapping keys are sorted so
-            the digest never depends on Python dict insertion order, and the
-            digest is stable across processes (unlike :func:`hash`).
+        payload: Any JSON-serialisable structure. The digest is stable across
+            processes (unlike :func:`hash`) and independent of dict ordering.
 
     Returns:
         A 10-character lowercase hex digest prefix.
     """
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:10]
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()[:10]
 
 
 def _unwrapped_schema_hash(schema: Mapping[str, Any]) -> str:
@@ -1710,6 +1721,24 @@ def _logical_module_id(source: Path, *, identity_root: Path) -> str:
     return f"{_relpath_posix(directory, identity_root)}:{dotted}"
 
 
+def _emitted_form_rank(payload: Mapping[str, Any]) -> tuple[int, str]:
+    """Sort key selecting the canonical spelling of one generated component.
+
+    Several call sites can describe the SAME component with different emitted
+    text — writing ``mode="inline"`` explicitly versus leaving the implicit
+    default out. Ranking by key count first prefers the leanest spelling, so a
+    pipeline that already omits a redundant default keeps its existing sidecar
+    bytes when a sibling call site spells that default out.
+
+    Args:
+        payload: An emitted ``local_from_python`` block.
+
+    Returns:
+        ``(key count, canonical JSON)`` — total and independent of call order.
+    """
+    return (len(payload), _canonical_json(payload))
+
+
 def _task_component_identity(
     ref: CallableRef,
     *,
@@ -1749,6 +1778,31 @@ def _task_component_identity(
     # same-named functions nested in different scopes within ONE module;
     # it equals the function name for the module-level authoring surface.
     qualname = getattr(ref, "__qualname__", None) or ref._task_function_name
+    generation = _local_from_python_payload(
+        ref,
+        source=source,
+        components_yaml_dir=identity_root,
+        image_overrides=image_overrides,
+        unwrapped_schema=unwrapped_schema,
+    )
+    # Normalise fields whose OMISSION is defined to mean a specific value, so
+    # two spellings of one component do not hash apart. Only ``mode`` has such
+    # an implicit default in the emitted contract: the hydrator reads
+    # ``gen_config.get("mode", "inline")`` and ``CallableRef`` generates with
+    # ``self._task_mode or "inline"``, so ``@task()`` and ``@task(mode="inline")``
+    # regenerate byte-identical components.
+    #
+    # Audited and deliberately NOT normalised:
+    # * ``dependencies_from`` — omission means "auto-discover next to the
+    #   source AT HYDRATE TIME". Compile-time discovery could disagree with the
+    #   hydrate-time layout, so an explicit path is not provably the same
+    #   component as an omission.
+    # * ``resolve_root`` — not inert in inline mode: ``component_from_func``
+    #   emits a ``tangle_cli_generation_resolve_root`` annotation whenever it is
+    #   set, so it changes the generated component regardless of mode.
+    # * ``image`` — omission means "whatever the generator defaults to", which
+    #   is not a value this layer can canonicalise.
+    generation["mode"] = generation.get("mode") or "inline"
     return {
         "module": _logical_module_id(source, identity_root=identity_root),
         "qualname": qualname,
@@ -1756,13 +1810,7 @@ def _task_component_identity(
         # Generation config, anchored at the stable project root. This mirrors
         # the emitted block field-for-field so a new generation-affecting
         # option cannot be added to the sidecar without also splitting dedup.
-        "generation": _local_from_python_payload(
-            ref,
-            source=source,
-            components_yaml_dir=identity_root,
-            image_overrides=image_overrides,
-            unwrapped_schema=unwrapped_schema,
-        ),
+        "generation": generation,
     }
 
 
@@ -1793,8 +1841,9 @@ def _plan_task_sidecar(
     """Plan the ``<stem>.components.yaml`` entries and per-task fragments.
 
     Dedup is by GENERATED COMPONENT IDENTITY — module-qualified function
-    identity plus every generation-affecting option — never by bare function
-    name. Two call sites collapse into one entry only when the whole
+    identity plus every generation-affecting option, with implicit defaults
+    canonicalised (``@task()`` and ``@task(mode="inline")`` are ONE component)
+    — never by bare function name. Two call sites collapse into one entry only when the whole
     :func:`_task_component_identity` payload matches: logical module namespace,
     ``__qualname__``, function name, image (explicit or resolved ``image_id``),
     mode, resolve_root, dependencies_from, the persisted unwrap schema, and the
@@ -1895,7 +1944,16 @@ def _plan_task_sidecar(
             unwrapped_schema=unwrapped_schema,
         )
         identity = _stable_payload_hash(identity_payload)
-        variants.setdefault(base, {}).setdefault(identity, (emitted, identity_payload))
+        by_identity = variants.setdefault(base, {})
+        previous = by_identity.get(identity)
+        if previous is None:
+            by_identity[identity] = (emitted, identity_payload)
+        elif _emitted_form_rank(emitted) < _emitted_form_rank(previous[0]):
+            # Same component, different SPELLING (e.g. one call site omits
+            # ``mode`` while another writes ``mode="inline"``). Pick the
+            # canonical representative rather than whichever was traced first,
+            # so the sidecar text does not depend on call order.
+            by_identity[identity] = (emitted, previous[1])
         legacy_fragments.setdefault((base, identity), _fragment_for_task(ref, unwrapped_schema))
         task_identities.append((task_id, base, identity))
 
