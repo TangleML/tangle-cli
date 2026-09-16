@@ -353,7 +353,28 @@ uv run tangle sdk published-components publish components/my-component.yaml --dr
 uv run tangle sdk published-components deprecate sha256:old --superseded-by sha256:new
 ```
 
-`publish` accepts `--image`, `--name`, `--description`, `--annotations` (JSON), `--dry-run`, `--published-by`, generic git metadata fields, generic API auth fields, `--log-type`, and `--config`. By default it scopes version checks and automatic old-version deprecation to the current authenticated user via `users_me()`; use `--published-by` to supply an explicit owner/publisher filter. Publishing fails closed if no owner can be determined.
+`publish` accepts `--image`, `--name`, `--description`, `--annotations` (JSON), `--dry-run`, `--allow-downgrade`, `--published-by`, generic git metadata fields, generic API auth fields, `--log-type`, and `--config`. By default it scopes version checks and automatic old-version deprecation to the current authenticated user via `users_me()`; use `--published-by` to supply an explicit owner/publisher filter. Publishing fails closed if no owner can be determined.
+
+#### Monotonic publishing and result digests
+
+Publishing is monotonic against the highest **non-deprecated, owner-scoped** published version of the component (ordering comes from `compare_versions`, which zero-pads shorter versions so `1.0.1 > 1.0`):
+
+| Local vs latest published | Outcome | Notes |
+| --- | --- | --- |
+| nothing published / no readable remote version | `proceed` | first publish |
+| local strictly newer | `proceed` | publishes, then deprecates older owner-scoped versions |
+| local equal | `skip` | no create/deprecate calls |
+| local strictly older | `skip` | no-op; never publishes an older version and never deprecates a newer one |
+
+Every result carries the digest of the version it compared against:
+
+- `digest` — digest of a **newly created** publication (SUCCESS only, unchanged meaning).
+- `latest_digest` — exact digest of the selected latest published version (set on PROCEED/SKIP, and carried through the SUCCESS/ERROR results that follow a version check). JSON output includes it as `latest_digest`.
+- `ProcessingResult.resolved_digest` — the digest a caller should pin: `digest or latest_digest`, but deliberately `None` for any outcome other than SUCCESS/SKIP, so a failed publish never hands back a stale-but-plausible digest.
+
+If two or more non-deprecated owner-scoped components tie at the selected latest version, no exact digest can be chosen, so the check fails closed with an `error` naming the tied digests instead of guessing from API ordering. Deprecated components are never selected as "latest".
+
+**Contract change:** republishing an older version used to proceed (publishing the older spec and deprecating the newer one). It is now a skip. Deliberate downgrades must opt in with `--allow-downgrade` on the CLI, or `ComponentPublisher(allow_downgrade=True)` / `allow_downgrade=True` on the `publish_component_to_tangle` / `perform_version_check` wrappers. Republishing the same version is still a skip, as before.
 
 There is no separate OSS `publish-all` command. To publish multiple components, pass a YAML/JSON config list, or `_defaults` + `configs`, to the same `published-components publish` command; the command aggregates results and exits nonzero if any component errors. A top-level `_select` node can choose between such documents per environment (see [Environment-selected configs](#environment-selected-configs-_select)).
 

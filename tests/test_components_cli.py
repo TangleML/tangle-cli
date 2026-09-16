@@ -88,6 +88,7 @@ def test_published_components_publish_cli_wiring_and_config_precedence(monkeypat
         "git_remote_url": None,
         "git_root": None,
         "published_by": None,
+        "allow_downgrade": False,
         "client": None,
         "logger": ANY,
     }
@@ -283,6 +284,7 @@ def test_published_components_publish_config_array_uses_per_entry_controls(monke
             "git_remote_url": None,
             "git_root": None,
             "published_by": "first@example.com",
+            "allow_downgrade": False,
             "client": fake_client,
             "logger": ANY,
         },
@@ -293,6 +295,7 @@ def test_published_components_publish_config_array_uses_per_entry_controls(monke
             "git_remote_url": None,
             "git_root": None,
             "published_by": "second@example.com",
+            "allow_downgrade": False,
             "client": None,
             "logger": ANY,
         },

@@ -30,6 +30,7 @@ class User:
 class ExistingComponent:
     digest: str
     name: str = "demo"
+    deprecated: bool = False
 
 
 class FakeClient:
@@ -213,6 +214,210 @@ def test_version_check_skips_unchanged_owner_scoped_version() -> None:
     assert result.outcome == ProcessingOutcome.SKIP
     assert result.latest_version == "1.0"
     assert "unchanged" in (result.reason or "")
+
+
+# ---------------------------------------------------------------------------
+# Monotonic publishing contract
+# ---------------------------------------------------------------------------
+
+
+def _version_check(
+    local_version: str,
+    published: dict[str, str],
+    *,
+    deprecated: set[str] | None = None,
+    allow_downgrade: bool = False,
+) -> tuple[ProcessingResult, FakeClient]:
+    spec = ComponentSpec.from_yaml(
+        f"name: demo\nmetadata:\n  annotations:\n    version: '{local_version}'\n"
+    )
+    client = FakeClient()
+    client.existing = [
+        ExistingComponent(digest, deprecated=digest in (deprecated or set())) for digest in published
+    ]
+    client.component_versions = dict(published)
+    result = perform_version_check(
+        spec=spec,
+        dry_run=False,
+        client=client,
+        allow_downgrade=allow_downgrade,
+    )
+    return result, client
+
+
+def test_version_check_proceeds_when_nothing_published() -> None:
+    result, client = _version_check("1.0", {})
+
+    assert result.outcome == ProcessingOutcome.PROCEED
+    assert result.latest_version is None
+    assert result.latest_digest is None
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_version_check_proceeds_when_local_is_newer() -> None:
+    result, _ = _version_check("1.1", {"sha256:v10": "1.0"})
+
+    assert result.outcome == ProcessingOutcome.PROCEED
+    assert result.latest_version == "1.0"
+    assert result.latest_digest == "sha256:v10"
+
+
+def test_version_check_equal_version_skips_with_exact_digest() -> None:
+    result, client = _version_check("1.0", {"sha256:v10": "1.0"})
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    assert result.latest_version == "1.0"
+    assert result.latest_digest == "sha256:v10"
+    assert result.resolved_digest == "sha256:v10"
+    assert "unchanged" in (result.reason or "")
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_version_check_older_local_version_skips_with_newer_digest() -> None:
+    result, client = _version_check("1.0", {"sha256:v20": "2.0"})
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    assert result.latest_version == "2.0"
+    assert result.latest_digest == "sha256:v20"
+    assert result.resolved_digest == "sha256:v20"
+    assert "older" in (result.reason or "")
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_version_check_selects_highest_of_multiple_published_versions() -> None:
+    result, _ = _version_check(
+        "1.5",
+        {"sha256:v10": "1.0", "sha256:v201": "2.0.1", "sha256:v20": "2.0"},
+    )
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    assert result.latest_version == "2.0.1"
+    assert result.latest_digest == "sha256:v201"
+
+
+def test_version_check_fails_closed_on_ambiguous_latest_digests() -> None:
+    result, client = _version_check("1.0", {"sha256:a": "2.0", "sha256:b": "2.0"})
+
+    assert result.outcome == ProcessingOutcome.ERROR
+    assert result.latest_digest is None
+    assert result.resolved_digest is None
+    assert "Ambiguous latest published version 2.0" in (result.reason or "")
+    assert "sha256:a" in (result.reason or "") and "sha256:b" in (result.reason or "")
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_version_check_ignores_deprecated_components_when_selecting_latest() -> None:
+    result, _ = _version_check(
+        "1.0",
+        {"sha256:v10": "1.0", "sha256:v20": "2.0"},
+        deprecated={"sha256:v20"},
+    )
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    assert result.latest_version == "1.0"
+    assert result.latest_digest == "sha256:v10"
+
+
+def test_version_check_ignores_deprecated_duplicate_of_latest_version() -> None:
+    result, _ = _version_check(
+        "1.0",
+        {"sha256:live": "2.0", "sha256:dead": "2.0"},
+        deprecated={"sha256:dead"},
+    )
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    assert result.latest_digest == "sha256:live"
+
+
+def test_version_check_allow_downgrade_opts_back_into_publishing_older() -> None:
+    result, _ = _version_check("1.0", {"sha256:v20": "2.0"}, allow_downgrade=True)
+
+    assert result.outcome == ProcessingOutcome.PROCEED
+    assert result.latest_version == "2.0"
+    assert result.latest_digest == "sha256:v20"
+
+
+def test_publish_older_version_is_a_noop_that_pins_newer_digest(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="1.0")
+    client = FakeClient()
+    client.existing = [ExistingComponent("sha256:v20")]
+    client.component_versions = {"sha256:v20": "2.0"}
+
+    result = publish_component_to_tangle(component_path, client=client)
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    assert result.digest is None
+    assert result.latest_digest == "sha256:v20"
+    assert result.resolved_digest == "sha256:v20"
+    assert client.create_calls == []
+    assert client.update_calls == []
+    assert result.to_dict()["latest_digest"] == "sha256:v20"
+
+
+def test_publish_newer_version_reports_new_and_previous_digests(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="2.0")
+    client = FakeClient()
+    client.existing = [ExistingComponent("sha256:v10")]
+    client.component_versions = {"sha256:v10": "1.0"}
+    client.publish_response = {"digest": "sha256:v20"}
+
+    result = publish_component_to_tangle(component_path, client=client)
+
+    assert result.outcome == ProcessingOutcome.SUCCESS
+    assert result.digest == "sha256:v20"
+    assert result.latest_digest == "sha256:v10"
+    assert result.resolved_digest == "sha256:v20"
+
+
+def test_publish_ambiguous_latest_digests_publishes_nothing(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="1.0")
+    client = FakeClient()
+    client.existing = [ExistingComponent("sha256:a"), ExistingComponent("sha256:b")]
+    client.component_versions = {"sha256:a": "2.0", "sha256:b": "2.0"}
+
+    result = publish_component_to_tangle(component_path, client=client)
+
+    assert result.outcome == ProcessingOutcome.ERROR
+    assert result.resolved_digest is None
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_resolved_digest_is_none_for_error_outcomes(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="2.0")
+    client = FakeClient()
+    client.existing = [ExistingComponent("sha256:v10")]
+    client.component_versions = {"sha256:v10": "1.0"}
+
+    def failing_create(**kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    client.published_components_create = failing_create  # type: ignore[method-assign]
+
+    result = publish_component_to_tangle(component_path, client=client)
+
+    assert result.outcome == ProcessingOutcome.ERROR
+    assert result.latest_digest == "sha256:v10"
+    assert result.resolved_digest is None
+    assert client.update_calls == []
+
+
+def test_version_check_without_owner_reports_error_and_no_digest() -> None:
+    spec = ComponentSpec.from_yaml("name: demo\nmetadata:\n  annotations:\n    version: '1.0'\n")
+    client = FakeClient()
+    client.user = None
+
+    result = perform_version_check(spec=spec, dry_run=False, client=client)
+
+    assert result.outcome == ProcessingOutcome.ERROR
+    assert result.latest_digest is None
+    assert result.resolved_digest is None
+    assert client.find_calls == []
+    assert client.create_calls == []
 
 
 def test_version_check_progress_uses_logger_not_tangle_verbose(monkeypatch, capsys) -> None:

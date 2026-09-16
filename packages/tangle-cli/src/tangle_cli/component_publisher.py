@@ -36,7 +36,17 @@ class ProcessingOutcome(str, Enum):
 
 @dataclass
 class ProcessingResult:
-    """Result for one component publish/deprecate processing step."""
+    """Result for one component publish/deprecate processing step.
+
+    ``digest`` is the digest of a *newly created* publication and is therefore
+    only populated on :attr:`ProcessingOutcome.SUCCESS`. ``latest_digest`` is
+    the exact digest of the selected latest non-deprecated owner-scoped
+    published version that the local component was compared against; it is
+    populated on PROCEED/SKIP (and carried through SUCCESS/ERROR results that
+    happen after a version check) whenever it can be resolved unambiguously.
+    Callers that want "the digest to pin, whatever happened" should use
+    :attr:`resolved_digest`.
+    """
 
     outcome: ProcessingOutcome
     local_version: str | None = None
@@ -44,7 +54,22 @@ class ProcessingResult:
     spec: Any = None
     reason: str | None = None
     digest: str | None = None
+    latest_digest: str | None = None
     response: Any = None
+
+    @property
+    def resolved_digest(self) -> str | None:
+        """Digest a caller can pin: newly published digest, else latest published.
+
+        Deliberately ``None`` for any outcome other than SUCCESS/SKIP: after an
+        ERROR (including a publish request that raised and may still have
+        landed server-side) the correct digest is unknown, so this must not
+        hand back the pre-existing one.
+        """
+
+        if self.outcome not in (ProcessingOutcome.SUCCESS, ProcessingOutcome.SKIP):
+            return None
+        return self.digest or self.latest_digest
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -54,6 +79,7 @@ class ProcessingResult:
             "latest_version": self.latest_version,
             "reason": self.reason,
             "digest": self.digest,
+            "latest_digest": self.latest_digest,
             "response": _to_plain(self.response),
         }
         if self.spec is not None:
@@ -139,6 +165,7 @@ class ComponentPublisher(TangleCliHandler):
         hooks: Sequence[ComponentPublishHook] | None = None,
         logger: Logger | None = None,
         base_url: str | None = None,
+        allow_downgrade: bool = False,
     ) -> None:
         """Initialize the ComponentPublisher.
 
@@ -147,6 +174,11 @@ class ComponentPublisher(TangleCliHandler):
         ``client_factory`` is a downstream seam for lazily constructing a custom
         authenticated client; subclasses may also override :meth:`_get_client`
         for more control.
+
+        ``allow_downgrade`` is an explicit opt-out from monotonic publishing.
+        By default a local version older than the latest published
+        owner-scoped version is a no-op SKIP; set it to ``True`` only for a
+        deliberate manual downgrade/republish.
         """
 
         super().__init__(
@@ -157,6 +189,7 @@ class ComponentPublisher(TangleCliHandler):
             base_url=base_url,
         )
         self.published_by = published_by
+        self.allow_downgrade = allow_downgrade
         self.hooks = list(hooks or [])
         self.results: list[tuple[str, ProcessingResult]] = []
 
@@ -190,6 +223,19 @@ class ComponentPublisher(TangleCliHandler):
         digest = getattr(component, "digest", None)
         return str(digest) if digest else None
 
+    def component_is_deprecated(self, component: Any) -> bool:
+        """Return whether a published component is marked deprecated.
+
+        Listing is already non-deprecated by default; this is a defensive
+        filter so deprecated entries can never be selected as "latest".
+        """
+
+        if isinstance(component, Mapping):
+            value = component.get("deprecated")
+        else:
+            value = getattr(component, "deprecated", None)
+        return bool(value)
+
     def current_user_id(self, client: Any) -> str | None:
         """Return the current Tangle user id for owner-scoped lookups."""
 
@@ -206,18 +252,33 @@ class ComponentPublisher(TangleCliHandler):
         return str(value) if value else None
 
     def perform_version_check(self, spec: Any) -> ProcessingResult:
-        """Perform owner-scoped version checking for a component.
+        """Perform owner-scoped, monotonic version checking for a component.
 
         If ``published_by`` is omitted, the current authenticated user is
         resolved via ``client.users_me().id``. Failure to determine an owner is
         an error so callers do not accidentally compare/deprecate components
         owned by others.
+
+        Ordering is defined by :func:`tangle_cli.utils.compare_versions`
+        against the highest non-deprecated owner-scoped published version:
+
+        * nothing published (or no readable remote version) → PROCEED
+        * local strictly newer → PROCEED
+        * local equal → SKIP, carrying that version's exact digest
+        * local strictly older → SKIP (no-op), carrying the newer published
+          digest; never publishes an older version and never deprecates a
+          newer one. ``allow_downgrade=True`` opts out of this last rule.
+
+        If several non-deprecated owner-scoped components tie at the selected
+        latest version, a SKIP cannot name one exact digest, so the check fails
+        closed with an ERROR rather than guessing from API ordering.
         """
 
         local_version = spec.version
         self.log.info(f"   Local version: {local_version}")
 
-        latest_version = None
+        latest_version: str | None = None
+        latest_digests: list[str] = []
 
         if self.dry_run:
             test_version = os.environ.get("TEST_LATEST_VERSION")
@@ -257,16 +318,21 @@ class ComponentPublisher(TangleCliHandler):
                     digest = self.component_digest(component)
                     if not digest:
                         continue
+                    if self.component_is_deprecated(component):
+                        continue
                     try:
                         full_spec = client.get_component_spec(digest)
                         remote_version = full_spec.version if full_spec else None
-                        if remote_version and (
-                            not latest_version or utils.compare_versions(remote_version, latest_version) > 0
-                        ):
-                            latest_version = remote_version
                     except Exception as exc:
                         self.log.warn(f"   Warning: Failed to get version for component {digest[:16]}: {exc}")
                         continue
+                    if not remote_version:
+                        continue
+                    if latest_version is None or utils.compare_versions(remote_version, latest_version) > 0:
+                        latest_version = remote_version
+                        latest_digests = [digest]
+                    elif utils.compare_versions(remote_version, latest_version) == 0 and digest not in latest_digests:
+                        latest_digests.append(digest)
 
                 if latest_version:
                     self.log.info(f"   Remote version: {latest_version}")
@@ -275,11 +341,31 @@ class ComponentPublisher(TangleCliHandler):
                         f"   ℹ️  Found {len(existing_components)} component(s) but couldn't extract version"
                     )
 
-        should_proceed = not latest_version or utils.compare_versions(local_version, latest_version) != 0
+        if len(latest_digests) > 1:
+            tied = ", ".join(latest_digests)
+            self.log.error(
+                f"   ❌ Ambiguous latest published version {latest_version}: "
+                f"{len(latest_digests)} non-deprecated components share it ({tied})"
+            )
+            return ProcessingResult(
+                outcome=ProcessingOutcome.ERROR,
+                local_version=local_version,
+                latest_version=latest_version,
+                spec=spec,
+                reason=(
+                    f"Ambiguous latest published version {latest_version}: "
+                    f"{len(latest_digests)} non-deprecated components share it ({tied}); "
+                    "cannot select an exact digest"
+                ),
+            )
+
+        latest_digest = latest_digests[0] if latest_digests else None
+
+        comparison = 0 if latest_version is None else utils.compare_versions(local_version, latest_version)
+        should_proceed = latest_version is None or comparison > 0 or (comparison < 0 and self.allow_downgrade)
 
         if should_proceed:
-            is_older = latest_version is not None and utils.compare_versions(latest_version, local_version) > 0
-            version_suffix = " (older)" if is_older else ""
+            version_suffix = " (older)" if comparison < 0 else ""
             self.log.info(
                 "   ➡️  Version "
                 + (f"{latest_version}{version_suffix}" if latest_version else "new")
@@ -289,17 +375,29 @@ class ComponentPublisher(TangleCliHandler):
                 outcome=ProcessingOutcome.PROCEED,
                 local_version=local_version,
                 latest_version=latest_version,
+                latest_digest=latest_digest,
                 spec=spec,
             )
 
-        self.log.info(f"   ⏭️  Skipping: Version {local_version} unchanged")
+        if comparison < 0:
+            self.log.info(
+                f"   ⏭️  Skipping: Local version {local_version} is older than published {latest_version}"
+            )
+            reason = (
+                f"Version {local_version} is older than published version {latest_version} "
+                "(no-op; publishing is monotonic)"
+            )
+        else:
+            self.log.info(f"   ⏭️  Skipping: Version {local_version} unchanged")
+            reason = f"Version {local_version} unchanged (matches remote)"
 
         return ProcessingResult(
             outcome=ProcessingOutcome.SKIP,
             local_version=local_version,
             latest_version=latest_version,
+            latest_digest=latest_digest,
             spec=spec,
-            reason=f"Version {local_version} unchanged (matches remote)",
+            reason=reason,
         )
 
     def deprecate_old_components(
@@ -528,6 +626,7 @@ class ComponentPublisher(TangleCliHandler):
                 outcome=ProcessingOutcome.SUCCESS,
                 local_version=version_check_result.local_version,
                 latest_version=version_check_result.latest_version,
+                latest_digest=version_check_result.latest_digest,
                 spec=spec,
                 reason=f"Dry-run: would publish {spec.name}",
                 response={"name": spec.name, "text": local_yaml_content},
@@ -542,6 +641,7 @@ class ComponentPublisher(TangleCliHandler):
                 outcome=ProcessingOutcome.ERROR,
                 local_version=version_check_result.local_version,
                 latest_version=version_check_result.latest_version,
+                latest_digest=version_check_result.latest_digest,
                 spec=spec,
                 reason="Cannot determine current user for author filtering",
             )
@@ -562,6 +662,7 @@ class ComponentPublisher(TangleCliHandler):
                     spec=spec,
                     reason=f"Successfully published with digest: {new_digest}",
                     digest=str(new_digest),
+                    latest_digest=version_check_result.latest_digest,
                     response=result,
                 )
 
@@ -570,6 +671,7 @@ class ComponentPublisher(TangleCliHandler):
                 outcome=ProcessingOutcome.ERROR,
                 local_version=version_check_result.local_version,
                 latest_version=version_check_result.latest_version,
+                latest_digest=version_check_result.latest_digest,
                 spec=spec,
                 reason="Component published but no digest returned",
                 response=result,
@@ -580,6 +682,7 @@ class ComponentPublisher(TangleCliHandler):
                 outcome=ProcessingOutcome.ERROR,
                 local_version=version_check_result.local_version,
                 latest_version=version_check_result.latest_version,
+                latest_digest=version_check_result.latest_digest,
                 spec=spec,
                 reason=f"Request failed: {exc}",
             )
@@ -772,14 +875,16 @@ def perform_version_check(
     client: Any = None,
     logger: Logger | None = None,
     published_by: str | None = None,
+    allow_downgrade: bool = False,
 ) -> ProcessingResult:
-    """Perform owner-scoped version checking for a component."""
+    """Perform owner-scoped, monotonic version checking for a component."""
 
     return ComponentPublisher(
         dry_run=dry_run,
         client=client,
         logger=logger,
         published_by=published_by,
+        allow_downgrade=allow_downgrade,
     ).perform_version_check(spec)
 
 
@@ -797,6 +902,7 @@ def publish_component_to_tangle(
     client: Any = None,
     client_factory: Callable[[], Any] | None = None,
     published_by: str | None = None,
+    allow_downgrade: bool = False,
 ) -> ProcessingResult:
     """Publish one component using ``ComponentPublisher.publish_component``."""
 
@@ -809,6 +915,7 @@ def publish_component_to_tangle(
         git_remote_url=git_remote_url,
         git_repo=git_repo,
         published_by=published_by,
+        allow_downgrade=allow_downgrade,
     )
     return publisher.publish_component(
         file_path,
@@ -830,6 +937,7 @@ def publish_component(client: Any, component_path: str | Path, **kwargs: Any) ->
         git_root=kwargs.pop("git_root", None),
         git_repo=kwargs.pop("git_repo", None),
         published_by=kwargs.pop("published_by", None),
+        allow_downgrade=bool(kwargs.pop("allow_downgrade", False)),
         client=client,
         client_factory=kwargs.pop("client_factory", None),
         logger=kwargs.pop("logger", None),

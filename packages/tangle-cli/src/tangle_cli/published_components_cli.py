@@ -247,6 +247,16 @@ def published_components_publish(
         Parameter(help="Custom annotations as a JSON object."),
     ] = None,
     dry_run: bool | None = None,
+    allow_downgrade: Annotated[
+        bool | None,
+        Parameter(
+            help=(
+                "Publish even when the local version is older than the latest published "
+                "owner-scoped version. Off by default: publishing is monotonic and an older "
+                "local version is a no-op skip."
+            )
+        ),
+    ] = None,
     git_remote_sha: str | None = None,
     git_remote_branch: str | None = None,
     git_remote_url: str | None = None,
@@ -269,6 +279,7 @@ def published_components_publish(
         description=(description, None),
         annotations=("annotations", annotations, None, True),
         dry_run=(dry_run, None),
+        allow_downgrade=(allow_downgrade, None),
         git_remote_sha=(git_remote_sha, None),
         git_remote_branch=(git_remote_branch, None),
         git_remote_url=(git_remote_url, None),
@@ -302,6 +313,7 @@ def published_components_publish(
                 git_remote_url=args.git_remote_url,
                 git_root=args.git_root,
                 published_by=args.published_by,
+                allow_downgrade=bool(args.allow_downgrade),
                 client=client,
                 logger=logger,
             )
