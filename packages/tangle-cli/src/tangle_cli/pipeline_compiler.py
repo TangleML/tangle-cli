@@ -479,17 +479,25 @@ def _compile_pipeline_fn(
         )
     if task_refs:
         components_path = output_path.with_name(output_path.stem + ".components.yaml")
-        components_entries = _build_local_from_python_components(
+        # ONE plan drives both halves: entries and componentRef fragments must
+        # agree, and a fragment depends on how many distinct components the
+        # function generates pipeline-wide (a shared helper called with
+        # different task-level images emits one entry per configuration).
+        sidecar_plan = _plan_task_sidecar(
             task_refs,
             components_yaml_dir=components_path.parent,
+            # Identity is anchored at the pipeline SOURCE dir, not the output
+            # dir, so fragment names survive compiling elsewhere (e.g. the
+            # hidden submit bundle) and relocating the project.
+            identity_root=base_dir,
             image_overrides=ctx.image_overrides,
             unwrapped_input_keys=builder.task_unwrapped_input_keys,
         )
+        components_entries = sidecar_plan.entries
         _rewrite_task_componentref_urls(
             body_dict=body_dict,
-            task_refs=task_refs,
+            fragment_by_task=sidecar_plan.fragment_by_task,
             components_yaml_name=components_path.name,
-            unwrapped_input_keys=builder.task_unwrapped_input_keys,
         )
 
     # 4b. A CHILD artifact is written under ``<root>.subgraphs/``, away from
@@ -1155,6 +1163,32 @@ def _unwrapped_schema_for_task(
         raise CompileError(str(exc)) from exc
 
 
+def _canonical_json(payload: Any) -> str:
+    """Canonical JSON encoding used for hashing and deterministic ordering.
+
+    Args:
+        payload: Any JSON-serialisable structure. Mapping keys are sorted so
+            the encoding never depends on Python dict insertion order.
+
+    Returns:
+        A compact, key-sorted JSON string.
+    """
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _stable_payload_hash(payload: Any) -> str:
+    """Short deterministic SHA-256 prefix for a JSON-serialisable payload.
+
+    Args:
+        payload: Any JSON-serialisable structure. The digest is stable across
+            processes (unlike :func:`hash`) and independent of dict ordering.
+
+    Returns:
+        A 10-character lowercase hex digest prefix.
+    """
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()[:10]
+
+
 def _unwrapped_schema_hash(schema: Mapping[str, Any]) -> str:
     """Hash a persisted unwrap schema for sidecar fragment disambiguation.
 
@@ -1167,26 +1201,46 @@ def _unwrapped_schema_hash(schema: Mapping[str, Any]) -> str:
         ``combine--0123abcd`` so different key sets for the same function do
         not collide in the generated components sidecar.
     """
-    payload = json.dumps(schema, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
+    return _stable_payload_hash(schema)
+
+
+def _task_fragment_base(ref: CallableRef) -> str:
+    """Return the LEGACY, un-disambiguated sidecar fragment for a ``@task``.
+
+    Args:
+        ref: The ``@task`` callable reference.
+
+    Returns:
+        The hyphenated function name, matching the ``local_from_python``
+        resolver's output-filename convention (``my_task`` -> ``my-task``).
+        This is the fragment used verbatim when the function generates exactly
+        ONE component across the whole pipeline; see
+        :func:`_plan_task_sidecar` for the multi-variant disambiguation.
+    """
+    assert ref._task_function_name is not None  # only @task refs reach here
+    return ref._task_function_name.replace("_", "-")
 
 
 def _fragment_for_task(ref: CallableRef, unwrapped_schema: Mapping[str, Any] | None = None) -> str:
-    """Return the stable components-sidecar fragment for a ``@task`` call.
+    """Return the legacy single-variant fragment for a ``@task`` call.
 
     Args:
         ref: The ``@task`` callable reference.
         unwrapped_schema: Optional persisted unwrap schema for this call site.
 
     Returns:
-        The hyphenated function name for normal tasks, matching the
-        ``local_from_python`` resolver's output-filename convention
-        (``my_task`` -> ``my-task``). For unwrapped tasks, returns the function
-        fragment plus a schema hash so different key sets do not collide into
-        one component schema.
+        The hyphenated function name for normal tasks. For unwrapped tasks,
+        returns the function fragment plus a schema hash so different key sets
+        do not collide into one component schema.
+
+    Note:
+        This is only the SINGLE-VARIANT naming. When one function generates
+        several DIFFERENT components in one pipeline (e.g. a shared ``run_dbt``
+        called with different task-level ``image``/``dependencies_from``),
+        :func:`_plan_task_sidecar` appends a component-identity hash instead so
+        the variants do not collapse into the first one emitted.
     """
-    assert ref._task_function_name is not None  # only @task refs reach here
-    base = ref._task_function_name.replace("_", "-")
+    base = _task_fragment_base(ref)
     if unwrapped_schema:
         return f"{base}--{_unwrapped_schema_hash(unwrapped_schema)}"
     return base
@@ -1530,163 +1584,435 @@ def _relocate_relative_local_url(url: str, source_dir: Path, sidecar_dir: Path) 
     return None
 
 
-def _build_local_from_python_components(
+@dataclass(frozen=True)
+class TaskSidecarPlan:
+    """Resolved ``@task`` sidecar entries plus the per-task fragment map.
+
+    Attributes:
+        entries: The ``<stem>.components.yaml`` content, ``{fragment:
+            {local_from_python: {...}}}``, in first-seen task order.
+        fragment_by_task: Graph ``task_id`` -> the sidecar fragment that task's
+            ``componentRef`` must point at. Sidecar emission and componentRef
+            rewriting MUST share this map: fragment naming depends on how many
+            distinct components one function generates across the whole
+            pipeline, so it cannot be recomputed per call site in isolation.
+    """
+
+    entries: dict[str, Any]
+    fragment_by_task: dict[str, str]
+
+
+def _local_from_python_payload(
+    ref: CallableRef,
+    *,
+    source: Path,
+    components_yaml_dir: Path,
+    image_overrides: Mapping[str, str] | None,
+    unwrapped_schema: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the ``local_from_python`` block for ONE traced ``@task`` call.
+
+    Every field that changes what ``regenerate_yaml`` produces at hydrate time
+    belongs in this payload — the payload IS the component's identity (see
+    :func:`_plan_task_sidecar`).
+
+    Args:
+        ref: The ``@task`` callable reference for this call site.
+        source: The ``@task`` source file (already existence-checked).
+        components_yaml_dir: Directory the generated sidecar will live in;
+            local paths are emitted relative to it.
+        image_overrides: Optional compile-time ``--image ID=REF`` overrides.
+        unwrapped_schema: Persisted unwrap schema for this call site, or an
+            empty mapping when the task does not use ``@task(unwrap=...)``.
+
+    Returns:
+        The ``local_from_python`` mapping for this call site.
+
+    Raises:
+        CompileError: when ``image_id`` does not resolve, or a referenced
+            ``resolve_root`` / ``dependencies_from`` path is unreachable.
+    """
+    local_from_python: dict[str, Any] = {}
+    if ref._task_image is not None:
+        local_from_python["image"] = ref._task_image
+    elif ref._task_image_id is not None:
+        resolved_image = resolve_image_id(ref._task_image_id, image_overrides)
+        if resolved_image is None:
+            raise CompileError(
+                f"@task image_id={ref._task_image_id!r} on function "
+                f"{ref._task_function_name!r} did not resolve to an image. "
+                f"Pass --image {ref._task_image_id}=IMAGE to `tangle sdk pipelines compile`, "
+                f"or register a default with register_image_id({ref._task_image_id!r}, IMAGE)."
+            )
+        local_from_python["image"] = resolved_image
+    # Always pin the function name. Without it the hydrator defaults
+    # to the file stem and extracts the wrong symbol.
+    assert ref._task_function_name is not None
+    local_from_python["function"] = ref._task_function_name
+    if ref._task_mode is not None:
+        local_from_python["mode"] = ref._task_mode
+    if ref._task_resolve_root is not None:
+        resolve_root = ref._task_resolve_root
+        if not resolve_root.exists():
+            raise CompileError(
+                f"@task resolve_root is unreachable: {resolve_root}. "
+                "Point resolve_root at an existing directory or drop it."
+            )
+        local_from_python["resolve_root"] = _relpath_posix(resolve_root, components_yaml_dir)
+    if ref._task_dependencies_from is not None:
+        deps = ref._task_dependencies_from
+        if not deps.exists():
+            raise CompileError(
+                f"@task dependencies_from file is unreachable: {deps}. "
+                "Point dependencies_from at an existing file or drop it."
+            )
+        local_from_python["dependencies_from"] = _relpath_posix(deps, components_yaml_dir)
+    if unwrapped_schema:
+        local_from_python["unwrapped_inputs"] = dict(unwrapped_schema)
+    local_from_python["file"] = _relpath_posix(source, components_yaml_dir)
+    return local_from_python
+
+
+def _logical_module_id(source: Path, *, identity_root: Path) -> str:
+    """Derive a STABLE logical module namespace for a ``@task`` source file.
+
+    Runtime ``__module__`` is unusable as an identity: the compile driver
+    imports the pipeline script under a throwaway
+    ``_tangle_user_pipeline_<uuid>`` module name, so a ``@task`` defined in the
+    script would get a different "module" on every compile while a ``@task``
+    imported from a sibling helper would get a real dotted name. The namespace
+    is therefore derived from the source LAYOUT instead, which is what an
+    import would have produced anyway:
+
+    * Walk up while the directory is a package (``__init__.py`` present) to
+      build the dotted package chain — ``pkg_a/tasks.py`` -> ``pkg_a.tasks``,
+      and ``pkg_a/__init__.py`` -> ``pkg_a`` (the ``__init__`` segment is the
+      package itself, never a child module).
+    * The first NON-package ancestor is the import root. Two identically named
+      modules under different import roots are genuinely different modules, so
+      that root is recorded as a ``<root>:`` prefix, expressed RELATIVE to
+      ``identity_root`` (never an absolute machine path).
+
+    Args:
+        source: Absolute path of the ``@task`` source file.
+        identity_root: Stable project anchor (the pipeline's own source
+            directory) that the import root is expressed relative to.
+
+    Returns:
+        ``"<import-root-rel>:<dotted.module>"``, e.g. ``".:pkg_a.tasks"`` or
+        ``"./src:pipeline"``. Stable when the project is relocated or compiled
+        into a different output directory.
+
+    Raises:
+        CompileError: when no relative path to ``identity_root`` can be formed
+            (see :func:`_relpath_posix`).
+    """
+    parts: list[str] = []
+    if source.stem != "__init__":
+        parts.append(source.stem)
+    directory = source.parent
+    while (directory / "__init__.py").exists():
+        parts.append(directory.name)
+        parent = directory.parent
+        if parent == directory:  # filesystem root — stop rather than loop
+            break
+        directory = parent
+    dotted = ".".join(reversed(parts))
+    return f"{_relpath_posix(directory, identity_root)}:{dotted}"
+
+
+def _emitted_form_rank(payload: Mapping[str, Any]) -> tuple[int, str]:
+    """Sort key selecting the canonical spelling of one generated component.
+
+    Several call sites can describe the SAME component with different emitted
+    text — writing ``mode="inline"`` explicitly versus leaving the implicit
+    default out. Ranking by key count first prefers the leanest spelling, so a
+    pipeline that already omits a redundant default keeps its existing sidecar
+    bytes when a sibling call site spells that default out.
+
+    Args:
+        payload: An emitted ``local_from_python`` block.
+
+    Returns:
+        ``(key count, canonical JSON)`` — total and independent of call order.
+    """
+    return (len(payload), _canonical_json(payload))
+
+
+def _task_component_identity(
+    ref: CallableRef,
+    *,
+    source: Path,
+    identity_root: Path,
+    image_overrides: Mapping[str, str] | None,
+    unwrapped_schema: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the canonical dedup identity for one traced ``@task`` call.
+
+    The identity is the MODULE-QUALIFIED FUNCTION IDENTITY plus every
+    generation-affecting option. Two call sites produce the same component —
+    and therefore share one sidecar entry — exactly when this payload matches.
+
+    Paths inside the identity are anchored at ``identity_root`` (the pipeline's
+    own source directory) rather than at the sidecar directory, so the identity
+    is invariant under relocating the project or compiling into a different
+    output directory, and never embeds an absolute machine path.
+
+    Args:
+        ref: The ``@task`` callable reference for this call site.
+        source: The ``@task`` source file.
+        identity_root: Stable project anchor for path-derived identity parts.
+        image_overrides: Optional compile-time ``--image ID=REF`` overrides.
+        unwrapped_schema: Persisted unwrap schema, or an empty mapping.
+
+    Returns:
+        A JSON-serialisable identity payload. Hash it with
+        :func:`_stable_payload_hash`; render it with
+        :func:`_task_identity_label` for diagnostics.
+
+    Raises:
+        CompileError: see :func:`_local_from_python_payload` and
+            :func:`_logical_module_id`.
+    """
+    # ``__qualname__`` is forwarded onto the ref by @task. It distinguishes
+    # same-named functions nested in different scopes within ONE module;
+    # it equals the function name for the module-level authoring surface.
+    qualname = getattr(ref, "__qualname__", None) or ref._task_function_name
+    generation = _local_from_python_payload(
+        ref,
+        source=source,
+        components_yaml_dir=identity_root,
+        image_overrides=image_overrides,
+        unwrapped_schema=unwrapped_schema,
+    )
+    # Normalise fields whose OMISSION is defined to mean a specific value, so
+    # two spellings of one component do not hash apart. Only ``mode`` has such
+    # an implicit default in the emitted contract: the hydrator reads
+    # ``gen_config.get("mode", "inline")`` and ``CallableRef`` generates with
+    # ``self._task_mode or "inline"``, so ``@task()`` and ``@task(mode="inline")``
+    # regenerate byte-identical components.
+    #
+    # Audited and deliberately NOT normalised:
+    # * ``dependencies_from`` — omission means "auto-discover next to the
+    #   source AT HYDRATE TIME". Compile-time discovery could disagree with the
+    #   hydrate-time layout, so an explicit path is not provably the same
+    #   component as an omission.
+    # * ``resolve_root`` — not inert in inline mode: ``component_from_func``
+    #   emits a ``tangle_cli_generation_resolve_root`` annotation whenever it is
+    #   set, so it changes the generated component regardless of mode.
+    # * ``image`` — omission means "whatever the generator defaults to", which
+    #   is not a value this layer can canonicalise.
+    generation["mode"] = generation.get("mode") or "inline"
+    return {
+        "module": _logical_module_id(source, identity_root=identity_root),
+        "qualname": qualname,
+        "function": ref._task_function_name,
+        # Generation config, anchored at the stable project root. This mirrors
+        # the emitted block field-for-field so a new generation-affecting
+        # option cannot be added to the sidecar without also splitting dedup.
+        "generation": generation,
+    }
+
+
+def _task_identity_label(identity_payload: Mapping[str, Any]) -> str:
+    """Human-readable ``<module>::<qualname>`` label for an identity payload.
+
+    Args:
+        identity_payload: A :func:`_task_component_identity` payload.
+
+    Returns:
+        A diagnostic label. Only the logical module/function identity is
+        rendered — never image, path, or credential-bearing generation values.
+    """
+    module = str(identity_payload.get("module", ""))
+    _root, _sep, dotted = module.partition(":")
+    qualname = identity_payload.get("qualname") or identity_payload.get("function")
+    return f"{dotted or module}::{qualname}"
+
+
+def _plan_task_sidecar(
     task_refs: list[tuple[str, CallableRef]],
     *,
     components_yaml_dir: Path,
+    identity_root: Path,
     image_overrides: Mapping[str, str] | None = None,
     unwrapped_input_keys: Mapping[str, dict[str, list[str]]] | None = None,
-) -> dict[str, Any]:
-    """Build the ``<stem>.components.yaml`` content for @task refs.
+) -> TaskSidecarPlan:
+    """Plan the ``<stem>.components.yaml`` entries and per-task fragments.
+
+    Dedup is by GENERATED COMPONENT IDENTITY — module-qualified function
+    identity plus every generation-affecting option, with implicit defaults
+    canonicalised (``@task()`` and ``@task(mode="inline")`` are ONE component)
+    — never by bare function name. Two call sites collapse into one entry only when the whole
+    :func:`_task_component_identity` payload matches: logical module namespace,
+    ``__qualname__``, function name, image (explicit or resolved ``image_id``),
+    mode, resolve_root, dependencies_from, the persisted unwrap schema, and the
+    source file. Consequently:
+
+    * A shared helper such as ``run_dbt`` invoked with different task-level
+      images or dependency files emits one entry PER distinct configuration,
+      and each graph task is rewritten to its OWN fragment instead of silently
+      inheriting the first call site's component.
+    * ``pkg_a/tasks.py::run`` and ``pkg_b/tasks.py::run`` are different
+      components and both get emitted. This is NOT an error: the bare function
+      name is not an identity, so two packages may each define ``run``.
+    * Repeated identical calls still dedup to exactly one entry.
+
+    Fragment naming:
+
+    * Exactly ONE identity for a function's readable base -> the legacy
+      fragment (``run_dbt`` -> ``run-dbt``, or ``combine--<schema-hash>`` for
+      an unwrapped task). Existing single-component pipelines keep
+      byte-identical sidecars.
+    * SEVERAL identities sharing one base -> ``<base>--<identity>`` for EVERY
+      colliding variant; no arbitrary "first" variant keeps the unsuffixed
+      name. ``identity`` is a SHA-256 prefix over the canonical JSON identity
+      payload, so it is content-addressed (never :func:`hash`, never
+      dict/API/trace ordering), stable across processes, invariant under
+      project relocation and output-directory changes, and it never leaks
+      image, path, or credential-bearing values into the fragment name.
+      Colliding variants are also EMITTED in sorted fragment order so the
+      sidecar text does not depend on which variant was traced first.
 
     Args:
         task_refs: Traced ``(task_id, CallableRef)`` records for ``@task``
             calls in the pipeline graph.
         components_yaml_dir: Directory where the generated sidecar will live;
-            local paths are written relative to this directory.
+            emitted local paths are written relative to this directory.
+        identity_root: Stable project anchor for path-derived IDENTITY parts —
+            the pipeline's OWN source directory. Required (not defaulted to
+            ``components_yaml_dir``) because anchoring identity at the output
+            directory would make fragment names change when the same pipeline
+            is compiled elsewhere, e.g. into the hidden submit bundle.
         image_overrides: Optional compile-time ``--image ID=REF`` overrides.
         unwrapped_input_keys: Optional trace metadata for ``@task(unwrap=...)``
-            calls. When present, this function writes
-            ``local_from_python.unwrapped_inputs`` so hydrate can regenerate the
-            exact same flattened input schema without call-site context.
+            calls. When present, ``local_from_python.unwrapped_inputs`` is
+            written so hydrate regenerates the same flattened input schema
+            without call-site context.
 
     Returns:
-        An ordered map ``{fragment: {name?, local_from_python:
-        {image?, function, mode?, resolve_root?, dependencies_from?, file}}}``, DEDUPED by FUNCTION
-    (the fragment = hyphenated function name). The SAME @task function
-    called from multiple task sites collapses to one entry; TWO DISTINCT
-    @task functions defined in ONE file each get their own entry (they
-    share the same ``file:`` but carry different ``function:`` keys and
-    distinct fragments). This matches how ``_rewrite_task_componentref_urls``
-    points each task at its OWN function fragment — deduping by source path
-    instead would drop every function but the first and leave the others'
-    ``resolve://...#<fragment>`` refs dangling.
+        A :class:`TaskSidecarPlan`. Paths in
+        ``local_from_python.{file,dependencies_from,resolve_root}`` are POSIX
+        and relative to ``components_yaml_dir`` so the bundle stays portable.
 
-    The ``function`` field is always emitted so hydrate's
-    ``regenerate_yaml`` extracts the right function: it otherwise defaults
-    to the file STEM, which is wrong whenever the @task function name
-    differs from the source filename (the common case).
-
-    Paths in ``local_from_python.{file,dependencies_from}`` are POSIX and
-    relative to ``components_yaml_dir`` so the sidecar is portable: as
-    long as the layout under that directory matches at compile- and
-    hydrate-time, the paths resolve correctly.
+        The component ``name`` is NOT emitted. A top-level ``name`` on a
+        resolve entry means "resolve a published component by this name" to the
+        hydrator (``PipelineHydrator._resolve_primary``), which would let a
+        same-named library component silently win over this local ``@task``.
+        The component's name comes from its source docstring
+        (``Metadata: Name:``) at hydrate time, read by ``regenerate_yaml``.
 
     Raises:
-        CompileError: when two distinct source files map to the same
-            fragment (function-name collision), when a referenced local
-            file (the @task source or its ``dependencies_from``) is
-            unreachable, or when a relative path cannot be formed (see
-            :func:`_relpath_posix`).
+        CompileError: when a referenced local file (the ``@task`` source or its
+            ``dependencies_from`` / ``resolve_root``) is unreachable, or when a
+            relative path cannot be formed (see :func:`_relpath_posix`).
     """
-    seen_fragments: dict[str, Path] = {}
-    entries: dict[str, Any] = {}
+    checked_sources: set[Path] = set()
+    # base fragment -> identity digest -> (emitted payload, identity payload).
+    variants: dict[str, dict[str, tuple[dict[str, Any], dict[str, Any]]]] = {}
+    # (base, identity digest) -> the legacy single-variant fragment.
+    legacy_fragments: dict[tuple[str, str], str] = {}
+    task_identities: list[tuple[str, str, str]] = []
+
     for task_id, ref in task_refs:
         source = ref._task_source_path
         if source is None:  # defensive — only @task refs are recorded here
             continue
+        if source not in checked_sources:
+            if not source.exists():
+                raise CompileError(
+                    f"@task source file is unreachable: {source}. Compile into "
+                    "the pipeline source directory, or reference the component "
+                    "with an absolute file://, gs://, or resolve:// URL."
+                )
+            checked_sources.add(source)
+
         unwrapped_schema = _unwrapped_schema_for_task(ref, task_id, unwrapped_input_keys)
-        fragment = _fragment_for_task(ref, unwrapped_schema)
+        base = _task_fragment_base(ref)
+        emitted = _local_from_python_payload(
+            ref,
+            source=source,
+            components_yaml_dir=components_yaml_dir,
+            image_overrides=image_overrides,
+            unwrapped_schema=unwrapped_schema,
+        )
+        identity_payload = _task_component_identity(
+            ref,
+            source=source,
+            identity_root=identity_root,
+            image_overrides=image_overrides,
+            unwrapped_schema=unwrapped_schema,
+        )
+        identity = _stable_payload_hash(identity_payload)
+        by_identity = variants.setdefault(base, {})
+        previous = by_identity.get(identity)
+        if previous is None:
+            by_identity[identity] = (emitted, identity_payload)
+        elif _emitted_form_rank(emitted) < _emitted_form_rank(previous[0]):
+            # Same component, different SPELLING (e.g. one call site omits
+            # ``mode`` while another writes ``mode="inline"``). Pick the
+            # canonical representative rather than whichever was traced first,
+            # so the sidecar text does not depend on call order.
+            by_identity[identity] = (emitted, previous[1])
+        legacy_fragments.setdefault((base, identity), _fragment_for_task(ref, unwrapped_schema))
+        task_identities.append((task_id, base, identity))
 
-        prior_source = seen_fragments.get(fragment)
-        if prior_source is not None:
-            # Already emitted this fragment. Fine when it is the SAME source
-            # (the same @task called from multiple sites). A DIFFERENT
-            # source sharing the function name would silently collide on the
-            # resolve:// fragment, so reject it loudly.
-            if prior_source != source:
-                raise CompileError(
-                    "two distinct @task source files map to the same sidecar "
-                    f"fragment {fragment!r}: {prior_source} and {source}. "
-                    "Rename one of the @task functions so each has a unique "
-                    "name (the function name becomes the resolve:// fragment)."
-                )
-            continue
-
-        if not source.exists():
-            raise CompileError(
-                f"@task source file is unreachable: {source}. Compile into "
-                "the pipeline source directory, or reference the component "
-                "with an absolute file://, gs://, or resolve:// URL."
+    entries: dict[str, Any] = {}
+    fragment_by_identity: dict[tuple[str, str], str] = {}
+    identity_labels: dict[str, str] = {}
+    for base, by_identity in variants.items():
+        if len(by_identity) == 1:
+            identity, (emitted, _identity_payload) = next(iter(by_identity.items()))
+            named = [(legacy_fragments[(base, identity)], identity, emitted)]
+        else:
+            # EVERY colliding variant is suffixed — the trace-order "first" one
+            # does not get to keep the bare name — and they are emitted in
+            # sorted order so the sidecar text is call-order independent.
+            named = sorted(
+                (f"{base}--{identity}", identity, emitted)
+                for identity, (emitted, _identity_payload) in by_identity.items()
             )
+        for fragment, identity, emitted in named:
+            if fragment in entries:  # defensive — digests are content-addressed
+                raise CompileError(
+                    f"internal error: sidecar fragment {fragment!r} was generated twice; "
+                    f"colliding @task identities: {identity_labels[fragment]!r} and "
+                    f"{_task_identity_label(by_identity[identity][1])!r}."
+                )
+            fragment_by_identity[(base, identity)] = fragment
+            identity_labels[fragment] = _task_identity_label(by_identity[identity][1])
+            entries[fragment] = {"local_from_python": emitted}
 
-        local_from_python: dict[str, Any] = {}
-        if ref._task_image is not None:
-            local_from_python["image"] = ref._task_image
-        elif ref._task_image_id is not None:
-            resolved_image = resolve_image_id(ref._task_image_id, image_overrides)
-            if resolved_image is None:
-                raise CompileError(
-                    f"@task image_id={ref._task_image_id!r} on function "
-                    f"{ref._task_function_name!r} did not resolve to an image. "
-                    f"Pass --image {ref._task_image_id}=IMAGE to `tangle sdk pipelines compile`, "
-                    f"or register a default with register_image_id({ref._task_image_id!r}, IMAGE)."
-                )
-            local_from_python["image"] = resolved_image
-        # Always pin the function name. Without it the hydrator defaults
-        # to the file stem and extracts the wrong symbol.
-        assert ref._task_function_name is not None
-        local_from_python["function"] = ref._task_function_name
-        if ref._task_mode is not None:
-            local_from_python["mode"] = ref._task_mode
-        if ref._task_resolve_root is not None:
-            resolve_root = ref._task_resolve_root
-            if not resolve_root.exists():
-                raise CompileError(
-                    f"@task resolve_root is unreachable: {resolve_root}. "
-                    "Point resolve_root at an existing directory or drop it."
-                )
-            local_from_python["resolve_root"] = _relpath_posix(resolve_root, components_yaml_dir)
-        if ref._task_dependencies_from is not None:
-            deps = ref._task_dependencies_from
-            if not deps.exists():
-                raise CompileError(
-                    f"@task dependencies_from file is unreachable: {deps}. "
-                    "Point dependencies_from at an existing file or drop it."
-                )
-            local_from_python["dependencies_from"] = _relpath_posix(deps, components_yaml_dir)
-        if unwrapped_schema:
-            local_from_python["unwrapped_inputs"] = unwrapped_schema
-        local_from_python["file"] = _relpath_posix(source, components_yaml_dir)
-
-        seen_fragments[fragment] = source
-        # The component name is NOT emitted here. A top-level ``name`` on a
-        # resolve entry means "resolve a published component by this name" to
-        # the hydrator (PipelineHydrator._resolve_primary), which would let a
-        # same-named library component silently win over this local @task. The
-        # component's name comes from its source docstring (``Metadata: Name:``)
-        # at hydrate time, read by regenerate_yaml.
-        entry: dict[str, Any] = {"local_from_python": local_from_python}
-        entries[fragment] = entry
-    return entries
+    fragment_by_task = {
+        task_id: fragment_by_identity[(base, identity)] for task_id, base, identity in task_identities
+    }
+    return TaskSidecarPlan(entries=entries, fragment_by_task=fragment_by_task)
 
 
 def _rewrite_task_componentref_urls(
     *,
     body_dict: dict[str, Any],
-    task_refs: list[tuple[str, CallableRef]],
+    fragment_by_task: Mapping[str, str],
     components_yaml_name: str,
-    unwrapped_input_keys: Mapping[str, dict[str, list[str]]] | None = None,
 ) -> None:
     """Rewrite each @task task's ``componentRef`` to a pure resolve URL.
 
     Args:
         body_dict: Emitted dehydrated pipeline body to mutate in place.
-        task_refs: Traced ``(task_id, CallableRef)`` records for ``@task``
-            calls in the pipeline graph.
+        fragment_by_task: ``TaskSidecarPlan.fragment_by_task`` — the SAME map
+            used to emit the sidecar, so a task whose component differs from a
+            same-function sibling points at its own fragment.
         components_yaml_name: Filename of the generated components sidecar.
-        unwrapped_input_keys: Optional trace metadata for ``@task(unwrap=...)``
-            calls. The same persisted schema used for sidecar emission is used
-            here to compute schema-hashed fragments consistently.
 
     Returns:
         None. ``body_dict`` is mutated so each task's componentRef becomes
         ``{"url": "resolve://./<components_yaml_name>#<fragment>"}``.
+
+    Raises:
+        CompileError: when a traced ``@task`` has no matching graph task.
     """
     tasks = body_dict.get("implementation", {}).get("graph", {}).get("tasks", {})
-    for task_id, ref in task_refs:
-        unwrapped_schema = _unwrapped_schema_for_task(ref, task_id, unwrapped_input_keys)
-        fragment = _fragment_for_task(ref, unwrapped_schema)
+    for task_id, fragment in fragment_by_task.items():
         url = f"resolve://./{components_yaml_name}#{fragment}"
         if task_id not in tasks:
             raise CompileError(

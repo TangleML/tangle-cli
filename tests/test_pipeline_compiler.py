@@ -652,6 +652,545 @@ def test_compile_task_image_id_without_default_or_override_fails(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# @task sidecar dedup by generated-component identity.
+#
+# A shared helper (e.g. ``run_dbt``) re-decorated with different task-level
+# options must NOT collapse into the first call site's component: dedup is by
+# the generated ``local_from_python`` payload, not by function name.
+
+
+def _write_shared_task_pipeline(project: Path, body: str, *, extra_files: dict[str, str] | None = None) -> Path:
+    """Write a pipeline that re-decorates one shared helper function.
+
+    Args:
+        project: Project root; ``src/`` holds ``shared.py`` and ``pipeline.py``.
+        body: The pipeline module text after the shared-helper import.
+        extra_files: Optional ``{relative path: contents}`` written under
+            ``src/`` (e.g. per-variant dependency files).
+
+    Returns:
+        The written ``pipeline.py`` path.
+    """
+    src = project / "src"
+    src.mkdir(parents=True)
+    (src / "shared.py").write_text(
+        "def run_dbt(model: str) -> str:\n"
+        '    """Run a dbt model.\n\n'
+        "    Metadata:\n"
+        "        Name: Run Dbt\n"
+        '    """\n'
+        "    return model\n",
+        encoding="utf-8",
+    )
+    for rel, contents in (extra_files or {}).items():
+        target = src / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents, encoding="utf-8")
+    pipeline_path = src / "pipeline.py"
+    pipeline_path.write_text(body, encoding="utf-8")
+    return pipeline_path
+
+
+def _sidecar_and_tasks(pipeline_path: Path, out: Path, **kwargs):
+    result = compile_pipeline(pipeline_path, out, **kwargs)
+    sidecar = yaml.safe_load(result.components_path.read_text())
+    tasks = yaml.safe_load(out.read_text())["implementation"]["graph"]["tasks"]
+    fragments = {
+        task_id: task["componentRef"]["url"].split("#", 1)[1] for task_id, task in tasks.items()
+    }
+    return sidecar, fragments
+
+
+def test_compile_task_same_function_same_image_dedupes_to_one_entry(tmp_path):
+    """Repeated identical calls to one @task still collapse to ONE entry
+    under the legacy readable fragment, and both tasks share its ref."""
+    project = tmp_path / "project"
+    pipeline_path = _write_shared_task_pipeline(
+        project,
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from shared import run_dbt\n\n"
+        "dbt = task(image='registry.example/dbt:1')(run_dbt)\n\n"
+        "@pipeline('Same Image Pipeline')\n"
+        "def same_image_pipeline() -> Out[str]:\n"
+        "    first = dbt.named('first')(model='a')\n"
+        "    second = dbt.named('second')(model='b')\n"
+        "    return second\n",
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, project / "compiled.yaml")
+
+    assert list(sidecar) == ["run-dbt"]
+    assert fragments == {"first": "run-dbt", "second": "run-dbt"}
+    assert sidecar["run-dbt"]["local_from_python"]["image"] == "registry.example/dbt:1"
+
+
+def test_compile_task_same_function_different_images_emit_distinct_fragments(tmp_path):
+    """The bug from the shared-``run_dbt`` report: two task-level images for
+    one function must emit TWO sidecar entries, each task pointing at its own."""
+    project = tmp_path / "project"
+    pipeline_path = _write_shared_task_pipeline(
+        project,
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from shared import run_dbt\n\n"
+        "dbt_slim = task(image='registry.example/dbt-slim:1')(run_dbt)\n"
+        "dbt_fat = task(image='registry.example/dbt-fat:2')(run_dbt)\n\n"
+        "@pipeline('Two Image Pipeline')\n"
+        "def two_image_pipeline() -> Out[str]:\n"
+        "    slim = dbt_slim.named('slim')(model='a')\n"
+        "    fat = dbt_fat.named('fat')(model='b')\n"
+        "    return fat\n",
+    )
+
+    out = project / "compiled.yaml"
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, out)
+
+    assert len(sidecar) == 2
+    assert set(sidecar) == set(fragments.values())
+    assert fragments["slim"] != fragments["fat"]
+    assert all(name.startswith("run-dbt--") for name in sidecar)
+    assert sidecar[fragments["slim"]]["local_from_python"]["image"] == "registry.example/dbt-slim:1"
+    assert sidecar[fragments["fat"]]["local_from_python"]["image"] == "registry.example/dbt-fat:2"
+    # Both variants still describe the SAME function in the SAME file.
+    for entry in sidecar.values():
+        assert entry["local_from_python"]["function"] == "run_dbt"
+        assert entry["local_from_python"]["file"] == "./src/shared.py"
+    # Fragment names must not leak image / registry / credential-bearing text.
+    for name in sidecar:
+        assert "dbt-slim" not in name and "dbt-fat" not in name
+        assert "registry.example" not in name
+    validate_dehydrated_data(yaml.safe_load(out.read_text()))
+
+
+def test_compile_task_image_id_variants_resolving_to_same_image_dedupe(tmp_path):
+    """Identity is the RESOLVED component payload: an explicit image and an
+    ``image_id`` that resolves to the same ref generate one component."""
+    project = tmp_path / "project"
+    pipeline_path = _write_shared_task_pipeline(
+        project,
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from shared import run_dbt\n\n"
+        "dbt_literal = task(image='registry.example/dbt@sha256:abc')(run_dbt)\n"
+        "dbt_by_id = task(image_id='dbt')(run_dbt)\n\n"
+        "@pipeline('Image Id Dedup Pipeline')\n"
+        "def image_id_dedup_pipeline() -> Out[str]:\n"
+        "    literal = dbt_literal.named('literal')(model='a')\n"
+        "    by_id = dbt_by_id.named('by_id')(model='b')\n"
+        "    return by_id\n",
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(
+        pipeline_path,
+        project / "compiled.yaml",
+        image_overrides={"dbt": "registry.example/dbt@sha256:abc"},
+    )
+
+    assert list(sidecar) == ["run-dbt"]
+    assert fragments == {"literal": "run-dbt", "by_id": "run-dbt"}
+
+
+def test_compile_task_same_function_different_dependencies_emit_distinct_fragments(tmp_path):
+    """``dependencies_from`` also changes the generated component, so it
+    must split the sidecar entry too."""
+    project = tmp_path / "project"
+    pipeline_path = _write_shared_task_pipeline(
+        project,
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from shared import run_dbt\n\n"
+        "dbt_a = task(image='registry.example/dbt:1', dependencies_from='reqs-a.txt')(run_dbt)\n"
+        "dbt_b = task(image='registry.example/dbt:1', dependencies_from='reqs-b.txt')(run_dbt)\n\n"
+        "@pipeline('Two Deps Pipeline')\n"
+        "def two_deps_pipeline() -> Out[str]:\n"
+        "    a = dbt_a.named('a')(model='a')\n"
+        "    b = dbt_b.named('b')(model='b')\n"
+        "    return b\n",
+        extra_files={"reqs-a.txt": "dbt-core==1.7.0\n", "reqs-b.txt": "dbt-core==1.8.0\n"},
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, project / "compiled.yaml")
+
+    assert len(sidecar) == 2
+    assert fragments["a"] != fragments["b"]
+    assert sidecar[fragments["a"]]["local_from_python"]["dependencies_from"] == "./src/reqs-a.txt"
+    assert sidecar[fragments["b"]]["local_from_python"]["dependencies_from"] == "./src/reqs-b.txt"
+
+
+def test_compile_task_same_function_different_mode_emits_distinct_fragments(tmp_path):
+    """``mode``/``resolve_root`` are generation-affecting too."""
+    project = tmp_path / "project"
+    pipeline_path = _write_shared_task_pipeline(
+        project,
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from shared import run_dbt\n\n"
+        "dbt_inline = task(image='registry.example/dbt:1')(run_dbt)\n"
+        "dbt_bundle = task(image='registry.example/dbt:1', mode='bundle', resolve_root='.')(run_dbt)\n\n"
+        "@pipeline('Mode Pipeline')\n"
+        "def mode_pipeline() -> Out[str]:\n"
+        "    inline = dbt_inline.named('inline')(model='a')\n"
+        "    bundled = dbt_bundle.named('bundled')(model='b')\n"
+        "    return bundled\n",
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, project / "compiled.yaml")
+
+    assert len(sidecar) == 2
+    assert fragments["inline"] != fragments["bundled"]
+    assert "mode" not in sidecar[fragments["inline"]]["local_from_python"]
+    assert sidecar[fragments["bundled"]]["local_from_python"]["mode"] == "bundle"
+    assert sidecar[fragments["bundled"]]["local_from_python"]["resolve_root"] == "./src"
+
+
+def _two_image_variant_source(first: str, second: str) -> str:
+    return (
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from shared import run_dbt\n\n"
+        "dbt_slim = task(image='registry.example/dbt-slim:1')(run_dbt)\n"
+        "dbt_fat = task(image='registry.example/dbt-fat:2')(run_dbt)\n\n"
+        "@pipeline('Order Pipeline')\n"
+        "def order_pipeline() -> Out[str]:\n"
+        f"    {first}\n"
+        f"    {second}\n"
+        "    return fat\n"
+    )
+
+
+def test_compile_task_variant_fragments_are_call_order_independent(tmp_path):
+    """Fragment names are content-addressed: swapping the call order keeps
+    each task pointing at the SAME fragment name (no positional suffixes, no
+    Python-``hash``/dict-order dependence)."""
+    slim_call = "slim = dbt_slim.named('slim')(model='a')"
+    fat_call = "fat = dbt_fat.named('fat')(model='b')"
+
+    forward = _write_shared_task_pipeline(
+        tmp_path / "forward", _two_image_variant_source(slim_call, fat_call)
+    )
+    reverse = _write_shared_task_pipeline(
+        tmp_path / "reverse", _two_image_variant_source(fat_call, slim_call)
+    )
+
+    forward_sidecar, forward_fragments = _sidecar_and_tasks(
+        forward, tmp_path / "forward" / "compiled.yaml"
+    )
+    reverse_sidecar, reverse_fragments = _sidecar_and_tasks(
+        reverse, tmp_path / "reverse" / "compiled.yaml"
+    )
+
+    assert forward_fragments == reverse_fragments
+    assert set(forward_sidecar) == set(reverse_sidecar)
+
+
+def test_compile_task_single_variant_keeps_legacy_fragment_name(tmp_path):
+    """Fragment stability: a single-configuration @task keeps the readable
+    hyphenated function name, unchanged by this dedup work."""
+    project = tmp_path / "project"
+    pipeline_path = _write_shared_task_pipeline(
+        project,
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from shared import run_dbt\n\n"
+        "dbt = task(image='registry.example/dbt:1')(run_dbt)\n\n"
+        "@pipeline('Single Variant Pipeline')\n"
+        "def single_variant_pipeline() -> Out[str]:\n"
+        "    return dbt.named('only')(model='a')\n",
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, project / "compiled.yaml")
+
+    assert list(sidecar) == ["run-dbt"]
+    assert fragments == {"only": "run-dbt"}
+
+
+def test_compile_task_unwrapped_variants_split_by_image_too(tmp_path):
+    """Unwrap schema hashing and image variance compose: same function, same
+    key set, two images -> two fragments with the same unwrapped schema."""
+    project = tmp_path / "project"
+    src = project / "src"
+    src.mkdir(parents=True)
+    pipeline_path = src / "pipeline.py"
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        "@task(image='python:3.12')\n"
+        "def produce() -> str:\n"
+        "    return 'ok'\n\n"
+        "def combine(run_data: dict[str, str]) -> str:\n"
+        "    return ','.join(sorted(run_data))\n\n"
+        "combine_slim = task(image='python:3.12', unwrap='run_data')(combine)\n"
+        "combine_fat = task(image='python:3.13', unwrap='run_data')(combine)\n\n"
+        "@pipeline('Unwrap Image Pipeline')\n"
+        "def unwrap_image_pipeline() -> Out[str]:\n"
+        "    value = produce.named('value')()\n"
+        "    slim = combine_slim.named('slim')(run_data={'value': value})\n"
+        "    fat = combine_fat.named('fat')(run_data={'value': value})\n"
+        "    return fat\n",
+        encoding="utf-8",
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, project / "compiled.yaml")
+
+    assert fragments["slim"] != fragments["fat"]
+    slim = sidecar[fragments["slim"]]["local_from_python"]
+    fat = sidecar[fragments["fat"]]["local_from_python"]
+    assert slim["image"] == "python:3.12"
+    assert fat["image"] == "python:3.13"
+    assert slim["unwrapped_inputs"] == fat["unwrapped_inputs"]
+
+
+def test_compile_task_same_function_name_in_two_packages_emits_both(tmp_path):
+    """Bare function names are NOT identities: ``pkg_a.tasks.run`` and
+    ``pkg_b.tasks.run`` are different components, so both are emitted and each
+    task points at its own — this is no longer a compile error."""
+    project = tmp_path / "project"
+    src = project / "src"
+    for package in ("package_a", "package_b"):
+        pkg = src / package
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "tasks.py").write_text(
+            "def run(model: str) -> str:\n"
+            '    """Run a model.\n\n'
+            "    Metadata:\n"
+            f"        Name: Run {package}\n"
+            '    """\n'
+            f"    return model + '{package}'\n",
+            encoding="utf-8",
+        )
+    pipeline_path = src / "pipeline.py"
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from package_a import tasks as tasks_a\n"
+        "from package_b import tasks as tasks_b\n\n"
+        "run_a = task(image='registry.example/dbt:1')(tasks_a.run)\n"
+        "run_b = task(image='registry.example/dbt:1')(tasks_b.run)\n\n"
+        "@pipeline('Two Package Pipeline')\n"
+        "def two_package_pipeline() -> Out[str]:\n"
+        "    a = run_a.named('a')(model='a')\n"
+        "    b = run_b.named('b')(model='b')\n"
+        "    return b\n",
+        encoding="utf-8",
+    )
+
+    out = project / "compiled.yaml"
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, out)
+
+    assert len(sidecar) == 2
+    assert set(sidecar) == set(fragments.values())
+    assert fragments["a"] != fragments["b"]
+    # No arbitrary "first" variant keeps the unsuffixed readable name.
+    assert all(name.startswith("run--") for name in sidecar)
+    assert sidecar[fragments["a"]]["local_from_python"]["file"] == "./src/package_a/tasks.py"
+    assert sidecar[fragments["b"]]["local_from_python"]["file"] == "./src/package_b/tasks.py"
+    # Fragment names must not leak the source path / package / file names.
+    for name in sidecar:
+        assert "package_a" not in name and "package_b" not in name
+        assert "tasks" not in name and ".py" not in name and "/" not in name
+    validate_dehydrated_data(yaml.safe_load(out.read_text()))
+
+
+def _write_two_package_project(root: Path, *, images: tuple[str, str]) -> Path:
+    """Write the ``package_a.tasks.run`` / ``package_b.tasks.run`` project."""
+    src = root / "src"
+    for package in ("package_a", "package_b"):
+        pkg = src / package
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "tasks.py").write_text(
+            "def run(model: str) -> str:\n"
+            '    """Run a model.\n\n'
+            "    Metadata:\n"
+            f"        Name: Run {package}\n"
+            '    """\n'
+            "    return model\n",
+            encoding="utf-8",
+        )
+    pipeline_path = src / "pipeline.py"
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from package_a import tasks as tasks_a\n"
+        "from package_b import tasks as tasks_b\n\n"
+        f"run_a = task(image={images[0]!r})(tasks_a.run)\n"
+        f"run_b = task(image={images[1]!r})(tasks_b.run)\n\n"
+        "@pipeline('Relocatable Pipeline')\n"
+        "def relocatable_pipeline() -> Out[str]:\n"
+        "    a = run_a.named('a')(model='a')\n"
+        "    b = run_b.named('b')(model='b')\n"
+        "    return b\n",
+        encoding="utf-8",
+    )
+    return pipeline_path
+
+
+def test_compile_task_variant_fragments_survive_relocation_and_output_dir(tmp_path):
+    """Identity is anchored at the PROJECT, not the machine or the output
+    directory: the same project compiled from another absolute location, and
+    into a nested output directory, yields identical fragment names."""
+    images = ("registry.example/dbt-slim:1", "registry.example/dbt-fat:2")
+    here = _write_two_package_project(tmp_path / "here", images=images)
+    moved = _write_two_package_project(tmp_path / "somewhere" / "else" / "deeper", images=images)
+
+    _, here_fragments = _sidecar_and_tasks(here, tmp_path / "here" / "compiled.yaml")
+    _, moved_fragments = _sidecar_and_tasks(
+        moved, tmp_path / "somewhere" / "else" / "deeper" / "compiled.yaml"
+    )
+    # Same project, compiled into a DIFFERENT output directory.
+    nested_out = tmp_path / "here" / "build" / "nested" / "compiled.yaml"
+    nested_sidecar, nested_fragments = _sidecar_and_tasks(here, nested_out)
+
+    assert here_fragments == moved_fragments == nested_fragments
+    # The emitted paths still track the output dir even though names do not.
+    assert nested_sidecar[nested_fragments["a"]]["local_from_python"]["file"] == (
+        "../../src/package_a/tasks.py"
+    )
+
+
+def test_compile_task_same_module_function_and_config_still_dedupes(tmp_path):
+    """Same module-qualified function + same config across call sites still
+    collapses to ONE entry under the readable legacy fragment."""
+    project = tmp_path / "project"
+    src = project / "src"
+    pkg = src / "package_a"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "tasks.py").write_text(
+        "def run(model: str) -> str:\n"
+        '    """Run a model.\n\n'
+        "    Metadata:\n"
+        "        Name: Run A\n"
+        '    """\n'
+        "    return model\n",
+        encoding="utf-8",
+    )
+    pipeline_path = src / "pipeline.py"
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from package_a import tasks\n\n"
+        "run_once = task(image='registry.example/dbt:1')(tasks.run)\n"
+        "run_again = task(image='registry.example/dbt:1')(tasks.run)\n\n"
+        "@pipeline('Same Module Pipeline')\n"
+        "def same_module_pipeline() -> Out[str]:\n"
+        "    a = run_once.named('a')(model='a')\n"
+        "    b = run_again.named('b')(model='b')\n"
+        "    return b\n",
+        encoding="utf-8",
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, project / "compiled.yaml")
+
+    assert list(sidecar) == ["run"]
+    assert fragments == {"a": "run", "b": "run"}
+
+
+def test_compile_task_cross_file_variants_are_call_order_independent(tmp_path):
+    """Two same-named functions in different packages keep the same fragment
+    names (and the same sorted sidecar order) when the calls are swapped."""
+    images = ("registry.example/dbt:1", "registry.example/dbt:1")
+    forward = _write_two_package_project(tmp_path / "forward", images=images)
+    reverse_root = tmp_path / "reverse"
+    _write_two_package_project(reverse_root, images=images)
+    reverse = reverse_root / "src" / "pipeline.py"
+    reverse.write_text(
+        reverse.read_text(encoding="utf-8")
+        .replace("    a = run_a.named('a')(model='a')\n    b = run_b.named('b')(model='b')\n", "")
+        .replace(
+            "    return b\n",
+            "    b = run_b.named('b')(model='b')\n    a = run_a.named('a')(model='a')\n    return b\n",
+        ),
+        encoding="utf-8",
+    )
+
+    forward_sidecar, forward_fragments = _sidecar_and_tasks(
+        forward, tmp_path / "forward" / "compiled.yaml"
+    )
+    reverse_sidecar, reverse_fragments = _sidecar_and_tasks(
+        reverse, reverse_root / "compiled.yaml"
+    )
+
+    assert forward_fragments == reverse_fragments
+    assert list(forward_sidecar) == list(reverse_sidecar)
+
+
+def _write_mode_spelling_pipeline(project: Path, *, first: str, second: str) -> Path:
+    """One shared function decorated twice, differing only in how ``mode`` is
+    spelled (omitted vs explicit ``"inline"``)."""
+    src = project / "src"
+    pkg = src / "package_a"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "tasks.py").write_text(
+        "def run(model: str) -> str:\n"
+        '    """Run a model.\n\n'
+        "    Metadata:\n"
+        "        Name: Run A\n"
+        '    """\n'
+        "    return model\n",
+        encoding="utf-8",
+    )
+    pipeline_path = src / "pipeline.py"
+    pipeline_path.write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n"
+        "from package_a import tasks\n\n"
+        f"run_first = task(image='registry.example/dbt:1'{first})(tasks.run)\n"
+        f"run_second = task(image='registry.example/dbt:1'{second})(tasks.run)\n\n"
+        "@pipeline('Mode Spelling Pipeline')\n"
+        "def mode_spelling_pipeline() -> Out[str]:\n"
+        "    a = run_first.named('a')(model='a')\n"
+        "    b = run_second.named('b')(model='b')\n"
+        "    return b\n",
+        encoding="utf-8",
+    )
+    return pipeline_path
+
+
+def test_compile_task_omitted_mode_and_explicit_inline_are_one_component(tmp_path):
+    """``@task()`` and ``@task(mode="inline")`` generate the SAME component:
+    the hydrator reads ``gen_config.get("mode", "inline")``. They must dedup to
+    one entry keeping the readable legacy fragment, not split into two hashed
+    variants."""
+    project = tmp_path / "project"
+    pipeline_path = _write_mode_spelling_pipeline(
+        project, first="", second=", mode='inline'"
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, project / "compiled.yaml")
+
+    assert list(sidecar) == ["run"]
+    assert fragments == {"a": "run", "b": "run"}
+
+
+def test_compile_task_mode_spelling_representative_is_call_order_independent(tmp_path):
+    """When two spellings of one component meet, the EMITTED form is chosen
+    canonically, so swapping the call order yields byte-identical sidecars."""
+    forward = _write_mode_spelling_pipeline(
+        tmp_path / "forward", first="", second=", mode='inline'"
+    )
+    reverse = _write_mode_spelling_pipeline(
+        tmp_path / "reverse", first=", mode='inline'", second=""
+    )
+
+    forward_sidecar, forward_fragments = _sidecar_and_tasks(
+        forward, tmp_path / "forward" / "compiled.yaml"
+    )
+    reverse_sidecar, reverse_fragments = _sidecar_and_tasks(
+        reverse, tmp_path / "reverse" / "compiled.yaml"
+    )
+
+    assert forward_fragments == reverse_fragments == {"a": "run", "b": "run"}
+    assert forward_sidecar == reverse_sidecar
+    # The canonical representative omits the redundant implicit default.
+    assert "mode" not in forward_sidecar["run"]["local_from_python"]
+
+
+def test_compile_task_explicit_bundle_mode_still_splits_from_inline(tmp_path):
+    """Normalising the implicit default must not blur a REAL mode difference."""
+    project = tmp_path / "project"
+    pipeline_path = _write_mode_spelling_pipeline(
+        project, first="", second=", mode='bundle', resolve_root='.'"
+    )
+
+    sidecar, fragments = _sidecar_and_tasks(pipeline_path, project / "compiled.yaml")
+
+    assert len(sidecar) == 2
+    assert fragments["a"] != fragments["b"]
+
+
+# ---------------------------------------------------------------------------
 # Runnable argument-value emission (raw string constant / graphInput /
 # taskOutput). Dispatch is on the VALUE's type, never the argument KEY.
 

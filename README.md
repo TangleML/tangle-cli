@@ -457,6 +457,10 @@ Notes:
 
 A minimal graph uses `@pipeline` for the graph and `@task` for local Python components. `@task` functions are not executed at compile time; the compiler records call sites, emits a sibling `<output>.components.yaml` with `local_from_python` entries, and rewrites task component refs to that sidecar. Hydrate later regenerates the same component YAML from the Python source.
 
+Sidecar entries are deduplicated by the **generated component**, not by function name. The dedup key is the module-qualified function identity — a logical module namespace derived from the project-relative source layout (`package_a/tasks.py` -> `package_a.tasks`, `pkg/__init__.py` -> `pkg`), plus `__qualname__` and the function name — together with every generation-affecting option: image (explicit or resolved `image_id`), `mode`, `resolve_root`, `dependencies_from`, the `unwrap` schema, and the source file. Runtime `__module__` is deliberately not used, because pipeline scripts are imported under throwaway UUID module names.
+
+Call sites sharing that whole identity collapse to one entry keyed by the readable hyphenated function name (`run_dbt` -> `run-dbt`). Otherwise every colliding variant — a shared helper re-decorated with different task-level options, or `package_a.tasks.run` alongside `package_b.tasks.run` — is emitted as `run-dbt--<hash>`, where `<hash>` is a content digest of the canonical identity; no variant keeps the unsuffixed name, and each task ref points at its own. Digests are anchored at the project source directory, so fragment names are unchanged by relocating the project, compiling into a different output directory, or reordering the pipeline's calls, and they never embed image, path, or credential-bearing values.
+
 ```python
 from cloud_pipelines import components
 from tangle_cli.python_pipeline import In, Out, pipeline, task
