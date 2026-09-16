@@ -34,6 +34,59 @@ class ProcessingOutcome(str, Enum):
     ERROR = "error"
 
 
+@dataclass(frozen=True)
+class _PublishedState:
+    """One observation of the owner-scoped published state of a component.
+
+    ``versions`` maps digest → verified published version for non-deprecated
+    candidates. ``unreadable`` holds identifiers of non-deprecated candidates
+    whose version could not be determined; any entry there means the view is
+    incomplete and callers must fail closed rather than publish/deprecate.
+    Derived digest lists are sorted so diagnostics never depend on API order.
+    """
+
+    versions: Mapping[str, str] = field(default_factory=dict)
+    unreadable: tuple[str, ...] = ()
+    deprecated_count: int = 0
+    found_count: int = 0
+
+    @property
+    def latest_version(self) -> str | None:
+        """Highest verified published version, deterministic across API orders."""
+
+        latest: str | None = None
+        for version in sorted(set(self.versions.values())):
+            if latest is None or utils.compare_versions(version, latest) > 0:
+                latest = version
+        return latest
+
+    @property
+    def latest_digests(self) -> tuple[str, ...]:
+        """Sorted digests whose version compares equal to :attr:`latest_version`."""
+
+        latest = self.latest_version
+        if latest is None:
+            return ()
+        return tuple(
+            sorted(
+                digest
+                for digest, version in self.versions.items()
+                if utils.compare_versions(version, latest) == 0
+            )
+        )
+
+    def digests_older_than(self, local_version: str) -> tuple[str, ...]:
+        """Sorted digests proven strictly older than ``local_version``."""
+
+        return tuple(
+            sorted(
+                digest
+                for digest, version in self.versions.items()
+                if utils.compare_versions(version, local_version) < 0
+            )
+        )
+
+
 @dataclass
 class ProcessingResult:
     """Result for one component publish/deprecate processing step.
@@ -56,6 +109,9 @@ class ProcessingResult:
     digest: str | None = None
     latest_digest: str | None = None
     response: Any = None
+    #: Verified digest → version snapshot the decision was made from. In-process
+    #: detail for callers/tests; deliberately not emitted by :meth:`to_dict`.
+    published_versions: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def resolved_digest(self) -> str | None:
@@ -262,101 +318,178 @@ class ComponentPublisher(TangleCliHandler):
         Ordering is defined by :func:`tangle_cli.utils.compare_versions`
         against the highest non-deprecated owner-scoped published version:
 
-        * nothing published (or no readable remote version) → PROCEED
+        * nothing published → PROCEED
         * local strictly newer → PROCEED
         * local equal → SKIP, carrying that version's exact digest
         * local strictly older → SKIP (no-op), carrying the newer published
           digest; never publishes an older version and never deprecates a
           newer one. ``allow_downgrade=True`` opts out of this last rule.
 
-        If several non-deprecated owner-scoped components tie at the selected
-        latest version, a SKIP cannot name one exact digest, so the check fails
-        closed with an ERROR rather than guessing from API ordering.
+        The check fails closed — ERROR, and callers must not publish or
+        deprecate anything — when the published state cannot be read
+        completely:
+
+        * any non-deprecated owner-scoped candidate whose digest is missing or
+          whose spec/version cannot be fetched or parsed (an unreadable row
+          could be newer than the local version, and would later be deprecated
+          on a blind "deprecate everything" pass);
+        * several non-deprecated candidates tied at the selected latest
+          version, where no exact digest can be chosen.
+
+        Diagnostics list digests in sorted order so results never depend on
+        API response ordering.
         """
 
         local_version = spec.version
         self.log.info(f"   Local version: {local_version}")
 
-        latest_version: str | None = None
-        latest_digests: list[str] = []
-
         if self.dry_run:
             test_version = os.environ.get("TEST_LATEST_VERSION")
+            state = _PublishedState()
             if test_version:
-                latest_version = test_version
-                self.log.info(f"   Remote version (test): {latest_version}")
-        else:
-            client = self._get_client()
-            if client is None:
-                return ProcessingResult(
-                    outcome=ProcessingOutcome.ERROR,
-                    local_version=str(local_version),
-                    latest_version=None,
-                    reason="Failed to create API client",
-                )
+                state = _PublishedState(latest_version=test_version)
+                self.log.info(f"   Remote version (test): {test_version}")
+            return self._evaluate_published_state(spec, state)
 
-            filter_by = self.published_by or self.current_user_id(client)
-            if not filter_by:
-                self.log.error(
-                    "❌ Cannot determine current user — aborting to avoid deprecating components owned by others"
-                )
-                return ProcessingResult(
-                    outcome=ProcessingOutcome.ERROR,
-                    local_version=str(local_version),
-                    latest_version=None,
-                    reason="Cannot determine current user for author filtering",
-                )
-
-            existing_components = client.find_existing_components(
-                spec.search_names,
-                verbose=False,
-                published_by=filter_by,
+        client = self._get_client()
+        if client is None:
+            return ProcessingResult(
+                outcome=ProcessingOutcome.ERROR,
+                local_version=str(local_version),
+                latest_version=None,
+                reason="Failed to create API client",
             )
 
-            if existing_components:
-                for component in existing_components:
-                    digest = self.component_digest(component)
-                    if not digest:
-                        continue
-                    if self.component_is_deprecated(component):
-                        continue
-                    try:
-                        full_spec = client.get_component_spec(digest)
-                        remote_version = full_spec.version if full_spec else None
-                    except Exception as exc:
-                        self.log.warn(f"   Warning: Failed to get version for component {digest[:16]}: {exc}")
-                        continue
-                    if not remote_version:
-                        continue
-                    if latest_version is None or utils.compare_versions(remote_version, latest_version) > 0:
-                        latest_version = remote_version
-                        latest_digests = [digest]
-                    elif utils.compare_versions(remote_version, latest_version) == 0 and digest not in latest_digests:
-                        latest_digests.append(digest)
+        filter_by = self.owner_filter(client)
+        if not filter_by:
+            return ProcessingResult(
+                outcome=ProcessingOutcome.ERROR,
+                local_version=str(local_version),
+                latest_version=None,
+                reason="Cannot determine current user for author filtering",
+            )
 
-                if latest_version:
-                    self.log.info(f"   Remote version: {latest_version}")
+        state = self.collect_published_state(client, spec, filter_by, verbose=False)
+        return self._evaluate_published_state(spec, state)
+
+    def owner_filter(self, client: Any) -> str | None:
+        """Resolve the owner scope for lookups/deprecation, logging on failure."""
+
+        filter_by = self.published_by or self.current_user_id(client)
+        if not filter_by:
+            self.log.error(
+                "❌ Cannot determine current user — aborting to avoid deprecating components owned by others"
+            )
+        return filter_by
+
+    def collect_published_state(
+        self,
+        client: Any,
+        spec: Any,
+        filter_by: str,
+        *,
+        verbose: bool = False,
+    ) -> "_PublishedState":
+        """Read the owner-scoped published state for ``spec`` exactly once.
+
+        Returns a verified digest → version snapshot plus the identifiers of
+        any non-deprecated candidate that could not be read. Callers decide
+        policy; this method only observes.
+        """
+
+        existing_components = client.find_existing_components(
+            spec.search_names,
+            verbose=verbose,
+            published_by=filter_by,
+        )
+
+        versions: dict[str, str] = {}
+        unreadable: list[str] = []
+        deprecated_count = 0
+
+        for component in existing_components or []:
+            if self.component_is_deprecated(component):
+                deprecated_count += 1
+                continue
+            digest = self.component_digest(component)
+            if not digest:
+                name = None
+                if isinstance(component, Mapping):
+                    name = component.get("name")
                 else:
-                    self.log.info(
-                        f"   ℹ️  Found {len(existing_components)} component(s) but couldn't extract version"
-                    )
+                    name = getattr(component, "name", None)
+                unreadable.append(f"<no digest: {name or 'unknown component'}>")
+                continue
+            try:
+                full_spec = client.get_component_spec(digest)
+                remote_version = full_spec.version if full_spec else None
+            except Exception as exc:
+                self.log.warn(f"   Warning: Failed to get version for component {digest[:16]}: {exc}")
+                unreadable.append(digest)
+                continue
+            if not remote_version:
+                unreadable.append(digest)
+                continue
+            versions[digest] = str(remote_version)
+
+        return _PublishedState(
+            versions=versions,
+            unreadable=tuple(sorted(unreadable)),
+            deprecated_count=deprecated_count,
+            found_count=len(existing_components or []),
+        )
+
+    def _evaluate_published_state(
+        self,
+        spec: Any,
+        state: "_PublishedState",
+        *,
+        stage: str = "version check",
+    ) -> ProcessingResult:
+        """Apply the monotonic publish policy to an observed published state."""
+
+        local_version = spec.version
+        prefix = "" if stage == "version check" else f"({stage}) "
+
+        if state.unreadable:
+            listed = ", ".join(state.unreadable)
+            reason = (
+                f"Cannot read published version for {len(state.unreadable)} non-deprecated "
+                f"component(s) ({listed}); refusing to publish or deprecate without a complete view"
+            )
+            self.log.error(f"   ❌ {prefix}{reason}")
+            return ProcessingResult(
+                outcome=ProcessingOutcome.ERROR,
+                local_version=local_version,
+                latest_version=None,
+                spec=spec,
+                reason=reason,
+                published_versions=state.versions,
+            )
+
+        latest_version = state.latest_version
+        latest_digests = state.latest_digests
+
+        if state.versions:
+            self.log.info(f"   Remote version: {latest_version}")
+        elif state.found_count and state.deprecated_count == state.found_count:
+            self.log.info(f"   ℹ️  Found {state.found_count} component(s), all deprecated")
 
         if len(latest_digests) > 1:
             tied = ", ".join(latest_digests)
-            self.log.error(
-                f"   ❌ Ambiguous latest published version {latest_version}: "
-                f"{len(latest_digests)} non-deprecated components share it ({tied})"
+            reason = (
+                f"Ambiguous latest published version {latest_version}: "
+                f"{len(latest_digests)} non-deprecated components share it ({tied}); "
+                "cannot select an exact digest"
             )
+            self.log.error(f"   ❌ {prefix}{reason}")
             return ProcessingResult(
                 outcome=ProcessingOutcome.ERROR,
                 local_version=local_version,
                 latest_version=latest_version,
                 spec=spec,
-                reason=(
-                    f"Ambiguous latest published version {latest_version}: "
-                    f"{len(latest_digests)} non-deprecated components share it ({tied}); "
-                    "cannot select an exact digest"
-                ),
+                reason=reason,
+                published_versions=state.versions,
             )
 
         latest_digest = latest_digests[0] if latest_digests else None
@@ -367,7 +500,7 @@ class ComponentPublisher(TangleCliHandler):
         if should_proceed:
             version_suffix = " (older)" if comparison < 0 else ""
             self.log.info(
-                "   ➡️  Version "
+                f"   ➡️  {prefix}Version "
                 + (f"{latest_version}{version_suffix}" if latest_version else "new")
                 + f" → {local_version}"
             )
@@ -377,18 +510,19 @@ class ComponentPublisher(TangleCliHandler):
                 latest_version=latest_version,
                 latest_digest=latest_digest,
                 spec=spec,
+                published_versions=state.versions,
             )
 
         if comparison < 0:
             self.log.info(
-                f"   ⏭️  Skipping: Local version {local_version} is older than published {latest_version}"
+                f"   ⏭️  {prefix}Skipping: Local version {local_version} is older than published {latest_version}"
             )
             reason = (
                 f"Version {local_version} is older than published version {latest_version} "
                 "(no-op; publishing is monotonic)"
             )
         else:
-            self.log.info(f"   ⏭️  Skipping: Version {local_version} unchanged")
+            self.log.info(f"   ⏭️  {prefix}Skipping: Version {local_version} unchanged")
             reason = f"Version {local_version} unchanged (matches remote)"
 
         return ProcessingResult(
@@ -398,6 +532,7 @@ class ComponentPublisher(TangleCliHandler):
             latest_digest=latest_digest,
             spec=spec,
             reason=reason,
+            published_versions=state.versions,
         )
 
     def deprecate_old_components(
@@ -632,11 +767,8 @@ class ComponentPublisher(TangleCliHandler):
                 response={"name": spec.name, "text": local_yaml_content},
             )
 
-        filter_by = self.published_by or self.current_user_id(client)
+        filter_by = self.owner_filter(client)
         if not filter_by:
-            self.log.error(
-                "❌ Cannot determine current user — aborting to avoid deprecating components owned by others"
-            )
             return ProcessingResult(
                 outcome=ProcessingOutcome.ERROR,
                 local_version=version_check_result.local_version,
@@ -645,7 +777,23 @@ class ComponentPublisher(TangleCliHandler):
                 spec=spec,
                 reason="Cannot determine current user for author filtering",
             )
-        existing_components = client.find_existing_components(spec.search_names, verbose=True, published_by=filter_by)
+
+        # Re-observe the published state immediately before create/deprecate and
+        # re-apply the same policy: a row that appeared after the first check
+        # must be able to stop the publish, and must never be deprecated on the
+        # strength of the earlier decision.
+        final_state = self.collect_published_state(client, spec, filter_by, verbose=True)
+        final_check = self._evaluate_published_state(spec, final_state, stage="refreshed check")
+        if final_check.outcome != ProcessingOutcome.PROCEED:
+            if final_check.outcome == ProcessingOutcome.SKIP:
+                self.log.info(f"   ⏭️  Skipping API publish: {final_check.reason}")
+            else:
+                self.log.error(f"   ❌ Cannot proceed due to error: {final_check.reason}")
+            return final_check
+
+        deprecation_candidates = [
+            {"digest": digest} for digest in final_state.digests_older_than(str(spec.version))
+        ]
 
         try:
             result = client.published_components_create(name=spec.name, text=local_yaml_content)
@@ -654,24 +802,25 @@ class ComponentPublisher(TangleCliHandler):
 
             if new_digest:
                 self.log.info(f"✅ Published: {spec.name} (digest: {str(new_digest)[:16]}...)")
-                self.deprecate_old_components(existing_components, str(new_digest))
+                self.deprecate_old_components(deprecation_candidates, str(new_digest))
                 return ProcessingResult(
                     outcome=ProcessingOutcome.SUCCESS,
-                    local_version=version_check_result.local_version,
-                    latest_version=version_check_result.latest_version,
+                    local_version=final_check.local_version,
+                    latest_version=final_check.latest_version,
                     spec=spec,
                     reason=f"Successfully published with digest: {new_digest}",
                     digest=str(new_digest),
-                    latest_digest=version_check_result.latest_digest,
+                    latest_digest=final_check.latest_digest,
                     response=result,
+                    published_versions=final_state.versions,
                 )
 
             self.log.warn("⚠️ Component published but no digest returned")
             return ProcessingResult(
                 outcome=ProcessingOutcome.ERROR,
-                local_version=version_check_result.local_version,
-                latest_version=version_check_result.latest_version,
-                latest_digest=version_check_result.latest_digest,
+                local_version=final_check.local_version,
+                latest_version=final_check.latest_version,
+                latest_digest=final_check.latest_digest,
                 spec=spec,
                 reason="Component published but no digest returned",
                 response=result,
@@ -680,9 +829,9 @@ class ComponentPublisher(TangleCliHandler):
             self.log.error(f"❌ Request failed: {exc}")
             return ProcessingResult(
                 outcome=ProcessingOutcome.ERROR,
-                local_version=version_check_result.local_version,
-                latest_version=version_check_result.latest_version,
-                latest_digest=version_check_result.latest_digest,
+                local_version=final_check.local_version,
+                latest_version=final_check.latest_version,
+                latest_digest=final_check.latest_digest,
                 spec=spec,
                 reason=f"Request failed: {exc}",
             )

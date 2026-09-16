@@ -406,6 +406,191 @@ def test_resolved_digest_is_none_for_error_outcomes(tmp_path: Path) -> None:
     assert client.update_calls == []
 
 
+# ---------------------------------------------------------------------------
+# Fail-closed reads, lookup races, deterministic diagnostics
+# ---------------------------------------------------------------------------
+
+
+class RaceClient(FakeClient):
+    """Client whose published state changes between the two owner-scoped lookups."""
+
+    def __init__(self, first: list[ExistingComponent], second: list[ExistingComponent]) -> None:
+        super().__init__()
+        self._sequence = [first, second]
+        self.existing = first
+
+    def find_existing_components(self, components: Any, **kwargs: Any) -> list[ExistingComponent]:
+        self.existing = self._sequence[min(len(self.find_calls), len(self._sequence) - 1)]
+        return super().find_existing_components(components, **kwargs)
+
+
+def test_version_check_fails_closed_on_unreadable_candidate(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="2.0")
+    client = FakeClient()
+    client.existing = [ExistingComponent("sha256:v10"), ExistingComponent("sha256:unknown")]
+    # "sha256:unknown" is absent from component_versions, so get_component_spec raises.
+    client.component_versions = {"sha256:v10": "1.0"}
+
+    result = publish_component_to_tangle(component_path, client=client)
+
+    assert result.outcome == ProcessingOutcome.ERROR
+    assert "Cannot read published version" in (result.reason or "")
+    assert "sha256:unknown" in (result.reason or "")
+    assert result.resolved_digest is None
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_version_check_fails_closed_on_candidate_without_digest() -> None:
+    spec = ComponentSpec.from_yaml("name: demo\nmetadata:\n  annotations:\n    version: '2.0'\n")
+    client = FakeClient()
+    client.existing = [ExistingComponent("", name="demo")]
+
+    result = perform_version_check(spec=spec, dry_run=False, client=client)
+
+    assert result.outcome == ProcessingOutcome.ERROR
+    assert "no digest" in (result.reason or "")
+    assert client.create_calls == []
+
+
+def test_unreadable_row_appearing_before_publish_blocks_create_and_deprecate(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="2.0")
+    client = RaceClient(
+        [ExistingComponent("sha256:v10")],
+        [ExistingComponent("sha256:v10"), ExistingComponent("sha256:unknown")],
+    )
+    client.component_versions = {"sha256:v10": "1.0"}
+
+    result = publish_component_to_tangle(component_path, client=client)
+
+    assert result.outcome == ProcessingOutcome.ERROR
+    assert "sha256:unknown" in (result.reason or "")
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_concurrent_newer_row_between_lookups_skips_without_publishing(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="2.0")
+    client = RaceClient(
+        [ExistingComponent("sha256:v10")],
+        [ExistingComponent("sha256:v10"), ExistingComponent("sha256:v30")],
+    )
+    client.component_versions = {"sha256:v10": "1.0", "sha256:v30": "3.0"}
+
+    result = publish_component_to_tangle(component_path, client=client)
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    assert result.latest_version == "3.0"
+    assert result.latest_digest == "sha256:v30"
+    assert result.resolved_digest == "sha256:v30"
+    assert "older" in (result.reason or "")
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_concurrent_equal_row_between_lookups_skips_without_publishing(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="2.0")
+    client = RaceClient([], [ExistingComponent("sha256:v20")])
+    client.component_versions = {"sha256:v20": "2.0"}
+
+    result = publish_component_to_tangle(component_path, client=client)
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    assert result.latest_digest == "sha256:v20"
+    assert "unchanged" in (result.reason or "")
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_concurrent_ambiguous_rows_between_lookups_fail_closed(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="2.0")
+    client = RaceClient(
+        [ExistingComponent("sha256:v10")],
+        [ExistingComponent("sha256:b"), ExistingComponent("sha256:a")],
+    )
+    client.component_versions = {"sha256:v10": "1.0", "sha256:a": "3.0", "sha256:b": "3.0"}
+
+    result = publish_component_to_tangle(component_path, client=client)
+
+    assert result.outcome == ProcessingOutcome.ERROR
+    assert "Ambiguous latest published version 3.0" in (result.reason or "")
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_row_appearing_after_version_check_is_never_deprecated(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="2.0")
+    client = RaceClient(
+        [ExistingComponent("sha256:v10")],
+        [ExistingComponent("sha256:v10"), ExistingComponent("sha256:v11")],
+    )
+    client.component_versions = {"sha256:v10": "1.0", "sha256:v11": "1.1"}
+    client.publish_response = {"digest": "sha256:v20"}
+
+    result = publish_component_to_tangle(component_path, client=client)
+
+    # Both late rows are proven older than 2.0, so both may be deprecated, in
+    # sorted order; nothing unverified is ever touched.
+    assert result.outcome == ProcessingOutcome.SUCCESS
+    assert [call["digest"] for call in client.update_calls] == ["sha256:v10", "sha256:v11"]
+
+
+def test_allow_downgrade_never_deprecates_newer_rows(tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="1.0")
+    client = FakeClient()
+    client.existing = [ExistingComponent("sha256:v20"), ExistingComponent("sha256:v005")]
+    client.component_versions = {"sha256:v20": "2.0", "sha256:v005": "0.5"}
+    client.publish_response = {"digest": "sha256:v10"}
+
+    result = publish_component_to_tangle(component_path, client=client, allow_downgrade=True)
+
+    assert result.outcome == ProcessingOutcome.SUCCESS
+    assert [call["digest"] for call in client.update_calls] == ["sha256:v005"]
+
+
+def test_ambiguity_diagnostics_are_sorted_independently_of_api_order() -> None:
+    spec = ComponentSpec.from_yaml("name: demo\nmetadata:\n  annotations:\n    version: '1.0'\n")
+    reasons = []
+    for digests in (["sha256:a", "sha256:b"], ["sha256:b", "sha256:a"]):
+        client = FakeClient()
+        client.existing = [ExistingComponent(digest) for digest in digests]
+        client.component_versions = {"sha256:a": "2.0", "sha256:b": "2.0"}
+        result = perform_version_check(spec=spec, dry_run=False, client=client)
+        assert result.outcome == ProcessingOutcome.ERROR
+        reasons.append(result.reason)
+
+    assert reasons[0] == reasons[1]
+    assert "(sha256:a, sha256:b)" in (reasons[0] or "")
+
+
+def test_latest_digest_selection_is_independent_of_api_order() -> None:
+    spec = ComponentSpec.from_yaml("name: demo\nmetadata:\n  annotations:\n    version: '1.0'\n")
+    selected = []
+    for digests in (["sha256:v10", "sha256:v30", "sha256:v20"], ["sha256:v30", "sha256:v20", "sha256:v10"]):
+        client = FakeClient()
+        client.existing = [ExistingComponent(digest) for digest in digests]
+        client.component_versions = {"sha256:v10": "1.0", "sha256:v20": "2.0", "sha256:v30": "3.0"}
+        result = perform_version_check(spec=spec, dry_run=False, client=client)
+        selected.append((result.latest_version, result.latest_digest))
+
+    assert selected[0] == selected[1] == ("3.0", "sha256:v30")
+
+
+def test_compare_equal_raw_versions_pick_deterministic_representative() -> None:
+    spec = ComponentSpec.from_yaml("name: demo\nmetadata:\n  annotations:\n    version: '0.9'\n")
+    picked = []
+    for digests in (["sha256:a", "sha256:b"], ["sha256:b", "sha256:a"]):
+        client = FakeClient()
+        client.existing = [ExistingComponent(digest) for digest in digests]
+        # "1.0" and "1.0.0" compare equal, so this is an ambiguous tie either way.
+        client.component_versions = {"sha256:a": "1.0", "sha256:b": "1.0.0"}
+        result = perform_version_check(spec=spec, dry_run=False, client=client)
+        assert result.outcome == ProcessingOutcome.ERROR
+        picked.append((result.latest_version, result.reason))
+
+    assert picked[0] == picked[1]
+
+
 def test_version_check_without_owner_reports_error_and_no_digest() -> None:
     spec = ComponentSpec.from_yaml("name: demo\nmetadata:\n  annotations:\n    version: '1.0'\n")
     client = FakeClient()
