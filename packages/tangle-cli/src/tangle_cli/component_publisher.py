@@ -49,10 +49,16 @@ class _PublishedState:
     unreadable: tuple[str, ...] = ()
     deprecated_count: int = 0
     found_count: int = 0
+    #: Dry-run ``TEST_LATEST_VERSION`` override. Synthetic: it has no backing
+    #: published component, so it never contributes a digest.
+    synthetic_latest_version: str | None = None
 
     @property
     def latest_version(self) -> str | None:
         """Highest verified published version, deterministic across API orders."""
+
+        if not self.versions:
+            return self.synthetic_latest_version
 
         latest: str | None = None
         for version in sorted(set(self.versions.values())):
@@ -347,7 +353,7 @@ class ComponentPublisher(TangleCliHandler):
             test_version = os.environ.get("TEST_LATEST_VERSION")
             state = _PublishedState()
             if test_version:
-                state = _PublishedState(latest_version=test_version)
+                state = _PublishedState(synthetic_latest_version=test_version)
                 self.log.info(f"   Remote version (test): {test_version}")
             return self._evaluate_published_state(spec, state)
 

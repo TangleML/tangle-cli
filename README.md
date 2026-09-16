@@ -361,10 +361,11 @@ Publishing is monotonic against the highest **non-deprecated, owner-scoped** pub
 
 | Local vs latest published | Outcome | Notes |
 | --- | --- | --- |
-| nothing published / no readable remote version | `proceed` | first publish |
-| local strictly newer | `proceed` | publishes, then deprecates older owner-scoped versions |
+| nothing published (no non-deprecated owner-scoped version) | `proceed` | first publish |
+| local strictly newer | `proceed` | publishes, then deprecates owner-scoped versions proven older |
 | local equal | `skip` | no create/deprecate calls |
 | local strictly older | `skip` | no-op; never publishes an older version and never deprecates a newer one |
+| published version unreadable, or ambiguous tie at the latest version | `error` | fails closed; no create/deprecate calls |
 
 Every result carries the digest of the version it compared against:
 

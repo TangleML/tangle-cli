@@ -591,6 +591,56 @@ def test_compare_equal_raw_versions_pick_deterministic_representative() -> None:
     assert picked[0] == picked[1]
 
 
+def test_dry_run_test_latest_version_applies_monotonic_rules(monkeypatch) -> None:
+    spec = ComponentSpec.from_yaml("name: demo\nmetadata:\n  annotations:\n    version: '2.0'\n")
+
+    monkeypatch.setenv("TEST_LATEST_VERSION", "1.0")
+    newer = perform_version_check(spec=spec, dry_run=True)
+    assert newer.outcome == ProcessingOutcome.PROCEED
+    assert newer.latest_version == "1.0"
+    assert newer.latest_digest is None
+
+    monkeypatch.setenv("TEST_LATEST_VERSION", "2.0")
+    equal = perform_version_check(spec=spec, dry_run=True)
+    assert equal.outcome == ProcessingOutcome.SKIP
+    assert equal.latest_version == "2.0"
+    assert equal.latest_digest is None
+    assert equal.resolved_digest is None
+    assert "unchanged" in (equal.reason or "")
+
+    monkeypatch.setenv("TEST_LATEST_VERSION", "3.0")
+    older = perform_version_check(spec=spec, dry_run=True)
+    assert older.outcome == ProcessingOutcome.SKIP
+    assert older.latest_version == "3.0"
+    assert older.latest_digest is None
+    assert older.resolved_digest is None
+    assert "older" in (older.reason or "")
+
+
+def test_dry_run_without_test_latest_version_proceeds(monkeypatch) -> None:
+    spec = ComponentSpec.from_yaml("name: demo\nmetadata:\n  annotations:\n    version: '2.0'\n")
+    monkeypatch.delenv("TEST_LATEST_VERSION", raising=False)
+
+    result = perform_version_check(spec=spec, dry_run=True)
+
+    assert result.outcome == ProcessingOutcome.PROCEED
+    assert result.latest_version is None
+    assert result.latest_digest is None
+
+
+def test_dry_run_publish_skips_when_test_latest_version_is_newer(monkeypatch, tmp_path: Path) -> None:
+    component_path = write_component(tmp_path / "component.yaml", version="1.0")
+    client = FakeClient()
+    monkeypatch.setenv("TEST_LATEST_VERSION", "2.0")
+
+    result = publish_component_to_tangle(component_path, dry_run=True, client=client)
+
+    assert result.outcome == ProcessingOutcome.SKIP
+    assert result.latest_version == "2.0"
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
 def test_version_check_without_owner_reports_error_and_no_digest() -> None:
     spec = ComponentSpec.from_yaml("name: demo\nmetadata:\n  annotations:\n    version: '1.0'\n")
     client = FakeClient()
