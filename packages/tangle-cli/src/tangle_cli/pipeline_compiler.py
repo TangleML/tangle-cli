@@ -52,6 +52,7 @@ from typing import Any, get_type_hints
 
 import yaml
 
+from .authenticated_identity import ME
 from .component_from_func import build_unwrapped_inputs_schema
 from .handler import TangleCliHandler
 from .python_pipeline.cfg import Cfg, _coerce_override, load_cfg
@@ -1814,6 +1815,57 @@ def _task_component_identity(
     }
 
 
+def _task_publication(ref: CallableRef) -> dict[str, str] | None:
+    """The ``@Publish`` declaration on one traced ``@task`` call, if any.
+
+    Returns:
+        The neutral ``publish`` marker mapping, or ``None`` when the task
+        declares no publication.
+    """
+    if ref._task_publish_name is None:
+        return None
+    return {
+        "component_name": ref._task_publish_name,
+        "version": ref._task_publish_version or "",
+    }
+
+
+def _require_agreeing_publication(
+    existing: dict[str, str] | None,
+    incoming: dict[str, str] | None,
+    *,
+    identity_payload: Mapping[str, Any],
+) -> None:
+    """Refuse when refs sharing ONE component disagree about publication.
+
+    Publication is intentionally not part of the dedup identity, so two call
+    sites that generate the same component collapse into a single sidecar
+    entry which can carry only one marker. Every ref folded into that entry
+    must therefore make the same declaration.
+
+    By construction they do -- ``@Publish`` decorates the function, and every
+    derived ref copies the fields -- so this is a guard against a future
+    caller constructing refs directly, not the mechanism that makes the common
+    case work.
+
+    Raises:
+        CompileError: If the two declarations differ.
+    """
+    if existing == incoming:
+        return
+
+    def _render(value: dict[str, str] | None) -> str:
+        if value is None:
+            return "no @Publish"
+        return f"@Publish({value['component_name']!r}, version={value['version']!r})"
+
+    raise CompileError(
+        f"@Publish disagreement for {_task_identity_label(identity_payload)}: "
+        f"the same generated component is declared as {_render(existing)} and "
+        f"{_render(incoming)}. One component can carry one publication."
+    )
+
+
 def _task_identity_label(identity_payload: Mapping[str, Any]) -> str:
     """Human-readable ``<module>::<qualname>`` label for an identity payload.
 
@@ -1946,14 +1998,23 @@ def _plan_task_sidecar(
         identity = _stable_payload_hash(identity_payload)
         by_identity = variants.setdefault(base, {})
         previous = by_identity.get(identity)
+        # Publication intent rides ALONGSIDE the identity, never inside it:
+        # it does not change the generated component, so folding it into the
+        # identity would split one component into two byte-identical ones.
+        # Every ref deduped into one component must therefore agree about it.
+        publication = _task_publication(ref)
+        if previous is not None:
+            _require_agreeing_publication(
+                previous[2], publication, identity_payload=identity_payload
+            )
         if previous is None:
-            by_identity[identity] = (emitted, identity_payload)
+            by_identity[identity] = (emitted, identity_payload, publication)
         elif _emitted_form_rank(emitted) < _emitted_form_rank(previous[0]):
             # Same component, different SPELLING (e.g. one call site omits
             # ``mode`` while another writes ``mode="inline"``). Pick the
             # canonical representative rather than whichever was traced first,
             # so the sidecar text does not depend on call order.
-            by_identity[identity] = (emitted, previous[1])
+            by_identity[identity] = (emitted, previous[1], previous[2])
         legacy_fragments.setdefault((base, identity), _fragment_for_task(ref, unwrapped_schema))
         task_identities.append((task_id, base, identity))
 
@@ -1962,7 +2023,7 @@ def _plan_task_sidecar(
     identity_labels: dict[str, str] = {}
     for base, by_identity in variants.items():
         if len(by_identity) == 1:
-            identity, (emitted, _identity_payload) = next(iter(by_identity.items()))
+            identity, (emitted, _identity_payload, _publication) = next(iter(by_identity.items()))
             named = [(legacy_fragments[(base, identity)], identity, emitted)]
         else:
             # EVERY colliding variant is suffixed — the trace-order "first" one
@@ -1970,7 +2031,7 @@ def _plan_task_sidecar(
             # sorted order so the sidecar text is call-order independent.
             named = sorted(
                 (f"{base}--{identity}", identity, emitted)
-                for identity, (emitted, _identity_payload) in by_identity.items()
+                for identity, (emitted, _identity_payload, _publication) in by_identity.items()
             )
         for fragment, identity, emitted in named:
             if fragment in entries:  # defensive — digests are content-addressed
@@ -1981,7 +2042,28 @@ def _plan_task_sidecar(
                 )
             fragment_by_identity[(base, identity)] = fragment
             identity_labels[fragment] = _task_identity_label(by_identity[identity][1])
-            entries[fragment] = {"local_from_python": emitted}
+            entry: dict[str, Any] = {}
+            publication = by_identity[identity][2]
+            if publication is not None:
+                # The declaration is emitted as the resolver's OWN generic
+                # name/version/publisher fields, so ordinary hydration can look
+                # the published component up, with ``local_from_python`` as the
+                # candidate used when none is found. ``publish: true`` is a
+                # separate explicit marker: publication is never inferred from
+                # those fields alone, so a hand-written or fallback entry of
+                # that shape is not silently published.
+                #
+                # The publisher is the SYMBOLIC ``me``: compiling is offline and
+                # must stay so, so it cannot resolve an account id. Hydration
+                # resolves it to whoever is authenticated, which keeps the
+                # lookup owner-scoped instead of global.
+                entry["name"] = publication["component_name"]
+                entry["version"] = publication["version"]
+                entry["publisher"] = ME
+            entry["local_from_python"] = emitted
+            if publication is not None:
+                entry["publish"] = True
+            entries[fragment] = entry
 
     fragment_by_task = {
         task_id: fragment_by_identity[(base, identity)] for task_id, base, identity in task_identities

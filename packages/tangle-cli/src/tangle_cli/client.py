@@ -952,11 +952,21 @@ class TangleApiClient(GeneratedTangleApiOperations):
                     search_digests.add(str(data["digest"]))
 
         publisher_filter = published_by_substring or published_by
+        # The API parameter is a SUBSTRING match. When the caller asked for an
+        # exact owner it is therefore only a prefilter, and accepting its
+        # results verbatim would let a superset owner id (``alice`` matching
+        # ``alice2``) satisfy an exact request. An owner-scoped lookup is an
+        # identity control, so exactness is enforced here on the returned rows
+        # and a row with no owner is never accepted. Explicit
+        # ``published_by_substring`` callers keep substring semantics.
+        exact_owner = published_by if published_by and not published_by_substring else None
         found: dict[str, ComponentInfo] = {}
 
         def add(info: ComponentInfo) -> None:
             key = info.digest or info.name
             if not key:
+                return
+            if exact_owner is not None and info.published_by != exact_owner:
                 return
             found[key] = info
             if verbose:

@@ -142,6 +142,16 @@ class CallableRef:
     _task_resolve_root: Path | None = None
     _task_custom_annotations: dict[str, str] | None = None
     _task_unwrap: tuple[str, ...] = ()
+    # ``@Publish`` metadata. ``None`` unless the author declared a publication
+    # for this ``@task``. REAL dataclass fields rather than attributes stamped
+    # on the object: ``_replace`` re-copies only a dunder allowlist, so a
+    # dynamic attribute would be lost by ``.bind()``/``.named()``, whereas
+    # ``dataclasses.replace`` carries every field. That is what lets the marker
+    # survive fluent composition and imported/cached refs. Publication is NOT
+    # generation-affecting -- it never changes the generated component bytes --
+    # so it is deliberately absent from the dedup identity.
+    _task_publish_name: str | None = None
+    _task_publish_version: str | None = None
     # ``@registered`` metadata. ``None`` for ``ref()``/``@task`` refs;
     # populated by the ``@registered`` decorator. Drives the compile-time
     # rewrite of the ``registered://pending`` sentinel URL to a

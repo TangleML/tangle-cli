@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import tangle_cli.utils as utils
 
+from .authenticated_identity import authenticated_user_id
 from .handler import TangleCliHandler
 from .logger import Logger
 
@@ -301,17 +302,7 @@ class ComponentPublisher(TangleCliHandler):
     def current_user_id(self, client: Any) -> str | None:
         """Return the current Tangle user id for owner-scoped lookups."""
 
-        try:
-            user_info = client.users_me()
-        except Exception:
-            return None
-        if user_info is None:
-            return None
-        if isinstance(user_info, Mapping):
-            value = user_info.get("id")
-        else:
-            value = getattr(user_info, "id", None)
-        return str(value) if value else None
+        return authenticated_user_id(client)
 
     def perform_version_check(self, spec: Any) -> ProcessingResult:
         """Perform owner-scoped, monotonic version checking for a component.

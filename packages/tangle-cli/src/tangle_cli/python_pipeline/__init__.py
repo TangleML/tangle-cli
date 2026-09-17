@@ -24,6 +24,7 @@ from .dynamic_data import dynamic_secret
 from .pipeline import pipeline
 from .raw import raw
 from .ref import ref
+from .publish import Publish
 from .registered import registered
 from .subpipeline import subpipeline
 from .task import task
@@ -33,6 +34,7 @@ from .types import In, Out, Outputs
 __all__ = [
     "pipeline",
     "task",
+    "Publish",
     "registered",
     "ref",
     "raw",

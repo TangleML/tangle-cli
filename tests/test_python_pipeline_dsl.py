@@ -53,6 +53,7 @@ class TestPublicSurface:
         assert set(pp.__all__) == {
             "pipeline",
             "task",
+            "Publish",
             "registered",
             "ref",
             "raw",

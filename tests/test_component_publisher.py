@@ -878,3 +878,53 @@ def test_publish_components_returns_nonzero_for_errors(tmp_path: Path) -> None:
         ProcessingOutcome.SUCCESS,
         ProcessingOutcome.ERROR,
     ]
+
+
+def test_the_owner_argument_a_version_check_passes_is_matched_exactly() -> None:
+    """Pin the semantics of the owner argument ``perform_version_check`` sends.
+
+    This is a CONTRACT test, not an end-to-end publisher run: it calls
+    ``find_existing_components`` directly, which is the call the version check
+    makes. The companion test above proves the publisher passes ``published_by``;
+    this proves what that argument then means. Together they stop the
+    publisher's owner scope loosening silently.
+
+    It matters because the server query is a substring match: without the
+    client's exact filter, a component owned by ``alice2`` would be read as part
+    of ``alice``'s published state -- constraining alice's next version, or
+    being considered for deprecation.
+    """
+    from tangle_cli.client import TangleApiClient
+    from tangle_cli.models import ComponentInfo
+
+    rows = [
+        ComponentInfo(name="orders-loader", digest="sha256:theirs", version="9.9", published_by="alice2"),
+        ComponentInfo(name="orders-loader", digest="sha256:mine", version="1.0", published_by="alice"),
+    ]
+
+    class _Session:
+        def request(self, *a: Any, **kw: Any) -> Any:  # pragma: no cover - never called
+            raise AssertionError("no HTTP in this test")
+
+    class _Client(TangleApiClient):
+        def list_published_component_infos(  # type: ignore[override]
+            self,
+            include_deprecated: bool = False,
+            name_substring: str | None = None,
+            published_by_substring: str | None = None,
+            digest: str | None = None,
+            *,
+            fetch_specs: bool = False,
+        ) -> list[Any]:
+            out = rows
+            if published_by_substring:
+                out = [i for i in out if published_by_substring in (i.published_by or "")]
+            if name_substring:
+                out = [i for i in out if name_substring.lower() in i.name.lower()]
+            return out
+
+    client = _Client("https://api.test", session=_Session())
+
+    found = client.find_existing_components(["orders-loader"], published_by="alice")
+
+    assert [i.digest for i in found] == ["sha256:mine"]
