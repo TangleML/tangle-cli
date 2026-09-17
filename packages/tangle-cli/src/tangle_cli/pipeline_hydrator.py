@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from . import utils
+from .authenticated_identity import is_symbolic_me, require_authenticated_user_id
 from .api_transport import DEFAULT_TIMEOUT_SECONDS
 from .component_generator import ComponentGenerator
 from .handler import TangleCliHandler
@@ -1149,6 +1150,19 @@ class PipelineHydrator(TangleCliHandler):
         """Resolve a component by name with optional filters."""
         component_name = entry["name"]
         publisher = entry.get("publisher")
+        if is_symbolic_me(publisher) and entry.get("publish") is True:
+            # Compilation is offline, so the compiler wrote a symbolic owner
+            # rather than an account id. Resolve it to whoever is actually
+            # authenticated: without an owner the lookup is global, and a
+            # component published by anyone else under this name and version
+            # would be a valid candidate. Unresolvable identity fails closed
+            # instead of widening the search.
+            #
+            # Gated on the marker as well as the symbol, because the compiler
+            # always writes both. An entry WITHOUT the marker is hand-authored,
+            # where ``me`` has always meant a literal account id; reinterpreting
+            # it would silently retarget or break such a config.
+            publisher = require_authenticated_user_id(self._api_client())
         version_constraint = entry.get("version")
         required_annotations = entry.get("annotations")
 

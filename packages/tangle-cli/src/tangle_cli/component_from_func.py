@@ -986,8 +986,13 @@ def _is_name_main_test(node: ast.expr) -> bool:
 # _strip_authoring_constructs). ``registered`` marks an op published separately
 # via its own gen_config.yaml; when that same op is baked (through its
 # local_from_python entry) the decorator + its authoring import must be stripped
-# too, exactly like @task.
-_AUTHORING_DECORATOR_NAMES = frozenset({"task", "pipeline", "subpipeline", "registered"})
+# too, exactly like @task. ``Publish`` likewise only records a publication
+# declaration for the compiler; leaving it in the baked program would raise
+# ``NameError`` at container startup, since its import is stripped with the
+# rest of the authoring surface.
+_AUTHORING_DECORATOR_NAMES = frozenset(
+    {"task", "pipeline", "subpipeline", "registered", "Publish"}
+)
 
 # The python-pipeline authoring modules. ONLY imports of these modules (and
 # their submodules) are authoring-only and stripped from the baked source. We

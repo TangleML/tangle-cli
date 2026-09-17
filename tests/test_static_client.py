@@ -830,3 +830,97 @@ def test_make_request_retries_after_refresh_auth_on_401() -> None:
     assert client.refreshes == 2
     assert len(session.calls) == 2
     assert session.calls[-1]["headers"]["Authorization"] == "Bearer refreshed-2"
+
+
+# --- exact vs substring owner scoping ---------------------------------------
+#
+# ``published_by`` and ``published_by_substring`` are distinct public
+# arguments. The server query is a SUBSTRING match, so for an exact request the
+# server result is only a prefilter and exactness must be enforced locally.
+# An owner scope is used as an identity control by callers (owner-scoped
+# publication/deprecation, and resolution of publish-marked components), so
+# these are contract tests, not cosmetics.
+
+
+def _owner_client(rows: list[dict[str, Any]], *, server_filters: bool = True) -> TangleApiClient:
+    """A client whose listing layer behaves like the server: substring owner.
+
+    ``server_filters=False`` models a server that returns a row the owner query
+    should have excluded -- absent publication metadata, or a backend that does
+    not apply the filter. The client must enforce the identity control itself
+    rather than trusting the response.
+    """
+    from tangle_cli.models import ComponentInfo
+
+    infos = [ComponentInfo(**row) for row in rows]
+
+    class _Client(TangleApiClient):
+        def list_published_component_infos(  # type: ignore[override]
+            self,
+            include_deprecated: bool = False,
+            name_substring: str | None = None,
+            published_by_substring: str | None = None,
+            digest: str | None = None,
+            *,
+            fetch_specs: bool = False,
+        ) -> list[Any]:
+            out = infos
+            if published_by_substring and server_filters:
+                out = [i for i in out if published_by_substring in (i.published_by or "")]
+            if name_substring:
+                out = [i for i in out if name_substring.lower() in i.name.lower()]
+            return out
+
+    return _Client("https://api.test", session=FakeSession([]))
+
+
+def test_exact_published_by_rejects_a_superset_owner_id() -> None:
+    """``alice`` must not match ``alice2``: the server substring query returns
+    it, so only the local exact filter can refuse it."""
+    client = _owner_client(
+        [{"name": "orders-loader", "digest": "sha256:lookalike", "published_by": "alice2"}]
+    )
+
+    found = client.find_existing_components(["orders-loader"], published_by="alice")
+
+    assert found == []
+
+
+def test_exact_published_by_accepts_only_the_exact_owner() -> None:
+    client = _owner_client(
+        [
+            {"name": "orders-loader", "digest": "sha256:theirs", "published_by": "alice2"},
+            {"name": "orders-loader", "digest": "sha256:mine", "published_by": "alice"},
+        ]
+    )
+
+    found = client.find_existing_components(["orders-loader"], published_by="alice")
+
+    assert [i.digest for i in found] == ["sha256:mine"]
+
+
+def test_exact_published_by_rejects_a_row_with_no_owner() -> None:
+    """A missing owner field is not evidence of ownership, and the client must
+    not assume the server applied the filter it was given."""
+    client = _owner_client(
+        [{"name": "orders-loader", "digest": "sha256:ownerless", "published_by": None}],
+        server_filters=False,
+    )
+
+    found = client.find_existing_components(["orders-loader"], published_by="alice")
+
+    assert found == []
+
+
+def test_substring_published_by_keeps_partial_matching() -> None:
+    """The exactness applies to exact requests only; substring callers rely on
+    partial matching."""
+    client = _owner_client(
+        [{"name": "orders-loader", "digest": "sha256:bot", "published_by": "team-alpha-bot"}]
+    )
+
+    found = client.find_existing_components(
+        ["orders-loader"], published_by_substring="team-alpha"
+    )
+
+    assert [i.digest for i in found] == ["sha256:bot"]
