@@ -2020,6 +2020,15 @@ def build_component_dict(
 # ============================================================================
 
 
+def _within(path: Path, root: Path) -> bool:
+    """Whether *path* lies inside *root*."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def generate_component_yaml(
     file_path: Path,
     output_path: Path,
@@ -2035,12 +2044,21 @@ def generate_component_yaml(
     emit_generation_annotations: bool = True,
     path_annotation_mode: Literal["oss", "td_legacy"] = "oss",
     unwrapped_inputs: dict[str, Any] | None = None,
+    logical_output_path: Path | None = None,
 ) -> bool:
     """Generate a component YAML file from a Python function.
 
     Args:
         file_path: Path to the Python source file
         output_path: Where to write the generated YAML
+        logical_output_path: Where the component is to be UNDERSTOOD to live,
+            for provenance only. Defaults to ``output_path``. Pass this when
+            the file is written somewhere incidental -- a private staging
+            directory, a scratch area -- so the recorded provenance describes
+            the component rather than the accident of where bytes landed.
+            Provenance is otherwise derived from the physical path, which
+            would embed that location and make the emitted YAML, and therefore
+            its digest, differ between runs of identical source.
         container_image: Docker image reference
         function_name: Function to extract (auto-detected if None)
         dependencies_from: Path to pyproject.toml with pip dependencies
@@ -2116,7 +2134,6 @@ def generate_component_yaml(
             deps = read_dependencies(dependencies_from)
 
         # 4. Build annotations
-        directory = file_path.parent.resolve()
         module_code = file_path.read_text()
 
         annotations: dict[str, str] = {
@@ -2148,9 +2165,18 @@ def generate_component_yaml(
         # basename-only paths outside a git checkout to preserve historical
         # snapshots.
         resolved_source = file_path.resolve()
-        resolved_output = output_path.resolve()
+        # Provenance describes where the component LIVES, which is not always
+        # where this call happens to write it. Kept UNRESOLVED: ``td_legacy``
+        # annotates the lexical basename, so resolving here would rewrite the
+        # recorded name whenever the output is a symlink.
+        annotation_output = logical_output_path if logical_output_path is not None else output_path
+        resolved_output = annotation_output.resolve()
         common_dir = Path(os.path.commonpath([resolved_source, resolved_output]))
-        git_root = get_git_root(directory)
+        # Discover from the SOURCE's real directory: a symlinked source file
+        # whose link lives outside the checkout would otherwise find no repo
+        # and drop every git annotation.
+        source_dir = resolved_source.parent
+        git_root = get_git_root(source_dir)
         use_common_paths = path_annotation_mode == "oss" or git_root is not None
 
         def _path_annotation(path: Path) -> str:
@@ -2163,7 +2189,7 @@ def generate_component_yaml(
 
         if not strip_source_path:
             annotations["python_original_code_path"] = _path_annotation(file_path)
-        annotations["component_yaml_path"] = _path_annotation(output_path)
+        annotations["component_yaml_path"] = _path_annotation(annotation_output)
         if emit_generation_annotations:
             if dependencies_from:
                 annotations["tangle_cli_generation_dependencies_from"] = _path_annotation(dependencies_from)
@@ -2172,7 +2198,12 @@ def generate_component_yaml(
 
         # Git info — use the same common ancestor as git_relative_dir when common paths are active.
         if git_root:
-            git_info = get_git_info(common_dir)
+            # Read the repository from a directory KNOWN to be inside it. The
+            # common ancestor of source and output need not be: any output
+            # outside the checkout (a configured output_folder, a staging dir)
+            # drags it out, and reading git there returns nothing, silently
+            # publishing a component with no repository of origin.
+            git_info = get_git_info(common_dir if _within(common_dir, git_root) else source_dir)
             git_info.pop("_git_root", None)
             # Override git_relative_dir to be the common ancestor
             try:
@@ -2181,7 +2212,7 @@ def generate_component_yaml(
                 pass
             annotations.update(git_info)
         else:
-            git_info = get_git_info(directory)
+            git_info = get_git_info(source_dir)
             git_info.pop("_git_root", None)
             annotations.update(git_info)
 
