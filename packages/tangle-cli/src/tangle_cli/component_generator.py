@@ -128,6 +128,7 @@ class ComponentGenerator:
         resolve_root: Path | None = None,
         emit_generation_annotations: bool = True,
         unwrapped_inputs: dict[str, Any] | None = None,
+        logical_output_path: Path | None = None,
     ) -> bool:
         """Generate component YAML from a Python function source file.
 
@@ -147,6 +148,8 @@ class ComponentGenerator:
             unwrapped_inputs: Optional persisted unwrap schema. Hydrate forwards
                 this ``local_from_python.unwrapped_inputs`` payload so component
                 generation expands dict parameters exactly as compile did.
+            logical_output_path: Where the component is to be understood to
+                live, for provenance only. Defaults to ``output_path``.
 
         Returns:
             True when generation succeeds, otherwise False.
@@ -154,6 +157,12 @@ class ComponentGenerator:
 
         from tangle_cli.component_from_func import generate_component_yaml
 
+        # Forwarded only when set. These hops are overridable, and an older
+        # override written against the previous signature must keep working
+        # for every caller that does not use the seam.
+        seam: dict[str, Any] = (
+            {} if logical_output_path is None else {"logical_output_path": logical_output_path}
+        )
         return generate_component_yaml(
             file_path=file_path,
             output_path=output_path,
@@ -168,6 +177,7 @@ class ComponentGenerator:
             resolve_root=resolve_root,
             emit_generation_annotations=emit_generation_annotations,
             unwrapped_inputs=unwrapped_inputs,
+            **seam,
         )
 
     def regenerate_yaml(
@@ -184,6 +194,7 @@ class ComponentGenerator:
         resolve_root: Path | None = None,
         emit_generation_annotations: bool = True,
         unwrapped_inputs: dict[str, Any] | None = None,
+        logical_output_path: Path | None = None,
     ) -> bool:
         """Regenerate a YAML component from a Python function source file.
 
@@ -202,6 +213,10 @@ class ComponentGenerator:
             emit_generation_annotations: Whether to emit regeneration metadata.
             unwrapped_inputs: Optional ``local_from_python.unwrapped_inputs``
                 schema to preserve compile-time unwrap expansion at hydrate time.
+            logical_output_path: Where the component is to be understood to
+                live, for provenance only. Defaults to ``output_path``. Note
+                that the image is still read back from the PHYSICAL output, so
+                a caller writing to a fresh location supplies ``image``.
 
         Returns:
             True when regeneration succeeds, otherwise False.
@@ -218,6 +233,9 @@ class ComponentGenerator:
             self._log(f"  Found dependencies: {deps_file}")
 
         final_output.parent.mkdir(parents=True, exist_ok=True)
+        seam: dict[str, Any] = (
+            {} if logical_output_path is None else {"logical_output_path": logical_output_path}
+        )
         return self.run_generation(
             python_file=python_file,
             final_output=final_output,
@@ -231,6 +249,7 @@ class ComponentGenerator:
             resolve_root=resolve_root,
             emit_generation_annotations=emit_generation_annotations,
             unwrapped_inputs=unwrapped_inputs,
+            **seam,
         )
 
     def run_generation(
@@ -248,6 +267,7 @@ class ComponentGenerator:
         resolve_root: Path | None = None,
         emit_generation_annotations: bool = True,
         unwrapped_inputs: dict[str, Any] | None = None,
+        logical_output_path: Path | None = None,
     ) -> bool:
         """Execute component generation and clean up partial output on failure.
 
@@ -265,6 +285,8 @@ class ComponentGenerator:
             emit_generation_annotations: Whether to emit regeneration metadata.
             unwrapped_inputs: Optional persisted unwrap schema forwarded to the
                 low-level generator for compile/hydrate interface parity.
+            logical_output_path: Where the component is to be understood to
+                live, for provenance only. Defaults to ``final_output``.
 
         Returns:
             True when generation succeeds, otherwise False. On failure, any
@@ -274,6 +296,9 @@ class ComponentGenerator:
         try:
             function_detail = f" function {func_name!r}" if func_name else ""
             self._log(f"  Generating component from {python_file.name}{function_detail}...")
+            seam: dict[str, Any] = (
+                {} if logical_output_path is None else {"logical_output_path": logical_output_path}
+            )
             success = self.generate_component_yaml(
                 file_path=python_file,
                 output_path=final_output,
@@ -287,6 +312,7 @@ class ComponentGenerator:
                 resolve_root=resolve_root,
                 emit_generation_annotations=emit_generation_annotations,
                 unwrapped_inputs=unwrapped_inputs,
+                **seam,
             )
             if not success:
                 self._log("  ❌ Failed to generate component", err=True)
@@ -340,6 +366,7 @@ def regenerate_yaml(
     resolve_root: Path | None = None,
     logger: Any | None = None,
     unwrapped_inputs: dict[str, Any] | None = None,
+    logical_output_path: Path | None = None,
 ) -> bool:
     """Regenerate component YAML through the default generator.
 
@@ -358,11 +385,16 @@ def regenerate_yaml(
         logger: Optional logger object used by the generator.
         unwrapped_inputs: Optional persisted unwrap schema from
             ``local_from_python.unwrapped_inputs``.
+        logical_output_path: Where the component is to be understood to live,
+            for provenance only. Defaults to ``output_path``.
 
     Returns:
         True when regeneration succeeds, otherwise False.
     """
 
+    seam: dict[str, Any] = (
+        {} if logical_output_path is None else {"logical_output_path": logical_output_path}
+    )
     return ComponentGenerator(logger=logger, verbose=verbose).regenerate_yaml(
         python_file=python_file,
         output_path=output_path,
@@ -375,6 +407,7 @@ def regenerate_yaml(
         mode=mode,
         resolve_root=resolve_root,
         unwrapped_inputs=unwrapped_inputs,
+        **seam,
     )
 
 
