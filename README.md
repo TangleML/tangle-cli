@@ -614,6 +614,61 @@ def score(...):
     ...
 ```
 
+Declare the environment in a config file instead with `TaskEnv.from_config(path)`. A relative `path` resolves against the **calling pipeline module**, never the working directory, so the same script selects the same config wherever `tangle` runs from:
+
+```python
+EVAL = TaskEnv.from_config("envs.yaml")  # relative to THIS file
+```
+
+```yaml
+# envs.yaml
+image: python:3.12
+dependencies_from: pyproject.toml  # relative to THIS config file
+```
+
+The file is read with the same loader `--config` uses, so the `_select` directive works here identically — the case is chosen exactly and case-sensitively by an environment variable, and an unset or unmatched variable is a hard error unless an explicit `default` branch is authored (no implicit default, no implicit production):
+
+```yaml
+_select:
+  env: DEPLOY_ENVIRONMENT
+  cases:
+    production:
+      image: registry.example/scoring:prod
+    staging:
+      image: registry.example/scoring:staging
+  default:
+    image: python:3.12
+```
+
+The document must resolve to exactly one object, and its keys must be named parameters of the generated `__init__` of the class `from_config` was called on — `InitVar` pseudo-fields included, `ClassVar`s and `field(init=False)` excluded — so these files stay environment-only: pipeline concerns such as file paths, versioning, annotations, schedules, or subscriptions have no field to land in and are rejected with the allowed field names. `from_config` is generic — any `TaskEnv` dataclass subclass inherits it unchanged, returns its own type, and is validated against its own fields:
+
+```python
+from tangle_cli.python_pipeline import TaskEnv
+
+@dataclass(frozen=True)
+class GpuEnv(TaskEnv):
+    accelerator: str = ""
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.accelerator not in ("gpu", "tpu"):
+            raise ValueError("GpuEnv.accelerator must be one of: gpu, tpu")
+
+GPU = GpuEnv.from_config("envs.yaml")  # accepts image, dependencies_from, accelerator
+```
+
+Failures raise `CompileError` naming the resolved config path. A config file is untrusted input, so **no diagnostic echoes a config value**. Keys are rendered through a capped, control-character-scrubbing renderer, and a constructor's own validation text is never quoted — it could embed a value directly, nested inside a structure, or transformed (lower cased, sliced, re-encoded). The rejected exception is also kept off `__cause__`/`__context__`, since `traceback.format_exception` would otherwise print it into the same CI log. The message names the class and the fields present, and points at constructing the class directly to see the validation error:
+
+```
+GpuEnv.from_config: /repo/envs.yaml case is not a valid GpuEnv (fields present:
+accelerator, image). Its validation message is withheld because it can contain
+config values; construct GpuEnv(...) directly to see it.
+```
+
+Calling `GpuEnv(...)` directly is unaffected and raises the ordinary `ValueError` with its full message.
+
+See `examples/python_pipeline/task_env_from_config/` for a runnable example.
+
 Use `@task(image_id="eval-slim")` when source should carry a logical image name instead of a concrete registry reference. Downstream code can register defaults with `register_image_id(...)`, and callers can override at compile time with repeatable `--image ID=REF`:
 
 ```bash
