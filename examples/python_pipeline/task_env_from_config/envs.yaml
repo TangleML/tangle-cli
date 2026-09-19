@@ -1,0 +1,25 @@
+# Deployment environments for the tasks in ``pipeline.py``.
+#
+# ENVIRONMENT-ONLY on purpose: the keys here are exactly the ``TaskEnv``
+# constructor fields (``image``, ``dependencies_from``). Pipeline concerns —
+# file paths, versioning, annotations, schedules, subscriptions — have no
+# field to land in and are rejected at load time.
+#
+# ``_select`` is the same directive the CLI's ``--config`` understands: the
+# case is chosen by an environment variable, exactly and case sensitively.
+# The explicit ``default`` branch is what makes local runs work; without one,
+# an unset or unmatched ``DEPLOY_ENVIRONMENT`` is a hard error (there is no
+# implicit default and no implicit production).
+_select:
+  env: DEPLOY_ENVIRONMENT
+  cases:
+    production:
+      image: registry.example/scoring:prod
+      # Relative to THIS file, not to the pipeline module and not to the cwd.
+      dependencies_from: pyproject.toml
+    staging:
+      image: registry.example/scoring:staging
+      dependencies_from: pyproject.toml
+  default:
+    image: python:3.12
+    dependencies_from: pyproject.toml

@@ -1,0 +1,5 @@
+# Pip dependencies for the generated components of this example.
+[project]
+name = "task-env-from-config-example"
+version = "0.0.0"
+dependencies = []

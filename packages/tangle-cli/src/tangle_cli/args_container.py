@@ -41,10 +41,17 @@ class ConfigFileError(Exception):
     """Raised when there is an error loading or resolving a config file."""
 
 
-def _render_case_key(key: str) -> str:
-    """Render an already-validated configured case key for diagnostics."""
+def _render_config_key(key: Any) -> str:
+    """Render a config-document key safely for a diagnostic message.
 
-    rendered = "".join(char if char.isprintable() else "?" for char in key)
+    Config keys come from user files, so a diagnostic must never echo them
+    verbatim: non-printable characters are replaced and the result is length
+    capped before being quoted. Accepts non-string keys (YAML permits them) so
+    callers can report a bad key without first proving it is a string.
+    """
+
+    text = key if isinstance(key, str) else str(key)
+    rendered = "".join(char if char.isprintable() else "?" for char in text)
     if len(rendered) > _MAX_RENDERED_CASE_KEY_LENGTH:
         rendered = rendered[: _MAX_RENDERED_CASE_KEY_LENGTH - 3] + "..."
     return repr(rendered)
@@ -172,8 +179,14 @@ class ArgsContainer:
             if seen is not None and depth <= seen[0]:
                 return seen[2]
 
+        # Every key reaching a diagnostic goes through the ONE capped/scrubbed
+        # renderer: these keys are user input, and an unbounded repr() would
+        # let a hostile document paste control characters or a wall of text
+        # into a compile/CI log.
         siblings = sorted(
-            repr(key) for key in node if not (isinstance(key, str) and key.startswith("_"))
+            _render_config_key(key)
+            for key in node
+            if not (isinstance(key, str) and key.startswith("_"))
         )
         if siblings:
             raise ConfigFileError(
@@ -189,7 +202,9 @@ class ArgsContainer:
         selector_dict = cast(dict[Any, Any], selector)
 
         unexpected = sorted(
-            repr(key) for key in selector_dict if key not in ("env", "cases", "default")
+            _render_config_key(key)
+            for key in selector_dict
+            if key not in ("env", "cases", "default")
         )
         if unexpected:
             raise ConfigFileError(
@@ -231,7 +246,7 @@ class ArgsContainer:
             # Every branch document is shape-checked, not just the selected one,
             # so a malformed selector fails identically in every environment.
             ArgsContainer._validate_branch_document(
-                case_value, f"{SELECT_KEY} case {_render_case_key(case_key)}", depth, memo
+                case_value, f"{SELECT_KEY} case {_render_config_key(case_key)}", depth, memo
             )
 
         default_branch: Any = None
@@ -241,7 +256,7 @@ class ArgsContainer:
                 default_branch, f"{SELECT_KEY}.default", depth, memo
             )
 
-        allowed = ", ".join(_render_case_key(key) for key in sorted(cases_dict))
+        allowed = ", ".join(_render_config_key(key) for key in sorted(cases_dict))
         summary: _SelectorSummary = (env_name, cases_dict, default_branch, allowed)
         if memo is not None:
             previous = memo.get(node_id)
