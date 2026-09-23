@@ -253,6 +253,14 @@ class CompileContext:
     root_overrides: dict[str, str] = field(default_factory=dict)
     emit_components_sidecar: bool = True
     image_overrides: dict[str, str] = field(default_factory=dict)
+    # Caller-supplied ROOT ``metadata.annotations`` (already validated),
+    # merged PER KEY over the root ``@pipeline(annotations=...)`` block just
+    # before emit. ROOT ONLY: children never inherit it, so a child sidecar's
+    # bytes — and therefore its component digest — are untouched by it. It is
+    # deliberately absent from :class:`PipelineCompileKey` /
+    # ``overrides_fingerprint`` (as ``image_overrides`` is), so sidecar
+    # filenames stay identity-derived rather than content-derived.
+    pipeline_annotations: dict[str, str] = field(default_factory=dict)
     max_depth: int = 32
     # Compiled CHILD artifacts keyed by compile key (Decision M dedup).
     # The root is NOT stored here; it is returned directly.
