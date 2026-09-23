@@ -511,6 +511,34 @@ def greeting_pipeline(who: In[str], cfg) -> Out[str]:
 
 Task IDs default from the left-hand variable name at the call site, converted to title case. If there is no simple left-hand variable, or if you want a stable explicit label, call `.named("Task Id")` before invoking the task. Use `.bind(...)` to pre-fill task arguments and `.with_annotations({...})` to add per-task annotations.
 
+##### Root pipeline annotations
+
+`@pipeline(annotations={...})` writes the compiled pipeline's root `metadata.annotations` block. A caller that compiles programmatically can supply the block instead — typically from its own per-environment config file, so the values do not have to be hard-coded in source:
+
+```python
+from tangle_cli.pipelines import compile_pipeline_file
+
+compile_pipeline_file(
+    "pipeline.py",
+    "pipeline.yaml",
+    pipeline_annotations={"environment": "staging", "owner": "search-platform"},
+)
+```
+
+The same keyword exists on `tangle_cli.pipeline_compiler.compile_pipeline` and on `PipelineCompiler.compile_file`. There is no CLI flag: the source route already exists, and what the keyword adds is a programmatic/config route for the part of the block that varies by environment.
+
+Semantics:
+
+- **Per-key merge, caller wins.** `@pipeline(annotations={"author": "a", "version": "1.0"})` compiled with `pipeline_annotations={"version": "2.0", "environment": "staging"}` emits all three keys, with `version: "2.0"`. Source keys the caller does not mention are preserved, so invariants stay in source and only the varying subset is passed in.
+- **Omitted or `{}` is a no-op**, byte for byte — an empty mapping is not a destructive clear of the source block.
+- **Root only.** `subpipeline` children never inherit it, so child subgraph sidecar names, bytes, and component digests are unaffected. A child that wants annotations declares its own.
+- **Descriptive only.** Root metadata is not read by the orchestrator, so it cannot influence placement, routing, scheduling, or run identity. Use pipeline-run annotations for anything execution-bearing.
+- **`str -> str`, validated up front.** A non-mapping argument, a non-string key or value, an empty key, a `system/`-prefixed key (reserved by Tangle), or a template delimiter (`{{`, `{%`, `{#`) in a key or value raises `InvalidPipelineAnnotationsError` (a `CompileError`) before anything is imported or written. Annotations usually come from an untrusted config file, so the diagnostics name the key and the type and never echo a value. Values are baked into the compiled YAML and the stored pipeline definition: labels only, never secrets.
+
+The rules live in one place, `tangle_cli.schema_validation`: `check_annotations(mapping, policy=..., error_cls=...)` applied under a named `AnnotationPolicy`. `CALLER_ANNOTATION_POLICY` is the strict input policy described above; `DOCUMENT_ANNOTATION_POLICY` is the lenient policy every pipeline document is validated against (scalar-or-null values, no key rules), matching the schema and hand-authored YAML. Only the caller-supplied input surface is strict: existing documents are accepted exactly as before, and the document check still runs on the merged result, so annotations reaching the output by any route are validated.
+
+A distribution that reads these annotations from its own config file should call `check_annotations(mapping, policy=CALLER_ANNOTATION_POLICY, error_cls=...)` at config-parse time — passing its own error type and adding the config path and key to the message — so one user mistake produces one diagnostic instead of two competing ones. The compiler's own call is then the backstop for anything arriving by another route.
+
 ##### Conditional task execution
 
 Pipeline inputs used as conditions are ordinary `In[str]` values; there is no special conditional input annotation. Pass the value through the reserved task-call metadata keyword `is_enabled=`:

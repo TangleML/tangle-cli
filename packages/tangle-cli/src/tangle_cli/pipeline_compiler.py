@@ -65,14 +65,19 @@ from .python_pipeline.compiler_context import (
     overrides_fingerprint,
 )
 from .python_pipeline.emit import _TASK_URL_PLACEHOLDER, emit_pipeline
-from .python_pipeline.errors import CompileError
+from .python_pipeline.errors import CompileError, InvalidPipelineAnnotationsError
 from .python_pipeline.pipeline import PipelineFn
 from .python_pipeline.ref import CallableRef
 from .python_pipeline.registered import _REGISTERED_URL_PLACEHOLDER
 from .python_pipeline.subpipeline import _SUBPIPELINE_URL_PLACEHOLDER, SubpipelineRef
 from .python_pipeline.trace import trace_pipeline
 from .python_pipeline.types import In
-from .schema_validation import SchemaValidationError, validate_dehydrated_pipeline
+from .schema_validation import (
+    CALLER_ANNOTATION_POLICY,
+    SchemaValidationError,
+    check_annotations,
+    validate_dehydrated_pipeline,
+)
 from .utils import dump_yaml
 
 
@@ -141,6 +146,7 @@ def compile_pipeline(
     pipeline_name: str | None = None,
     emit_components_sidecar: bool = True,
     image_overrides: Mapping[str, str] | None = None,
+    pipeline_annotations: Mapping[str, str] | None = None,
 ) -> CompileResult:
     """Compile ``script`` to a single pipeline YAML at ``output``.
 
@@ -174,6 +180,18 @@ def compile_pipeline(
         image_overrides: Compile-time image-id overrides from ``--image
             ID=REF``. They apply only to ``@task(image_id=...)`` refs that do
             not also set an explicit ``image=``.
+        pipeline_annotations: Caller-supplied ROOT ``metadata.annotations``
+            (``str -> str``), typically read from a downstream config file so
+            the block can vary per environment. Merged PER KEY over the root
+            ``@pipeline(annotations=...)`` block, caller winning on collision;
+            ``None`` / ``{}`` is a no-op that leaves the compiled bytes
+            identical. ROOT ONLY — ``subpipeline`` children do not inherit it,
+            so their sidecar names, bytes, and digests are unaffected. Root
+            metadata is descriptive: it is not read by the orchestrator and
+            cannot influence placement, routing, scheduling, or identity. See
+            :data:`tangle_cli.schema_validation.CALLER_ANNOTATION_POLICY`
+            for the accepted shape; a malformed mapping raises
+            :class:`~tangle_cli.python_pipeline.errors.InvalidPipelineAnnotationsError`.
 
     Returns:
         A :class:`CompileResult`. ``components_path`` is the sidecar path
@@ -186,6 +204,15 @@ def compile_pipeline(
     """
     overrides = dict(overrides or {})
     image_overrides = dict(image_overrides or {})
+    # Validated up front, by the shared validation layer, so a hostile or
+    # malformed annotation mapping fails before any module is imported or any
+    # file is written. The compiler owns no annotation rules of its own; it
+    # only chooses the caller-facing error type.
+    root_annotations = check_annotations(
+        pipeline_annotations,
+        policy=CALLER_ANNOTATION_POLICY,
+        error_cls=InvalidPipelineAnnotationsError,
+    )
 
     # 1. Validate the script path.
     script_path = Path(script).resolve()
@@ -241,6 +268,7 @@ def compile_pipeline(
             emit_components_sidecar=emit_components_sidecar,
             source_dirs=purge_dirs,
             image_overrides=image_overrides,
+            pipeline_annotations=root_annotations,
         )
 
         # 5. Compile the root (and, recursively, all children) into in-memory
@@ -445,6 +473,12 @@ def _compile_pipeline_fn(
     #    output guard must skip for THIS artifact's body.
     with _temp_sys_path(base_dir):
         builder = trace_pipeline(pipeline_fn, cfg=cfg, inputs={})
+    # Caller-supplied root annotations: ROOT ONLY (a child keeps exactly what
+    # its own ``@pipeline`` declared), merged PER KEY with the caller winning
+    # on collision, before emit so they pass the same emit-time guards as
+    # authored ones. ``update`` keeps the emitted order source-first.
+    if is_root and ctx.pipeline_annotations:
+        builder.annotations.update(ctx.pipeline_annotations)
     body_dict, exempt_paths = emit_pipeline(builder)
 
     # 3. The canonical compile key for dedup / cycle detection. A child is
@@ -2785,6 +2819,7 @@ class PipelineCompiler(TangleCliHandler):
         pipeline_name: str | None = None,
         emit_components_sidecar: bool = True,
         image_overrides: Mapping[str, str] | None = None,
+        pipeline_annotations: Mapping[str, str] | None = None,
     ) -> CompileResult:
         """Compile ``script`` to a single dehydrated pipeline YAML at ``output``.
 
@@ -2804,6 +2839,7 @@ class PipelineCompiler(TangleCliHandler):
             pipeline_name=pipeline_name,
             emit_components_sidecar=emit_components_sidecar,
             image_overrides=image_overrides,
+            pipeline_annotations=pipeline_annotations,
         )
         self.log.info(f"wrote {result.pipeline_path}")
         if result.components_path is not None:

@@ -25,6 +25,12 @@ Public surface:
   ``taskOutput.taskId``, undeclared ``graphInput.inputName``,
   ``outputValues`` ↔ ``outputs`` correspondence, scalar metadata
   annotations, pure componentRefs) and the no-template-delimiter scan.
+* :func:`check_annotations` plus :data:`DOCUMENT_ANNOTATION_POLICY` /
+  :data:`CALLER_ANNOTATION_POLICY` — the ONE place that says what a
+  ``metadata.annotations`` mapping may contain. Both the lenient check
+  applied to every pipeline DOCUMENT and the strict check applied to a
+  caller/config-supplied mapping are the same function under different
+  policies, so the two can never drift apart.
 
 Everything here is standalone — it never changes ``PipelineHydrator``
 behavior. ``compile_pipeline`` uses :func:`validate_dehydrated_pipeline`
@@ -34,6 +40,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Collection, Iterator, Mapping
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -193,6 +200,152 @@ def assert_no_template_delimiters(
         "task argument, or wrap a genuine runtime placeholder in "
         "tangle_cli.python_pipeline.raw(...) to mark it intentional."
     )
+
+
+# ---------------------------------------------------------------------------
+# Annotation policy: the one definition of what an annotations mapping may
+# contain, applied at two documented strictness levels.
+
+#: Annotation-key prefix Tangle reserves for its own annotations.
+RESERVED_ANNOTATION_KEY_PREFIX = "system/"
+
+
+@dataclass(frozen=True)
+class AnnotationPolicy:
+    """Which rules :func:`check_annotations` applies, and how it names the
+    mapping in diagnostics (``label``).
+
+    Every flag defaults to off, so a policy opts IN to strictness. With
+    ``require_string_values`` off, values fall back to the legacy
+    scalar-or-null rule rather than being unchecked.
+    """
+
+    label: str
+    require_string_values: bool = False
+    require_string_keys: bool = False
+    require_non_empty_keys: bool = False
+    reject_reserved_key_prefix: bool = False
+    reject_template_delimiters: bool = False
+    reject_non_mapping: bool = False
+
+
+#: Applied to every pipeline document validated by
+#: :func:`validate_dehydrated_pipeline`. Deliberately lenient: hand-authored
+#: and legacy YAML reaches this path, and any flag enabled here would reject
+#: documents that compile and run today.
+DOCUMENT_ANNOTATION_POLICY = AnnotationPolicy(label="metadata.annotations")
+
+#: Applied to a caller/config-supplied root annotations mapping (the
+#: ``pipeline_annotations`` compile argument, and any downstream config reader
+#: that wants to refuse a bad mapping early with its own file/key provenance:
+#: ``check_annotations(mapping, policy=CALLER_ANNOTATION_POLICY,
+#: error_cls=...)``). Strict ``str -> str`` because that input surface is new,
+#: has no legacy, and is usually an untrusted config file — hence also
+#: :func:`check_annotations`'s rule that a diagnostic names the key and the
+#: type or delimiter but never echoes a value. ``None`` / ``{}`` means nothing
+#: supplied and is a no-op, not a clear. ``reject_template_delimiters`` adds no
+#: rule the output lacks — :func:`assert_no_template_delimiters` scans the
+#: compiled output regardless; it moves the failure earlier, onto a message
+#: that names the offending annotation key.
+CALLER_ANNOTATION_POLICY = AnnotationPolicy(
+    label="pipeline_annotations",
+    require_string_values=True,
+    require_string_keys=True,
+    require_non_empty_keys=True,
+    reject_reserved_key_prefix=True,
+    reject_template_delimiters=True,
+    reject_non_mapping=True,
+)
+
+
+def check_annotations(
+    annotations: Any,
+    *,
+    policy: AnnotationPolicy,
+    error_cls: type[Exception] = SchemaValidationError,
+) -> dict[Any, Any]:
+    """Check an annotations mapping against ``policy`` and copy it.
+
+    Annotations are frequently UNTRUSTED input (a config file, a checked-in
+    YAML document), so every diagnostic names the offending KEY and the
+    offending TYPE or delimiter and NEVER echoes a value.
+
+    Args:
+        annotations: The mapping to check. ``None`` means "nothing supplied"
+            and is always accepted.
+        policy: Which rules apply — :data:`DOCUMENT_ANNOTATION_POLICY` or
+            :data:`CALLER_ANNOTATION_POLICY`.
+        error_cls: Exception type to raise, so a caller-input path can raise
+            its own precise type (``InvalidPipelineAnnotationsError``) while
+            the document path keeps raising
+            :class:`SchemaValidationError`. This module deliberately does
+            not import the authoring-layer error hierarchy.
+
+    Returns:
+        A plain ``dict`` copy in the caller's key order (empty for ``None``),
+        so later mutation of the supplied mapping cannot reach the compile.
+        No value is coerced or normalized — this function only accepts or
+        rejects.
+
+    Raises:
+        error_cls: on the first violation found.
+    """
+    if annotations is None:
+        return {}
+    if not isinstance(annotations, Mapping):
+        if not policy.reject_non_mapping:
+            return {}
+        raise error_cls(
+            f"{policy.label} must be a mapping of string keys to string "
+            f"values; got {type(annotations).__name__}."
+        )
+
+    checked: dict[Any, Any] = {}
+    for key, value in annotations.items():
+        if policy.require_string_keys and not isinstance(key, str):
+            raise error_cls(
+                f"{policy.label} keys must be strings; got a key of type "
+                f"{type(key).__name__}."
+            )
+        if policy.require_non_empty_keys and key == "":
+            raise error_cls(f"{policy.label} keys must not be empty.")
+        if policy.require_string_values:
+            # Report the type only — a rejected value may be untrusted.
+            if not isinstance(value, str):
+                raise error_cls(
+                    f"{policy.label} value for key {key!r} must be a string; "
+                    f"got {type(value).__name__}."
+                )
+        # bool is a subclass of int, so it is covered by int.
+        elif not (value is None or isinstance(value, (str, int, float))):
+            raise error_cls(
+                f"{policy.label}[{key!r}] must be a scalar (str/number/bool) "
+                f"or null, got {type(value).__name__!r}."
+            )
+        if policy.reject_reserved_key_prefix and isinstance(key, str):
+            if key.startswith(RESERVED_ANNOTATION_KEY_PREFIX):
+                raise error_cls(
+                    f"{policy.label} key {key!r} uses the reserved "
+                    f"{RESERVED_ANNOTATION_KEY_PREFIX!r} prefix, which Tangle "
+                    "keeps for its own annotations. Choose a different key."
+                )
+        if policy.reject_template_delimiters:
+            # Scanned with the SAME tokens the compiled-output guard uses, so
+            # an input check and the output contract can never disagree.
+            for where, text in ((f"key {key!r}", key), (f"value for key {key!r}", value)):
+                if not isinstance(text, str):
+                    continue
+                delim = next((d for _p, d in iter_template_delimiters(text)), None)
+                if delim is None:
+                    continue
+                raise error_cls(
+                    f"{policy.label} {where} contains the template delimiter "
+                    f"{delim!r}. Annotations are literal metadata written "
+                    "verbatim into the compiled pipeline, which must be fully "
+                    "rendered — resolve the template before passing the value."
+                )
+        checked[key] = value
+    return checked
 
 
 # ---------------------------------------------------------------------------
@@ -411,15 +564,12 @@ def _validate_semantics(data: Mapping[str, Any]) -> None:
     metadata = data.get("metadata")
     if isinstance(metadata, Mapping):
         annotations = metadata.get("annotations")
+        # A non-mapping ``annotations`` is left to JSON-Schema, exactly as
+        # before. Everything a DOCUMENT's annotations may contain is decided
+        # by the shared policy below, so this backstop and the strict
+        # caller-input check can never disagree about a shared rule.
         if isinstance(annotations, Mapping):
-            for key, value in annotations.items():
-                # bool is a subclass of int, so it is covered by int.
-                if not (value is None or isinstance(value, (str, int, float))):
-                    raise SchemaValidationError(
-                        f"metadata.annotations[{key!r}] must be a scalar "
-                        f"(str/number/bool) or null, got "
-                        f"{type(value).__name__!r}."
-                    )
+            check_annotations(annotations, policy=DOCUMENT_ANNOTATION_POLICY)
 
 
 def validate_dehydrated_pipeline(

@@ -27,3 +27,14 @@ class AmbiguousTaskIdError(CompileError):
 
 class InvalidArgumentTypeError(CompileError):
     """Raised on an argument value with no supported emit dispatch."""
+
+
+class InvalidPipelineAnnotationsError(CompileError):
+    """Raised on a malformed caller-supplied ``pipeline_annotations`` mapping.
+
+    A dedicated type because these annotations usually originate in a
+    downstream CONFIG file: a caller that reads such a file can catch this
+    precisely and re-raise with the config path and key attached, without
+    broadly catching :class:`CompileError` and swallowing unrelated compile
+    failures. Messages never echo an annotation value.
+    """

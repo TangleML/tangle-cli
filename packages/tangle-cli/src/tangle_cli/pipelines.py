@@ -259,6 +259,7 @@ def compile_pipeline_file(
     pipeline_name: str | None = None,
     emit_components_sidecar: bool = True,
     image_overrides: Mapping[str, str] | None = None,
+    pipeline_annotations: Mapping[str, str] | None = None,
     logger: Any | None = None,
 ) -> CompileResult:
     """Compile a Python-authored pipeline to a dehydrated YAML bundle.
@@ -271,6 +272,12 @@ def compile_pipeline_file(
     The :class:`~tangle_cli.pipeline_compiler.CompileResult` is returned as-is —
     unlike hydrate, the compiler already exposes its public result type, so there
     is nothing to repackage.
+
+    ``pipeline_annotations`` supplies ROOT ``metadata.annotations`` (``str ->
+    str``) merged per key over the root ``@pipeline(annotations=...)`` block,
+    caller winning on collision; it applies to the root only and is a no-op
+    when omitted or empty. See
+    :func:`~tangle_cli.pipeline_compiler.compile_pipeline`.
     """
 
     from .pipeline_compiler import PipelineCompiler
@@ -286,6 +293,10 @@ def compile_pipeline_file(
             pipeline_name=pipeline_name,
             emit_components_sidecar=emit_components_sidecar,
             image_overrides=dict(image_overrides) if image_overrides else None,
+            # Passed through unconverted: the compiler validates the shape and
+            # takes its own copy, so a malformed mapping fails with the
+            # compiler's value-free CompileError instead of a bare TypeError.
+            pipeline_annotations=pipeline_annotations,
         )
     except (CompileError, SchemaValidationError) as exc:
         raise PipelineValidationError(str(exc)) from exc
