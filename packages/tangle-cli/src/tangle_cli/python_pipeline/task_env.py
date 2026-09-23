@@ -36,9 +36,64 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
+from types import FrameType
 from typing import TypeVar
 
 _TaskEnvT = TypeVar("_TaskEnvT", bound="TaskEnv")
+
+#: A dataclass-generated ``__init__`` is compiled by ``exec``, so its code
+#: object carries this synthetic filename instead of a real module path.
+_GENERATED_CODE_FILENAME = "<string>"
+
+#: Hard bound on the frame walk below. Construction of one object never needs
+#: this many frames; the bound only keeps a pathological stack from being
+#: walked to its root, degrading to the documented working-directory fallback.
+_MAX_CONSTRUCTION_FRAMES = 64
+
+
+def _definition_site_file(instance: object) -> str | None:
+    """``__file__`` of the code that constructed ``instance``, or ``None``.
+
+    The definition site is the first frame *outside* the construction of this
+    object: the frame after the OUTERMOST construction frame, which is
+    normally the dataclass-generated ``__init__``. Because the boundary is
+    found by identity and not by a fixed ``f_back`` count, the answer is the
+    author's file at any dataclass subclass depth — a subclass that overrides
+    ``__post_init__`` and calls ``super()`` adds a frame, and adding frames no
+    longer changes the result. ``None`` means the site has no ``__file__``
+    (``exec``'d or interactive code), which callers treat as "unknown".
+    """
+
+    frames: list[FrameType] = []
+    frame = inspect.currentframe()
+    try:
+        # Skip this helper itself, then collect the stack above it.
+        frame = frame.f_back if frame is not None else None
+        while frame is not None and len(frames) < _MAX_CONSTRUCTION_FRAMES:
+            frames.append(frame)
+            frame = frame.f_back
+    finally:
+        # Break the frame reference cycle this function would otherwise leave.
+        del frame
+
+    try:
+        outermost = -1
+        for index, candidate in enumerate(frames):
+            # A frame constructing THIS object binds it to ``self``: the base
+            # and every subclass ``__post_init__``, plus the generated
+            # ``__init__``. Nothing outside the construction can hold the
+            # object yet, so this is exact rather than a frame count.
+            code = candidate.f_code
+            if candidate.f_locals.get("self") is instance or (
+                code.co_name == "__init__"
+                and code.co_filename == _GENERATED_CODE_FILENAME
+            ):
+                outermost = index
+        site = frames[outermost + 1] if outermost + 1 < len(frames) else None
+        filename = site.f_globals.get("__file__") if site is not None else None
+        return filename if isinstance(filename, str) and filename else None
+    finally:
+        del frames
 
 
 @dataclass(frozen=True)
@@ -49,7 +104,8 @@ class TaskEnv:
         image: Container image for the component. Required.
         dependencies_from: Optional path to a ``pyproject.toml`` (or any file
             the hydrator understands) declaring pip dependencies. A relative
-            path is resolved at the ``TaskEnv`` *definition site*, so a shared
+            path is resolved at the ``TaskEnv`` *definition site* — the file
+            that constructed this env, at any subclass depth — so a shared
             ``_envs.py`` resolves intuitively; pass an absolute ``Path`` to
             avoid that. When omitted, the hydrator's existing dependency
             discovery still applies.
@@ -66,16 +122,11 @@ class TaskEnv:
 
         p = Path(self.dependencies_from)
         if not p.is_absolute():
-            # Frames: __post_init__ -> generated __init__ -> the definition site.
-            frame = inspect.currentframe()
-            caller = (
-                frame.f_back.f_back
-                if frame and frame.f_back and frame.f_back.f_back
-                else None
-            )
-            filename = caller.f_globals.get("__file__") if caller else None
-            caller_dir = Path(filename).resolve().parent if filename else Path.cwd()
-            p = caller_dir / p
+            filename = _definition_site_file(self)
+            # Working directory only as a last resort: the construction site
+            # has no file at all (exec'd or interactive code).
+            anchor = Path(filename).resolve().parent if filename else Path.cwd()
+            p = anchor / p
         # Frozen dataclass: bypass __setattr__ to store the resolved Path.
         object.__setattr__(self, "dependencies_from", p.resolve())
 
