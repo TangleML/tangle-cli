@@ -7,6 +7,12 @@ arguments, and keep explicit CLI values higher precedence than config values.
 Precedence per field is CLI > config > environment (only for fields wrapped
 in :class:`EnvField`) > default. Config values may themselves be read from
 the environment with the ``{_env: NAME}`` value directive.
+
+Scalar fields are typed strictly: a field whose default is a bool/int/float
+(or whose spec names :func:`strict_bool` / :func:`strict_int` /
+:func:`strict_float`) parses a config or environment string into that type
+and rejects anything else, so ``"false"`` can never reach a flag as a truthy
+string.
 """
 
 from __future__ import annotations
@@ -272,6 +278,72 @@ class EnvField:
         spec: Any = self.spec
         if not isinstance(spec, tuple) or not 1 <= len(cast(tuple[Any, ...], spec)) <= 6:
             raise ValueError("EnvField.spec must be an ArgsContainer field-spec tuple")
+
+
+class _ScalarValueError(ConfigFileError):
+    """A strict scalar converter's value-free rejection reason."""
+
+
+#: The only accepted boolean spellings, matched case-insensitively and untrimmed.
+_BOOL_STRINGS = {"true": True, "false": False, "yes": True, "no": False, "1": True, "0": False}
+_INT_PATTERN = re.compile(r"[+-]?[0-9]+")
+_FLOAT_PATTERN = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+
+def strict_bool(value: Any) -> bool:
+    """Field converter: a bool, the integer 0/1, or one of ``true``/``false``,
+    ``yes``/``no``, ``1``/``0`` (case-insensitive). Anything else -- the empty
+    string included -- is rejected without echoing the value."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.isascii() and value.lower() in _BOOL_STRINGS:
+        return _BOOL_STRINGS[value.lower()]
+    raise _ScalarValueError("expected a boolean: true/false, yes/no, or 1/0 (case-insensitive)")
+
+
+def strict_int(value: Any) -> int:
+    """Field converter: an int, or a string of ASCII digits with an optional sign."""
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and _INT_PATTERN.fullmatch(value):
+        return int(value)
+    raise _ScalarValueError("expected an integer")
+
+
+def strict_float(value: Any) -> float:
+    """Field converter: an int/float, or a decimal string (optional exponent).
+
+    ``nan``/``inf`` spellings are rejected.
+    """
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and _FLOAT_PATTERN.fullmatch(value):
+        return float(value)
+    raise _ScalarValueError("expected a number")
+
+
+_STRICT_SCALARS: dict[type, Callable[[Any], Any]] = {
+    bool: strict_bool,
+    int: strict_int,
+    float: strict_float,
+}
+
+
+def _direct_env_sources(entry: dict[str, Any]) -> dict[str, str]:
+    """Map each top-level key whose value is an ``_env`` directive to its variable."""
+
+    sources: dict[str, str] = {}
+    for key, value in entry.items():
+        if isinstance(value, dict) and ENV_KEY in value:
+            name = cast(dict[Any, Any], value)[ENV_KEY]
+            if _is_env_name(name):
+                sources[key] = name
+    return sources
 
 
 class ArgsContainer:
@@ -665,6 +737,21 @@ class ArgsContainer:
     ) -> list[dict[str, Any]]:
         """Load a YAML/JSON config file as a list of config dictionaries.
 
+        See :meth:`_load_config_entries`, which this wraps without provenance.
+        """
+
+        return [entry for entry, _ in ArgsContainer._load_config_entries(config_path, logger)]
+
+    @staticmethod
+    def _load_config_entries(
+        config_path: str | Path | None,
+        logger: Logger | None = None,
+    ) -> list[tuple[dict[str, Any], dict[str, str]]]:
+        """Load a YAML/JSON config file as ``(config, env_sources)`` pairs.
+
+        ``env_sources`` maps each top-level key read through an ``_env``
+        directive to its variable name, for diagnostics only.
+
         Supported shapes are a single object, a list of objects, or an object
         with ``_defaults`` and ``configs`` where defaults are applied to each
         config entry. Other top-level keys are ignored, which lets YAML files
@@ -681,7 +768,7 @@ class ArgsContainer:
 
         log = logger or get_default_logger()
         if config_path is None:
-            return [{}]
+            return [({}, {})]
 
         path = Path(config_path)
         if not path.exists():
@@ -692,7 +779,7 @@ class ArgsContainer:
                 if path.suffix in (".yaml", ".yml"):
                     parsed = yaml.safe_load(f)
                     if parsed is None:
-                        return [{}]
+                        return [({}, {})]
                 else:
                     parsed = json.load(f)
         except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
@@ -700,7 +787,11 @@ class ArgsContainer:
 
         resolution = resolve_config_document(parsed, path)
         parsed = resolution.document
-        resolve_entry = resolution.resolve_entry
+
+        def resolve_entry(
+            entry: dict[str, Any], entry_path: _ConfigPath
+        ) -> tuple[dict[str, Any], dict[str, str]]:
+            return resolution.resolve_entry(entry, entry_path), _direct_env_sources(entry)
 
         if isinstance(parsed, dict):
             parsed_dict = cast(dict[str, Any], parsed)
@@ -721,15 +812,26 @@ class ArgsContainer:
                             "configs entry "
                             f"{index} must be an object, got {type(item).__name__}"
                         )
-                defaults = resolve_entry(cast(dict[str, Any], defaults), ("_defaults",))
-                configs_list = [
+                defaults, defaults_sources = resolve_entry(
+                    cast(dict[str, Any], defaults), ("_defaults",)
+                )
+                entries = [
                     resolve_entry(item, ("configs", index))
                     for index, item in enumerate(cast(list[dict[str, Any]], configs_list))
                 ]
-                merged = apply_defaults(configs_list, defaults)
+                merged = apply_defaults([entry for entry, _ in entries], defaults)
                 assert isinstance(merged, list)
                 log.info(f"Loaded config: {path} ({len(merged)} configs with defaults)")
-                return merged
+                return [
+                    (
+                        merged_entry,
+                        {
+                            **{k: v for k, v in defaults_sources.items() if k not in entry},
+                            **sources,
+                        },
+                    )
+                    for merged_entry, (entry, sources) in zip(merged, entries, strict=True)
+                ]
             log.info(f"Loaded config: {path} (1 config)")
             return [resolve_entry(parsed_dict, ())]
 
@@ -796,7 +898,12 @@ class ArgsContainer:
         return convert
 
     @staticmethod
-    def _resolve(config: dict[str, Any], **kwargs: Any) -> ArgsContainer:
+    def _resolve(
+        config: dict[str, Any],
+        env_sources: dict[str, str] | None = None,
+        /,
+        **kwargs: Any,
+    ) -> ArgsContainer:
         """Resolve CLI args against a single config dict.
 
         Field specs can be:
@@ -811,6 +918,13 @@ class ArgsContainer:
         Precedence: an explicit CLI value (one differing from the spec
         default), then the config key, then the ``EnvField`` variable, then
         the CLI/default value.
+
+        Without a converter, a bool/int/float default types the field: config
+        and environment values go through :func:`strict_bool` /
+        :func:`strict_int` / :func:`strict_float` (CLI values are already
+        typed by the parser). A rejection names the field and its source --
+        config key or variable -- never the value. *env_sources* maps config
+        keys read through ``_env`` to their variables, for those messages.
         """
 
         resolved: dict[str, Any] = {}
@@ -853,8 +967,12 @@ class ArgsContainer:
                 if required:
                     required_fields.append(param_name)
 
+            inferred_scalar = False
             if converter is None and isinstance(default_value, Enum):
                 converter = ArgsContainer._make_enum_converter(param_name, type(default_value))
+            elif converter is None and type(default_value) in _STRICT_SCALARS:
+                converter = _STRICT_SCALARS[type(default_value)]
+                inferred_scalar = True
 
             if cli_value is not None and cli_value != default_value:
                 value, origin = cli_value, "cli"
@@ -865,18 +983,26 @@ class ArgsContainer:
             else:
                 value, origin = cli_value, "default"
 
-            if converter and value is not None:
-                if env_name is not None and origin == f"env:{env_name}":
-                    try:
-                        value = converter(value)
-                    except (ConfigFileError, ValueError, TypeError):
-                        # A converter message may quote the raw value.
-                        raise ConfigFileError(
-                            f"Invalid value for {param_name} from environment "
-                            f"variable {env_name}"
-                        ) from None
-                else:
+            # An inferred type only parses config/env values; CLI values are typed.
+            if converter and value is not None and not (inferred_scalar and origin in ("cli", "default")):
+                from_env_tier = env_name is not None and origin == f"env:{env_name}"
+                try:
                     value = converter(value)
+                except _ScalarValueError as exc:
+                    source = ArgsContainer._describe_source(
+                        origin, config_key, env_name, env_sources or {}
+                    )
+                    raise ConfigFileError(
+                        f"Invalid value for {param_name} from {source}: {exc}"
+                    ) from None
+                except (ConfigFileError, ValueError, TypeError):
+                    if not from_env_tier:
+                        raise
+                    # A converter message may quote the raw value.
+                    raise ConfigFileError(
+                        f"Invalid value for {param_name} from environment "
+                        f"variable {env_name}"
+                    ) from None
             resolved[param_name] = value
             origins[param_name] = origin
 
@@ -894,6 +1020,24 @@ class ArgsContainer:
         return ArgsContainer(resolved, config, origins)
 
     @staticmethod
+    def _describe_source(
+        origin: str, config_key: Any, env_name: str | None, env_sources: dict[str, str]
+    ) -> str:
+        """Name where a rejected value came from, without the value."""
+
+        if origin == "config":
+            key = _render_config_key(config_key)
+            if config_key in env_sources:
+                return (
+                    f"environment variable {env_sources[config_key]} "
+                    f"({ENV_KEY} at config key {key})"
+                )
+            return f"config key {key}"
+        if env_name is not None and origin == f"env:{env_name}":
+            return f"environment variable {env_name}"
+        return "the CLI argument" if origin == "cli" else "the default"
+
+    @staticmethod
     def load(
         config_path: str | Path | None,
         logger: Logger | None = None,
@@ -901,8 +1045,8 @@ class ArgsContainer:
     ) -> list[ArgsContainer]:
         """Load a config file and resolve CLI args against each config entry."""
 
-        configs = ArgsContainer._load_config_file(config_path, logger=logger)
-        return [ArgsContainer._resolve(config, **kwargs) for config in configs]
+        entries = ArgsContainer._load_config_entries(config_path, logger=logger)
+        return [ArgsContainer._resolve(config, sources, **kwargs) for config, sources in entries]
 
 
 @dataclass(frozen=True)
@@ -969,4 +1113,7 @@ __all__ = [
     "EnvField",
     "ResolvedConfigDocument",
     "resolve_config_document",
+    "strict_bool",
+    "strict_float",
+    "strict_int",
 ]

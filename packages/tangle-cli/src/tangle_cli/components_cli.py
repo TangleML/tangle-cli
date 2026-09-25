@@ -4,6 +4,7 @@ from typing import Annotated, Any
 
 from cyclopts import App, Parameter
 
+from .args_container import strict_bool
 from .cli_helpers import load_args_or_exit, optional_path
 from .cli_options import ConfigOption, LogTypeOption
 from .logger import logger_for_log_type
@@ -115,8 +116,8 @@ def _components_generate_from_python_impl(
         function_name=("function", function_name, None, False),
         image=(image, None),
         dependencies_from=(dependencies_from, None, optional_path),
-        strip_code=(strip_code, None),
-        use_legacy_naming=(use_legacy_naming, None),
+        strip_code=(strip_code, None, strict_bool),
+        use_legacy_naming=(use_legacy_naming, None, strict_bool),
         mode=(mode, None),
         resolve_root=(resolve_root, None, optional_path),
         log_type=(log_type, "console"),
@@ -246,7 +247,7 @@ def components_bump_version(
         config,
         yaml_file=("yaml_file", yaml_file, None, False, True, optional_path),
         set_version=(set_version, None),
-        update_timestamp=(update_timestamp, None),
+        update_timestamp=(update_timestamp, None, strict_bool),
         log_type=(log_type, "console"),
     )
     result: dict[str, Any] = {}
