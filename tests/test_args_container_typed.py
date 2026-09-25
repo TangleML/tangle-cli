@@ -141,7 +141,6 @@ def test_bool_field_accepts_documented_spellings_from_env(monkeypatch, text, exp
     [args] = ArgsContainer.load(None, flag=EnvField("FLAG", (False, False)))
 
     assert args.flag is expected
-    assert args.origin("flag") == "env:FLAG"
 
 
 @pytest.mark.parametrize("text", ["", "maybe", "on", "off", "t", "2", " yes", "tru\u0435", SECRET])
@@ -196,7 +195,7 @@ def test_explicit_strict_bool_accepts_cli_bools(tmp_path) -> None:
     [args] = ArgsContainer.load(None, dry_run=(True, None, strict_bool))
 
     assert args.dry_run is True
-    assert args.origin("dry_run") == "cli"
+    assert args.config_source("dry_run") is None  # came from the CLI, not a file
 
 
 # --- int / float fields ----------------------------------------------------------------------
@@ -356,7 +355,7 @@ def test_precedence_matrix_with_typing(tmp_path, monkeypatch, cli, config, env, 
     [args] = ArgsContainer.load(path, flag=EnvField("FLAG", (cli, False)))
 
     assert args.flag is expected
-    assert args.origin("flag") == origin
+    assert args.config_source("flag") == (path.resolve() if origin == "config" else None)
 
 
 def test_defaults_env_source_is_named(tmp_path, monkeypatch) -> None:

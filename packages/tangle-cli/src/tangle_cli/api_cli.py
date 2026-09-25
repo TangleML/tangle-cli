@@ -23,7 +23,7 @@ import httpx
 import platformdirs
 from cyclopts import App, Parameter
 
-from .args_container import ArgsContainer, ConfigFileError
+from .args_container import ArgsContainer, ConfigFileError, load_config
 from .api_schema import (
     SUPPORTED_METHODS,
     CliParameter,
@@ -755,17 +755,34 @@ def _auth_header_from_argv(argv: list[str], *, include_env_credentials: bool = T
     return auth_header
 
 
+def _api_command_identity(api_tail: list[str]) -> str:
+    """``tangle api <group> <operation>`` from the tokens after ``api``.
+
+    Best effort for the pre-dispatch schema bootstrap: the leading non-option
+    tokens, at most two (a group and its operation). Dispatch itself uses the
+    identity Cyclopts resolves.
+    """
+
+    names: list[str] = []
+    for token in api_tail:
+        if token.startswith("-") or len(names) == 2:
+            break
+        names.append(token)
+    return " ".join(("tangle", "api", *names))
+
+
 def _config_value_from_argv(argv: list[str], key: str) -> Any:
     config_path = _option_from_argv(argv, "--config")
-    if config_path is None:
-        return None
     try:
-        configs = ArgsContainer._load_config_file(config_path)
+        # Layered over this command's TANGLE_ROOT_CONFIG entry, so the pre-parse sees
+        # what the command will. The dynamic command tree does not exist yet,
+        # so its identity comes from the leading command tokens.
+        configs = load_config(config_path, command=_api_command_identity(argv))
     except ConfigFileError as exc:
         raise SystemExit(f"Config error: {exc}") from exc
     if not configs:
         return None
-    return configs[0].get(key)
+    return configs[0].values.get(key)
 
 
 def _optional_str(value: Any) -> str | None:

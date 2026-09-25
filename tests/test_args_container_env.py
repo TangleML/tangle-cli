@@ -368,14 +368,35 @@ def test_env_field_conversion_error_does_not_echo_value(monkeypatch) -> None:
     assert SECRET not in "".join(traceback.format_exception(excinfo.value))
 
 
-def test_origin_reports_env_name_not_value(monkeypatch) -> None:
+def test_env_tier_value_appears_only_as_its_field_value(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TOKEN", SECRET)
+    config = _write(tmp_path, "other: 1\n")
 
-    [args] = ArgsContainer.load(None, token=EnvField("TOKEN", (None, None)))
+    [args] = ArgsContainer.load(config, token=EnvField("TOKEN", (None, None)), other=(None, None))
 
-    assert args.token == SECRET
-    assert args.origin("token") == "env:TOKEN"
-    assert "_origins" not in args.to_dict()
+    assert args.to_dict() == {"token": SECRET, "other": 1}
+    bookkeeping = {k: v for k, v in vars(args).items() if k not in args.to_dict()}
+    assert set(bookkeeping) == set(ArgsContainer._PRIVATE_ATTRS)
+    assert SECRET not in repr(bookkeeping)
+    assert SECRET not in repr(args)
+    assert args.config_source("token") is None
+
+
+def test_env_directive_value_stays_out_of_provenance(tmp_path, monkeypatch) -> None:
+    from tangle_cli.args_container import load_config
+
+    monkeypatch.setenv("TOKEN", SECRET)
+    config = _write(tmp_path, "token: {_env: TOKEN}\nother: 1\n")
+
+    [entry] = load_config(config)
+    [args] = ArgsContainer.load(config, token=(None, None))
+
+    # The resolved value is config data; provenance names only files and variables.
+    assert entry.values["token"] == SECRET and args.token == SECRET
+    assert entry.env_sources == {"token": "TOKEN"}
+    assert SECRET not in repr(entry.sources) + repr(entry.env_sources)
+    assert SECRET not in repr(args._config_sources) + repr(args._field_config_keys)
+    assert args.config_source("token") == config.resolve()
 
 
 # --- EnvField tier ---------------------------------------------------------------------------
@@ -406,7 +427,8 @@ def test_env_field_precedence_matrix(
     )
 
     assert args.token == expected
-    assert args.origin("token") == origin
+    expected_source = config_path.resolve() if origin == "config" else None
+    assert args.config_source("token") == expected_source
 
 
 def test_config_env_directive_beats_env_field_tier(tmp_path, monkeypatch) -> None:
@@ -417,7 +439,7 @@ def test_config_env_directive_beats_env_field_tier(tmp_path, monkeypatch) -> Non
     [args] = ArgsContainer.load(config, token=EnvField("OTHER", (None, None)))
 
     assert args.token == "from-directive"
-    assert args.origin("token") == "config"
+    assert args.config_source("token") == config.resolve()
 
 
 def test_env_field_empty_string_counts_as_set(monkeypatch) -> None:
@@ -426,7 +448,7 @@ def test_env_field_empty_string_counts_as_set(monkeypatch) -> None:
     [args] = ArgsContainer.load(None, token=EnvField("TOKEN", ("dflt", "dflt")))
 
     assert args.token == ""
-    assert args.origin("token") == "env:TOKEN"
+    assert args.config_source("token") is None
 
 
 def test_env_field_satisfies_required_and_names_var_when_missing(monkeypatch) -> None:
@@ -528,16 +550,13 @@ def test_plain_specs_never_read_same_named_env(tmp_path, monkeypatch) -> None:
     [args] = ArgsContainer.load(_write(tmp_path, "other: 1\n"), token=(None, None))
 
     assert args.token is None
-    assert args.origin("token") == "default"
 
 
-def test_plain_specs_origins(tmp_path) -> None:
+def test_plain_specs_values(tmp_path) -> None:
     [args] = ArgsContainer.load(
         _write(tmp_path, "b: config\n"), a=("cli", None), b=(None, None), c=(None, None)
     )
 
-    assert (args.origin("a"), args.origin("b"), args.origin("c")) == ("cli", "config", "default")
-    assert args.origin("unknown") is None
     assert args.to_dict() == {"a": "cli", "b": "config", "c": None}
 
 

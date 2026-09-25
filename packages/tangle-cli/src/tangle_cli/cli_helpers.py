@@ -4,16 +4,44 @@ from __future__ import annotations
 
 import json
 import pathlib
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
-from .args_container import ArgsContainer, ConfigFileError
+from .args_container import ArgsContainer, ConfigFileError, load_config
+
+# Internal plumbing only: the dispatcher records the resolved command path here
+# and the helpers below hand it to ArgsContainer explicitly as ``command=``.
+_DISPATCHED_COMMAND: ContextVar[str | None] = ContextVar("tangle_dispatched_command", default=None)
+
+
+@contextmanager
+def dispatching(command: str | None) -> Iterator[None]:
+    """Record the command the CLI dispatcher resolved for the duration of a run."""
+
+    token = _DISPATCHED_COMMAND.set(command)
+    try:
+        yield
+    finally:
+        _DISPATCHED_COMMAND.reset(token)
+
+
+def dispatched_command() -> str | None:
+    """The command path recorded by :func:`dispatching`, if any."""
+
+    return _DISPATCHED_COMMAND.get()
 
 
 def load_args_or_exit(config: str | None, **kwargs: Any) -> list[ArgsContainer]:
-    """Load ArgsContainer values from CLI/config specs, exiting with CLI errors."""
+    """Load ArgsContainer values from CLI/config specs, exiting with CLI errors.
+
+    Passes the dispatched command path to ``ArgsContainer.load(command=...)``
+    so the command's ``TANGLE_ROOT_CONFIG`` entry applies.
+    """
 
     try:
-        return ArgsContainer.load(config, **kwargs)
+        return ArgsContainer.load(config, command=dispatched_command(), **kwargs)
     except ConfigFileError as exc:
         raise SystemExit(f"Config error: {exc}") from exc
 
@@ -25,15 +53,16 @@ def print_json(payload: object) -> None:
 
 
 def load_config_or_exit(config: str | None) -> dict[str, object]:
-    """Load the first YAML/JSON config mapping for commands with custom merging."""
+    """Load the first YAML/JSON config mapping for commands with custom merging.
 
-    if config is None:
-        return {}
+    Layered over ``TANGLE_ROOT_CONFIG`` like every ``--config`` (see ``load_config``).
+    """
+
     try:
-        configs = ArgsContainer._load_config_file(config)
+        configs = load_config(config, command=dispatched_command())
     except ConfigFileError as exc:
         raise SystemExit(f"Config error: {exc}") from exc
-    return configs[0] if configs else {}
+    return configs[0].values if configs else {}
 
 
 def optional_path(value: str | pathlib.Path | object | None) -> pathlib.Path | None:

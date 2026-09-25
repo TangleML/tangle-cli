@@ -95,3 +95,10 @@ def downstream_authoring_surface():
             sys.modules.pop(DOWNSTREAM_AUTHORING_MODULE, None)
         if not had_parent:
             sys.modules.pop(parent_name, None)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_root_config(monkeypatch):
+    """Keep a developer's ``TANGLE_ROOT_CONFIG`` from layering into test configs."""
+
+    monkeypatch.delenv("TANGLE_ROOT_CONFIG", raising=False)

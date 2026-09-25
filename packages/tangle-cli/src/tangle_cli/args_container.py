@@ -8,6 +8,11 @@ Precedence per field is CLI > config > environment (only for fields wrapped
 in :class:`EnvField`) > default. Config values may themselves be read from
 the environment with the ``{_env: NAME}`` value directive.
 
+``TANGLE_ROOT_CONFIG`` may name a per-command root config: the entry for the
+command passed as ``command=`` deep-merges beneath that command's ``--config``,
+so precedence is CLI > ``--config`` > ``TANGLE_ROOT_CONFIG`` > environment >
+default (see :func:`load_config`).
+
 Scalar fields are typed strictly: a field whose default is a bool/int/float
 (or whose spec names :func:`strict_bool` / :func:`strict_int` /
 :func:`strict_float`) parses a config or environment string into that type
@@ -21,8 +26,9 @@ import datetime
 import json
 import os
 import re
-from collections.abc import Callable
-from dataclasses import dataclass
+import difflib
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
@@ -43,6 +49,15 @@ ENV_KEY = "_env"
 _ENV_DIRECTIVE_KEYS = (ENV_KEY, "default")
 # Bounds recursion while rewriting a document that actually uses ``_env``.
 _MAX_ENV_VALUE_DEPTH = 256
+
+#: Environment variable naming the per-command root config file.
+ROOT_CONFIG_ENV = "TANGLE_ROOT_CONFIG"
+#: The one required top-level key of a TANGLE_ROOT_CONFIG document.
+ROOT_COMMANDS_KEY = "commands"
+#: Alternate command-path prefixes normalized to their canonical form.
+COMMAND_ALIASES: Mapping[str, str] = {"tangle-cli": "tangle"}
+# Bounds recursion while deep-merging TANGLE_ROOT_CONFIG beneath a command config.
+_MAX_MERGE_DEPTH = 256
 _MAX_RENDERED_PATH_LENGTH = 160
 
 # Guards against recursive YAML aliases producing an endless selector chain.
@@ -349,14 +364,19 @@ def _direct_env_sources(entry: dict[str, Any]) -> dict[str, str]:
 class ArgsContainer:
     """Container for resolved CLI arguments with config-file defaults."""
 
+    #: Instance attributes that are bookkeeping, not resolved fields.
+    _PRIVATE_ATTRS = ("_config", "_config_sources", "_field_config_keys")
+
     def __init__(
         self,
         resolved: dict[str, Any],
         raw_config: dict[str, Any],
-        origins: dict[str, str] | None = None,
+        config_sources: dict[Any, Path] | None = None,
+        field_config_keys: dict[str, Any] | None = None,
     ):
         self._config = raw_config
-        self._origins = dict(origins or {})
+        self._config_sources = dict(config_sources or {})
+        self._field_config_keys = dict(field_config_keys or {})
         for key, value in resolved.items():
             setattr(self, key, value)
 
@@ -378,18 +398,22 @@ class ArgsContainer:
         return {
             key: value
             for key, value in vars(self).items()
-            if key not in ("_config", "_origins")
+            if key not in ArgsContainer._PRIVATE_ATTRS
         }
 
-    def origin(self, name: str) -> str | None:
-        """Return where field *name* was resolved from, never its value.
+    def config_source(self, name: str) -> Path | None:
+        """Return the config file that supplied field *name*, else ``None``.
 
-        One of ``"cli"``, ``"config"``, ``"env:NAME"`` (the :class:`EnvField`
-        tier), or ``"default"``; ``None`` for an unknown field. A config value
-        read through an ``_env`` directive reports ``"config"``.
+        For resolving a relative path value against the directory of the file
+        it was written in: a value inherited from ``TANGLE_ROOT_CONFIG`` names the
+        root file, a value from ``--config`` names that file. ``None`` when
+        the value came from the CLI, the environment tier, or the default.
+        Granularity is the top-level config key.
         """
 
-        return self._origins.get(name)
+        if name not in self._field_config_keys:
+            return None
+        return self._config_sources.get(self._field_config_keys[name])
 
     @staticmethod
     def _validate_branch_document(
@@ -743,6 +767,18 @@ class ArgsContainer:
         return [entry for entry, _ in ArgsContainer._load_config_entries(config_path, logger)]
 
     @staticmethod
+    def _parse_config_file(path: Path) -> Any:
+        """Parse one YAML (``.yaml``/``.yml``) or JSON file; ``None`` for empty YAML."""
+
+        try:
+            with path.open(encoding="utf-8") as f:
+                if path.suffix in (".yaml", ".yml"):
+                    return yaml.safe_load(f)
+                return json.load(f)
+        except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
+            raise ConfigFileError(f"Error loading config file: {exc}") from exc
+
+    @staticmethod
     def _load_config_entries(
         config_path: str | Path | None,
         logger: Logger | None = None,
@@ -764,6 +800,9 @@ class ArgsContainer:
         then replaced by the variable's string value. Every directive is shape
         checked first, but only those in the selected document's config
         entries (and ``_defaults``) are looked up.
+
+        This loader reads exactly one file and never consults ``TANGLE_ROOT_CONFIG``;
+        see :func:`load_config` for that.
         """
 
         log = logger or get_default_logger()
@@ -774,16 +813,9 @@ class ArgsContainer:
         if not path.exists():
             raise ConfigFileError(f"Config file not found: {config_path}")
 
-        try:
-            with path.open(encoding="utf-8") as f:
-                if path.suffix in (".yaml", ".yml"):
-                    parsed = yaml.safe_load(f)
-                    if parsed is None:
-                        return [({}, {})]
-                else:
-                    parsed = json.load(f)
-        except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
-            raise ConfigFileError(f"Error loading config file: {exc}") from exc
+        parsed = ArgsContainer._parse_config_file(path)
+        if parsed is None:
+            return [({}, {})]
 
         resolution = resolve_config_document(parsed, path)
         parsed = resolution.document
@@ -901,6 +933,7 @@ class ArgsContainer:
     def _resolve(
         config: dict[str, Any],
         env_sources: dict[str, str] | None = None,
+        loaded: LoadedConfig | None = None,
         /,
         **kwargs: Any,
     ) -> ArgsContainer:
@@ -928,7 +961,7 @@ class ArgsContainer:
         """
 
         resolved: dict[str, Any] = {}
-        origins: dict[str, str] = {}
+        field_config_keys: dict[str, Any] = {}
         required_fields: list[str] = []
         env_names: dict[str, str] = {}
 
@@ -1004,7 +1037,8 @@ class ArgsContainer:
                         f"variable {env_name}"
                     ) from None
             resolved[param_name] = value
-            origins[param_name] = origin
+            if origin == "config":
+                field_config_keys[param_name] = config_key
 
         for field_name in required_fields:
             if resolved.get(field_name) is None:
@@ -1017,7 +1051,14 @@ class ArgsContainer:
                     f"{field_name} is required (via CLI argument or config file)"
                 )
 
-        return ArgsContainer(resolved, config, origins)
+        if loaded is None:
+            return ArgsContainer(resolved, config, field_config_keys=field_config_keys)
+        return ArgsContainer(
+            resolved,
+            config,
+            config_sources=loaded.sources,
+            field_config_keys=field_config_keys,
+        )
 
     @staticmethod
     def _describe_source(
@@ -1041,12 +1082,267 @@ class ArgsContainer:
     def load(
         config_path: str | Path | None,
         logger: Logger | None = None,
+        *,
+        command: str | None = None,
         **kwargs: Any,
     ) -> list[ArgsContainer]:
-        """Load a config file and resolve CLI args against each config entry."""
+        """Load a config file and resolve CLI args against each config entry.
 
-        entries = ArgsContainer._load_config_entries(config_path, logger=logger)
-        return [ArgsContainer._resolve(config, sources, **kwargs) for config, sources in entries]
+        *command* is the running command's full path (e.g. ``"tangle sdk
+        secrets delete"``); its ``TANGLE_ROOT_CONFIG`` entry, if any, is layered
+        beneath the config (see :func:`load_config`). Without it the root
+        config is ignored.
+        """
+
+        return [
+            ArgsContainer._resolve(entry.values, entry.env_sources, entry, **kwargs)
+            for entry in load_config(config_path, logger, command=command)
+        ]
+
+
+@dataclass(frozen=True)
+class LoadedConfig:
+    """One resolved config entry, layered over ``TANGLE_ROOT_CONFIG``.
+
+    ``values`` is the merged mapping a command sees. ``sources`` maps each
+    top-level key to the file that supplied it (``--config`` for any key it
+    defines, else the ``TANGLE_ROOT_CONFIG`` file), for resolving relative paths
+    against the right directory.
+    """
+
+    values: dict[str, Any]
+    sources: dict[Any, Path] = field(default_factory=lambda: {})
+    env_sources: dict[str, str] = field(default_factory=lambda: {}, repr=False)
+
+
+def _deep_merge(
+    base: dict[Any, Any], override: dict[Any, Any], path: _ConfigPath = ()
+) -> dict[Any, Any]:
+    """Merge *override* over *base*: mappings merge key by key; lists and
+    scalars replace wholesale. A ``null`` mapping value in *override* means
+    "absent": it removes a key *base* provides and is dropped otherwise."""
+
+    if len(path) > _MAX_MERGE_DEPTH:
+        raise ConfigFileError(
+            f"config nesting exceeds {_MAX_MERGE_DEPTH} levels while merging over {ROOT_CONFIG_ENV}"
+        )
+    merged = dict(base)
+    for key, value in override.items():
+        if value is None:
+            merged.pop(key, None)
+            continue
+        current = merged.get(key)
+        if key in merged and isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(
+                cast(dict[Any, Any], current), cast(dict[Any, Any], value), (*path, key)
+            )
+        elif isinstance(value, dict):
+            # A mapping the root does not have: still drop its null leaves.
+            merged[key] = _deep_merge({}, cast(dict[Any, Any], value), (*path, key))
+        else:
+            merged[key] = value
+    return merged
+
+
+def _reject_nulls(document: Any) -> None:
+    """Reject any ``null`` value in a TANGLE_ROOT_CONFIG document, naming its key path."""
+
+    seen: set[int] = set()
+    stack: list[tuple[Any, _ConfigPath]] = [(document, ())]
+    while stack:
+        node, path = stack.pop()
+        if isinstance(node, dict):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            items: list[tuple[Any, Any]] = list(cast(dict[Any, Any], node).items())
+        elif isinstance(node, list):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            items = list(enumerate(cast(list[Any], node)))
+        else:
+            continue
+        for key, value in reversed(items):
+            if value is None:
+                raise ConfigFileError(
+                    f"null is not allowed in {ROOT_CONFIG_ENV} (at {_render_config_path((*path, key))})"
+                )
+            stack.append((value, (*path, key)))
+
+
+def normalize_command(command: str, aliases: Mapping[str, str] | None = None) -> str:
+    """Canonical command identity: the full invocation path, program first.
+
+    Whitespace runs collapse to single spaces, then the longest whole-token
+    prefix found in *aliases* (default :data:`COMMAND_ALIASES`, e.g.
+    ``tangle-cli`` -> ``tangle``) is replaced by its canonical path, so an
+    alias or deprecated group/command name maps to the one real path.
+    Matching is otherwise exact and case-sensitive.
+    """
+
+    parts = command.split() if isinstance(command, str) else []
+    if not parts:
+        raise ConfigFileError("a command identity must be a non-empty string")
+    table = {
+        " ".join(k.split()): " ".join(v.split())
+        for k, v in (COMMAND_ALIASES if aliases is None else aliases).items()
+    }
+    # Rewrite to a fixed point (a renamed program and a renamed group can both
+    # apply); bounded so a cyclic alias table cannot loop.
+    for _ in range(len(table) + 1):
+        for length in range(len(parts), 0, -1):
+            prefix = " ".join(parts[:length])
+            if prefix in table and table[prefix] != prefix:
+                parts = [*table[prefix].split(), *parts[length:]]
+                break
+        else:
+            break
+    return " ".join(parts)
+
+
+def _root_config_entry(command: str, logger: Logger | None) -> LoadedConfig | None:
+    """Load the running *command*'s ``TANGLE_ROOT_CONFIG`` entry, or ``None``.
+
+    ``None`` when ``TANGLE_ROOT_CONFIG`` is unset/empty or has no entry for
+    *command*. A set variable naming a missing, unreadable, or malformed file
+    fails closed; diagnostics name the variable, the path, and command keys,
+    never a config value.
+    """
+
+    raw = os.environ.get(ROOT_CONFIG_ENV)
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.exists():
+        raise ConfigFileError(f"{ROOT_CONFIG_ENV} names a config file that does not exist: {path}")
+    if not path.is_file():
+        raise ConfigFileError(f"{ROOT_CONFIG_ENV} must name a config file: {path}")
+    try:
+        return _select_root_entry(path, command, logger or get_default_logger())
+    except ConfigFileError as exc:
+        raise ConfigFileError(f"{ROOT_CONFIG_ENV} ({path}): {exc}") from exc
+
+
+def _select_root_entry(path: Path, command: str, log: Logger) -> LoadedConfig | None:
+    parsed = ArgsContainer._parse_config_file(path)
+    _reject_nulls(parsed)
+    # A document-level _select picks among whole `commands` documents first;
+    # every _env in the file (dormant commands included) is shape-checked here
+    # but none is read.
+    document = resolve_config_document(parsed, path, mapping_only=True).document
+    if not isinstance(document, dict) or ROOT_COMMANDS_KEY not in document:
+        raise ConfigFileError(
+            f"must be a mapping with a top-level '{ROOT_COMMANDS_KEY}' selector "
+            "keyed by command, e.g. 'tangle sdk pipeline-runs submit'"
+        )
+    document_dict = cast(dict[Any, Any], document)
+    extra = sorted(
+        _render_config_key(key)
+        for key in document_dict
+        if key != ROOT_COMMANDS_KEY and not (isinstance(key, str) and key.startswith("_"))
+    )
+    if extra:
+        raise ConfigFileError(
+            f"only '{ROOT_COMMANDS_KEY}' and underscore-prefixed helper keys may appear at "
+            f"the top level, got: {', '.join(extra)}"
+        )
+    commands = document_dict[ROOT_COMMANDS_KEY]
+    if not isinstance(commands, dict) or ENV_KEY in commands:
+        raise ConfigFileError(f"'{ROOT_COMMANDS_KEY}' must map command names to config objects")
+
+    table: dict[str, tuple[Any, Any]] = {}
+    for key, entry in cast(dict[Any, Any], commands).items():
+        rendered = _render_config_key(key)
+        if not isinstance(key, str) or not key.split():
+            raise ConfigFileError(
+                f"'{ROOT_COMMANDS_KEY}' keys must be non-empty command names, got {rendered}"
+            )
+        name = normalize_command(key)
+        if name in table:
+            raise ConfigFileError(
+                f"'{ROOT_COMMANDS_KEY}' names command {_render_config_key(name)} more than once"
+            )
+        if not isinstance(entry, dict) or ENV_KEY in entry:
+            raise ConfigFileError(
+                f"'{ROOT_COMMANDS_KEY}' entry {rendered} must be a config object"
+            )
+        table[name] = (key, entry)
+
+    if command not in table:
+        close = difflib.get_close_matches(command, list(table), n=1, cutoff=0.85)
+        if close:
+            log.warn(
+                f"{ROOT_CONFIG_ENV} ({path}) has no entry for {_render_config_key(command)}; "
+                f"did you mean {_render_config_key(close[0])}? No root config applied."
+            )
+        return None
+
+    key, entry = table[command]
+    # Then the entry's own _select (if any) and its _env lookups -- only here.
+    resolution = resolve_config_document(entry, path, mapping_only=True)
+    selected = cast(dict[str, Any], resolution.document)
+    values = resolution.resolve_entry(selected, (ROOT_COMMANDS_KEY, key))
+    source = path.resolve()
+    return LoadedConfig(values, {k: source for k in values}, _direct_env_sources(selected))
+
+
+def load_config(
+    config_path: str | Path | None,
+    logger: Logger | None = None,
+    *,
+    command: str | None = None,
+) -> list[LoadedConfig]:
+    """Load ``--config`` entries layered over the command's ``TANGLE_ROOT_CONFIG`` entry.
+
+    The one loader for commands that take ``--config``; ``ArgsContainer.load``
+    uses it, and callers reading config values directly should too.
+    *command* is the running command's full path (see :func:`normalize_command`),
+    passed explicitly by the CLI layer. With no *command* (e.g. a library
+    call), or no ``TANGLE_ROOT_CONFIG`` entry for it, this returns exactly the
+    ``--config`` entries and never reads the root file. Otherwise:
+
+    * no ``--config`` -> the root entry is the single entry;
+    * each ``--config`` entry (after that file's own ``_defaults``, which stay
+      a shallow merge) is deep-merged over the root entry: mappings merge key
+      by key and lists and scalars replace. ``null`` is rejected anywhere in
+      the root file. In a ``--config`` layered over a root entry, a ``null``
+      mapping value means "absent" at any depth: it unsets a key the root
+      entry provides and is dropped where the root does not set the key, so
+      resolution falls through to the env tier and default. Without an active
+      root entry, ``--config`` ``null`` keeps its existing meaning.
+
+    Each file resolves its own ``_select`` / ``_env`` before merging.
+    """
+
+    identity = normalize_command(command) if command is not None else None
+    root = _root_config_entry(identity, logger) if identity is not None else None
+    if root is not None and config_path is None:
+        return [root]
+    entries = ArgsContainer._load_config_entries(config_path, logger)
+
+    command_source = Path(config_path).resolve() if config_path is not None else None
+    loaded: list[LoadedConfig] = []
+    for values, env_sources in entries:
+        if root is None:
+            own = {key: command_source for key in values} if command_source is not None else {}
+            loaded.append(LoadedConfig(values, own, env_sources))
+            continue
+        merged = _deep_merge(root.values, values)
+        loaded.append(
+            LoadedConfig(
+                merged,
+                {
+                    key: root.sources[key] if key not in values else cast(Path, command_source)
+                    for key in merged
+                },
+                {
+                    **{k: v for k, v in root.env_sources.items() if k not in values},
+                    **{k: v for k, v in env_sources.items() if k in merged},
+                },
+            )
+        )
+    return loaded
 
 
 @dataclass(frozen=True)
@@ -1106,14 +1402,20 @@ def resolve_config_document(
 
 
 __all__ = [
+    "COMMAND_ALIASES",
     "ENV_KEY",
+    "ROOT_COMMANDS_KEY",
+    "ROOT_CONFIG_ENV",
     "SELECT_KEY",
     "ArgsContainer",
     "ConfigFileError",
     "EnvField",
+    "LoadedConfig",
     "ResolvedConfigDocument",
     "resolve_config_document",
     "strict_bool",
     "strict_float",
     "strict_int",
+    "load_config",
+    "normalize_command",
 ]
