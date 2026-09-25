@@ -55,7 +55,14 @@ import yaml
 from .authenticated_identity import ME
 from .component_from_func import build_unwrapped_inputs_schema
 from .handler import TangleCliHandler
-from .python_pipeline.cfg import Cfg, _coerce_override, load_cfg
+from .python_pipeline.cfg import (
+    Cfg,
+    CfgDocument,
+    _coerce_override,
+    build_cfg,
+    read_cfg_document,
+    reject_template_file,
+)
 from .python_pipeline.compiler_context import (
     BroadcastLayer,
     CompileContext,
@@ -350,10 +357,12 @@ def _resolve_cfg_for_pipeline(
     *,
     is_root: bool,
     output_path: Path,
-) -> tuple[Cfg, dict[str, Any], Path]:
+) -> tuple[Cfg, dict[str, Any], Path, str | None]:
     """Resolve + load a pipeline's cfg relative to its own source dir.
 
-    Returns ``(cfg, raw_cfg, cfg_path)``. The config file is loaded when the
+    Returns ``(cfg, raw_cfg, cfg_path, config_identity)`` -- ``raw_cfg`` is
+    the ``_select``/``_env``-resolved mapping before overrides, and
+    ``config_identity`` is :func:`_config_identity` of it. The config file is loaded when the
     function takes a ``cfg`` parameter OR the pipeline is flagged
     ``propagate_config`` (which must read its own config to broadcast it), and
     otherwise skipped — a pipeline with neither tolerates a missing config.yaml.
@@ -371,7 +380,7 @@ def _resolve_cfg_for_pipeline(
             pipeline_fn=pipeline_fn,
             is_root=is_root,
         )
-        loaded_cfg, raw_cfg = _load_cfg_and_raw(
+        loaded_cfg, raw_cfg, config_identity = _load_cfg_and_raw(
             cfg_path,
             overrides,
             coerce=is_root,
@@ -387,7 +396,7 @@ def _resolve_cfg_for_pipeline(
                 "subpipelines. Add a `cfg` parameter if this pipeline also needs to "
                 "read the config directly."
             )
-        return cfg, raw_cfg, cfg_path
+        return cfg, raw_cfg, cfg_path, config_identity
 
     if is_root and overrides:
         keys = sorted(overrides)
@@ -405,7 +414,7 @@ def _resolve_cfg_for_pipeline(
             "not loaded. Remove `config=` when no compile-time config is needed, "
             "or add a `cfg` parameter to use it."
         )
-    return Cfg({}), {}, cfg_path
+    return Cfg({}), {}, cfg_path, None
 
 
 def _compile_pipeline_fn(
@@ -457,7 +466,7 @@ def _compile_pipeline_fn(
     #    The ROOT coerces its CLI ``--override`` strings (yaml.safe_load); a
     #    CHILD receives already-typed native ``effective`` overrides (broadcast
     #    + explicit ``.override_config``) that must pass through unchanged.
-    cfg, raw_cfg, cfg_path = _resolve_cfg_for_pipeline(
+    cfg, raw_cfg, cfg_path, config_identity = _resolve_cfg_for_pipeline(
         pipeline_fn,
         base_dir,
         overrides,
@@ -490,11 +499,12 @@ def _compile_pipeline_fn(
     #    the key the parent tests with ``child_key in active_stack`` — a real
     #    cycle under ``propagate_config`` would then escape precise detection
     #    and degrade to the max-depth guard. The root has no parent (and no
-    #    ambient), so it builds its own key from its own overrides.
+    #    ambient), so it builds its own key from its own overrides and its
+    #    resolved config identity.
     if precomputed_key is not None:
         key = precomputed_key
     else:
-        key = _compile_key_for(pipeline_fn, cfg_path, overrides)
+        key = _compile_key_for(pipeline_fn, cfg_path, overrides, config_identity=config_identity)
 
     # 4. @task local_from_python sidecar for THIS artifact (built, not
     #    written). Each @task ref is rewritten to a pure
@@ -699,6 +709,15 @@ def _process_subpipeline_children(
         # sidecars) whenever the difference can affect its descendants — even
         # when the child's OWN effective overrides are identical.
         ambient_passthrough: dict[str, Any] = {}
+        # A child that will load its config folds the resolved config's
+        # identity into its key, so two environment selections of the same
+        # file never share a sidecar (None, and no key change, without
+        # ``_select``/``_env``).
+        child_doc: CfgDocument | None = None
+        child_identity: str | None = None
+        if (_pipeline_accepts_cfg(child_fn) or child_fn.propagate_config) and child_cfg_path.exists():
+            child_doc = read_cfg_document(child_cfg_path)
+            child_identity = _config_identity(child_doc)
         if ctx.broadcast_stack or sub_ref.config_overrides:
             # A config-less child (no ``cfg`` param, no ``config=``) has no
             # ``config.yaml`` on disk. Under an active broadcast (or an
@@ -711,7 +730,10 @@ def _process_subpipeline_children(
             # broadcasts. A config-DECLARING child whose file is genuinely
             # missing is still caught, with guidance, later in
             # ``_load_cfg_and_raw`` (via the child's own ``_compile_pipeline_fn``).
-            child_raw = _read_raw_cfg(child_cfg_path) if child_cfg_path.exists() else {}
+            if child_doc is not None:
+                child_raw = child_doc.data
+            else:
+                child_raw = _read_raw_cfg(child_cfg_path) if child_cfg_path.exists() else {}
             effective = _effective_overrides_for_child(
                 child_raw=child_raw,
                 broadcast_stack=ctx.broadcast_stack,
@@ -735,6 +757,7 @@ def _process_subpipeline_children(
             effective,
             fingerprint_context=f"on subpipeline task {task_id!r} -> child pipeline {child_fn.name!r}",
             ambient_context=ambient_passthrough or None,
+            config_identity=child_identity,
         )
 
         # Cycle detection (covers self-reference). active_stack holds the
@@ -983,6 +1006,7 @@ def _compile_key_for(
     *,
     fingerprint_context: str | None = None,
     ambient_context: Mapping[str, Any] | None = None,
+    config_identity: str | None = None,
 ) -> PipelineCompileKey:
     """Build the canonical :class:`PipelineCompileKey` for ``pipeline_fn``.
 
@@ -1013,20 +1037,26 @@ def _compile_key_for(
       config keys, routed through :func:`overrides_fingerprint` so its
       non-serializable-value -> :class:`CompileError` detection (which recurses
       into dicts) still fires for BOTH effective and ambient values.
+    * **``config_identity``** (only for a config using ``_select``/``_env``,
+      see :func:`_config_identity`) -> the same envelope plus
+      ``"\x00config"``, so different environment selections get distinct
+      keys while identical resolved configs keep identical keys.
     """
     src = _pipeline_source_path(pipeline_fn)
     if src is not None:
         source_canon = canonical_repo_path(src)
     else:
         source_canon = f"<dynamic:{pipeline_fn.fn.__qualname__}>"
-    if ambient_context:
+    if ambient_context or config_identity is not None:
         # Reserved keys (NUL-prefixed) can never be real config keys, so an
         # envelope never collides with an effective-only fingerprint over the
         # same keys (e.g. effective={x:1},ambient={} vs effective={x:1},ambient={y:2}).
-        fingerprint_input: Mapping[str, Any] = {
-            "\x00effective": dict(sorted(overrides.items())),
-            "\x00ambient": dict(sorted(ambient_context.items())),
-        }
+        envelope: dict[str, Any] = {"\x00effective": dict(sorted(overrides.items()))}
+        if ambient_context:
+            envelope["\x00ambient"] = dict(sorted(ambient_context.items()))
+        if config_identity is not None:
+            envelope["\x00config"] = config_identity
+        fingerprint_input: Mapping[str, Any] = envelope
     else:
         # Byte-identical to today's key: the default-isolation guarantee.
         fingerprint_input = overrides
@@ -2618,18 +2648,19 @@ def _load_cfg_and_raw(
     pipeline_fn: PipelineFn,
     usage: str = "cfg",
 ):
-    """Load cfg via ``cfg.load_cfg`` AND read the raw YAML dict.
+    """Load cfg AND return the resolved config dict and its identity.
 
-    The raw dict (config.yaml WITHOUT overrides applied) is returned so the
-    caller can build a broadcast layer from this pipeline's OWN config.
+    The config file is read once through :func:`read_cfg_document`, so
+    ``_select`` / ``_env`` are resolved before overrides overlay it. The
+    resolved dict (WITHOUT overrides applied) is returned so the caller can
+    build a broadcast layer from this pipeline's OWN config; it never holds a
+    ``_select`` or ``_env`` node. ``_config_identity`` of it is returned too.
     ``coerce`` is threaded to :func:`load_cfg`: the ROOT passes ``coerce=True``
     so its CLI ``--override`` strings keep YAML coercion; a CHILD passes
     ``coerce=False`` so its already-typed native ``effective`` overrides pass
     through unchanged. Overrides are applied to the :class:`Cfg` object only —
     the compiled YAML carries no config keys.
     """
-    import yaml
-
     if not cfg_path.exists():
         source = (
             f"@pipeline(config={pipeline_fn.config_path!r})"
@@ -2653,11 +2684,29 @@ def _load_cfg_and_raw(
         raise CompileError(
             f"config file not found: {cfg_path}. Pipeline {pipeline_fn.name!r} {reason}"
         )
-    raw = yaml.safe_load(cfg_path.read_text()) or {}
-    if not isinstance(raw, dict):
-        raise CompileError(f"config at {cfg_path} must be a YAML mapping, got {type(raw).__name__}")
-    cfg = load_cfg(cfg_path, overrides=dict(overrides), coerce=coerce)
-    return cfg, raw
+    document = read_cfg_document(cfg_path)
+    reject_template_file(document, cfg_path)
+    cfg = build_cfg(document.data, overrides=dict(overrides), coerce=coerce)
+    return cfg, document.data, _config_identity(document)
+
+
+def _config_identity(document: CfgDocument) -> str | None:
+    """Digest of a resolved config for compile keys, or ``None``.
+
+    ``None`` unless the file uses ``_select``/``_env`` -- then the compile key
+    (and sidecar name) is byte-identical to a build without them. Otherwise a
+    SHA-256 of the resolved content: environment selections yielding different
+    values differ, identical values stay identical. The digest is never
+    printed; only :meth:`PipelineCompileKey.hash8` of the whole key reaches a
+    sidecar file name.
+    """
+    if not document.env_dependent:
+        return None
+    try:
+        canonical = yaml.safe_dump(document.data, sort_keys=True, allow_unicode=True)
+    except TypeError:  # keys of mixed, unorderable types
+        canonical = yaml.safe_dump(document.data, sort_keys=False, allow_unicode=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _read_raw_cfg(cfg_path: Path) -> dict[str, Any]:
@@ -2667,16 +2716,12 @@ def _read_raw_cfg(cfg_path: Path) -> dict[str, Any]:
     :func:`_effective_overrides_for_child` — both the broadcast same-name
     overlay and the explicit ``.override_config`` typo check key off the keys
     the child actually declares. Mirrors the error style of
-    :func:`_load_cfg_and_raw` (missing file / non-mapping config).
+    :func:`_load_cfg_and_raw` (missing file / non-mapping config). Keys are
+    those of the resolved (``_select``-selected) mapping.
     """
-    import yaml
-
     if not cfg_path.exists():
         raise CompileError(f"config file not found: {cfg_path}")
-    raw = yaml.safe_load(cfg_path.read_text()) or {}
-    if not isinstance(raw, dict):
-        raise CompileError(f"config at {cfg_path} must be a YAML mapping, got {type(raw).__name__}")
-    return raw
+    return read_cfg_document(cfg_path).data
 
 
 def _resolve_broadcast_stack(

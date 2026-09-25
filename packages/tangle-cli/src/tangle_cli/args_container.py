@@ -3,14 +3,20 @@
 This module provides generic config-file behavior shared by Tangle CLI
 commands: load one or more config objects, merge each with parsed CLI
 arguments, and keep explicit CLI values higher precedence than config values.
+
+Precedence per field is CLI > config > environment (only for fields wrapped
+in :class:`EnvField`) > default. Config values may themselves be read from
+the environment with the ``{_env: NAME}`` value directive.
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
@@ -24,6 +30,15 @@ from tangle_cli.utils import apply_defaults
 #: not a prefix: other ``_``-prefixed keys stay available for YAML anchors.
 SELECT_KEY = "_select"
 
+#: Key of the value directive ``{_env: NAME}`` / ``{_env: NAME, default: V}``.
+#: Recognized only in value positions, never on a document or config-entry
+#: mapping itself, so a top-level ``_env:`` helper/anchor key is unaffected.
+ENV_KEY = "_env"
+_ENV_DIRECTIVE_KEYS = (ENV_KEY, "default")
+# Bounds recursion while rewriting a document that actually uses ``_env``.
+_MAX_ENV_VALUE_DEPTH = 256
+_MAX_RENDERED_PATH_LENGTH = 160
+
 # Guards against recursive YAML aliases producing an endless selector chain.
 _MAX_SELECT_DEPTH = 32
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -35,10 +50,35 @@ _SelectorSummary = tuple[str, "dict[Any, Any]", Any, str]
 #: ``id(node) -> (greatest_depth_validated, node_pin, summary)``. Built per
 #: document load and thrown away with it; there is no global/cross-load cache.
 _ValidationMemo = dict[int, tuple[int, Any, _SelectorSummary]]
+#: Raw key/index segments from a document root to a value, rendered lazily.
+_ConfigPath = tuple[Any, ...]
 
 
 class ConfigFileError(Exception):
     """Raised when there is an error loading or resolving a config file."""
+
+
+def _is_env_name(name: Any) -> bool:
+    """Return whether *name* is a valid environment variable name.
+
+    The single name rule shared by ``_select.env``, ``_env``, and
+    :class:`EnvField`.
+    """
+
+    return isinstance(name, str) and bool(_ENV_NAME_PATTERN.match(name))
+
+
+_ENV_NAME_RULE = "must be a valid environment variable name matching [A-Za-z_][A-Za-z0-9_]*"
+
+
+def _scrub_config_key(key: Any) -> str:
+    """Scrub and length-cap a config key without quoting it."""
+
+    text = key if isinstance(key, str) else str(key)
+    rendered = "".join(char if char.isprintable() else "?" for char in text)
+    if len(rendered) > _MAX_RENDERED_CASE_KEY_LENGTH:
+        rendered = rendered[: _MAX_RENDERED_CASE_KEY_LENGTH - 3] + "..."
+    return rendered
 
 
 def _render_config_key(key: Any) -> str:
@@ -50,18 +90,201 @@ def _render_config_key(key: Any) -> str:
     callers can report a bad key without first proving it is a string.
     """
 
-    text = key if isinstance(key, str) else str(key)
-    rendered = "".join(char if char.isprintable() else "?" for char in text)
-    if len(rendered) > _MAX_RENDERED_CASE_KEY_LENGTH:
-        rendered = rendered[: _MAX_RENDERED_CASE_KEY_LENGTH - 3] + "..."
-    return repr(rendered)
+    return repr(_scrub_config_key(key))
+
+
+def _render_config_path(path: _ConfigPath) -> str:
+    """Render a key path such as ``configs[0].token`` for a diagnostic.
+
+    Every key is scrubbed like :func:`_render_config_key`; an overlong path
+    keeps its tail, which is the part that locates the value.
+    """
+
+    rendered = ""
+    for segment in path:
+        if isinstance(segment, int) and not isinstance(segment, bool):
+            rendered += f"[{segment}]"
+        else:
+            rendered += ("." if rendered else "") + _scrub_config_key(segment)
+    rendered = rendered or "<document root>"
+    if len(rendered) > _MAX_RENDERED_PATH_LENGTH:
+        rendered = "..." + rendered[-(_MAX_RENDERED_PATH_LENGTH - 3) :]
+    return rendered
+
+
+def _stringify_env_default(value: Any, location: str) -> str:
+    """Return the string form of an ``_env`` ``default`` scalar.
+
+    A default is stringified so a field has one type whether or not the
+    variable is set; downstream converters then type both paths identically.
+    Numbers and booleans use their JSON spelling (``true``, ``5``, ``1.5``),
+    so JSON-typed fields parse a default back to the authored value; dates use
+    ISO format. ``null`` has no string form and is rejected rather than
+    guessed at (quote ``''`` for an empty string).
+    """
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bool, int, float)):
+        return json.dumps(value)
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    type_name = "null" if value is None else type(value).__name__
+    raise ConfigFileError(
+        f"{ENV_KEY} at {location}: default must be a string, number, boolean, "
+        f"or date scalar, got {type_name}"
+    )
+
+
+def _is_container(node: Any) -> bool:
+    return isinstance(node, (dict, list))
+
+
+def _parse_env_directive(node: dict[Any, Any], path: _ConfigPath) -> tuple[str, str | None]:
+    """Validate one ``_env`` directive node; return ``(name, default)``.
+
+    ``default`` is the stringified default, or ``None`` when none was
+    authored. Reads no environment variable.
+    """
+
+    location = _render_config_path(path)
+    unexpected = sorted(
+        _render_config_key(key) for key in node if key not in _ENV_DIRECTIVE_KEYS
+    )
+    if unexpected:
+        raise ConfigFileError(
+            f"{ENV_KEY} at {location} allows only an optional 'default' beside it, "
+            f"got unexpected keys: {', '.join(unexpected)}"
+        )
+    name = node[ENV_KEY]
+    if not _is_env_name(name):
+        raise ConfigFileError(f"{ENV_KEY} at {location} {_ENV_NAME_RULE}")
+    default = _stringify_env_default(node["default"], location) if "default" in node else None
+    return name, default
+
+
+class _EnvValueResolver:
+    """Replace ``_env`` directives in config values with environment strings.
+
+    Copy-on-write: a container without directives is returned as the same
+    object, and each shared (YAML alias) node is resolved once. A directive
+    reached through a recursive alias cannot be represented and is rejected.
+    Diagnostics name the variable and key path, never a value.
+    """
+
+    def __init__(self, context: str) -> None:
+        self._context = context
+        self._memo: dict[int, Any] = {}
+        self._in_progress: set[int] = set()
+        self._back_refs: set[int] = set()
+
+    def resolve_config_object(self, obj: dict[str, Any], path: _ConfigPath) -> dict[str, Any]:
+        """Resolve every value of one config entry; the entry itself is not a value."""
+
+        resolved: dict[str, Any] = {}
+        changed = False
+        for key, value in obj.items():
+            new_value = self._resolve_value(value, (*path, key), 1)
+            resolved[key] = new_value
+            changed = changed or new_value is not value
+        return resolved if changed else obj
+
+    def _resolve_value(self, node: Any, path: _ConfigPath, depth: int) -> Any:
+        if not _is_container(node):
+            return node
+        node_id = id(node)
+        if node_id in self._memo:
+            return self._memo[node_id]
+        if node_id in self._in_progress:
+            self._back_refs.add(node_id)
+            return node
+        if depth > _MAX_ENV_VALUE_DEPTH:
+            raise ConfigFileError(
+                f"Config nesting at {_render_config_path(path)} exceeds "
+                f"{_MAX_ENV_VALUE_DEPTH} levels in a document that uses {ENV_KEY}"
+            )
+
+        result: Any
+        if isinstance(node, dict) and ENV_KEY in node:
+            result = self._lookup(cast(dict[Any, Any], node), path)
+        else:
+            self._in_progress.add(node_id)
+            try:
+                result = self._resolve_container(node, path, depth)
+            finally:
+                self._in_progress.discard(node_id)
+            if node_id in self._back_refs and result is not node:
+                raise ConfigFileError(
+                    f"{ENV_KEY} cannot be used inside a recursive YAML alias "
+                    f"(at {_render_config_path(path)})"
+                )
+        self._memo[node_id] = result
+        return result
+
+    def _resolve_container(self, node: Any, path: _ConfigPath, depth: int) -> Any:
+        changed = False
+        if isinstance(node, dict):
+            mapping = cast(dict[Any, Any], node)
+            resolved_dict: dict[Any, Any] = {}
+            for key, value in mapping.items():
+                new_value = self._resolve_value(value, (*path, key), depth + 1)
+                resolved_dict[key] = new_value
+                changed = changed or new_value is not value
+            return resolved_dict if changed else mapping
+        items = cast(list[Any], node)
+        resolved_list: list[Any] = []
+        for index, value in enumerate(items):
+            new_value = self._resolve_value(value, (*path, index), depth + 1)
+            resolved_list.append(new_value)
+            changed = changed or new_value is not value
+        return resolved_list if changed else items
+
+    def _lookup(self, node: dict[Any, Any], path: _ConfigPath) -> str:
+        name, default = _parse_env_directive(node, path)
+        # An empty string is a set variable.
+        if name in os.environ:
+            return os.environ[name]
+        if default is not None:
+            return default
+        raise ConfigFileError(
+            f"Environment variable {name} is required by {ENV_KEY} at "
+            f"{_render_config_path(path)}{self._context} but is not set"
+        )
+
+
+@dataclass(frozen=True)
+class EnvField:
+    """Opt one :meth:`ArgsContainer.load` field spec into the environment tier.
+
+    ``token=EnvField("TANGLE_TOKEN", (cli_token, None))`` wraps any ordinary
+    tuple *spec* unchanged; the field then resolves CLI > config >
+    ``os.environ[env]`` > default. The raw string (empty counts as set) goes
+    through the spec's usual converter. No field reads the environment unless
+    wrapped, and no name is derived automatically.
+    """
+
+    env: str
+    spec: tuple[Any, ...]
+
+    def __post_init__(self) -> None:
+        if not _is_env_name(self.env):
+            raise ValueError(f"EnvField.env {_ENV_NAME_RULE}")
+        spec: Any = self.spec
+        if not isinstance(spec, tuple) or not 1 <= len(cast(tuple[Any, ...], spec)) <= 6:
+            raise ValueError("EnvField.spec must be an ArgsContainer field-spec tuple")
 
 
 class ArgsContainer:
     """Container for resolved CLI arguments with config-file defaults."""
 
-    def __init__(self, resolved: dict[str, Any], raw_config: dict[str, Any]):
+    def __init__(
+        self,
+        resolved: dict[str, Any],
+        raw_config: dict[str, Any],
+        origins: dict[str, str] | None = None,
+    ):
         self._config = raw_config
+        self._origins = dict(origins or {})
         for key, value in resolved.items():
             setattr(self, key, value)
 
@@ -80,7 +303,21 @@ class ArgsContainer:
     def to_dict(self) -> dict[str, Any]:
         """Return resolved public values as a dictionary."""
 
-        return {key: value for key, value in vars(self).items() if key != "_config"}
+        return {
+            key: value
+            for key, value in vars(self).items()
+            if key not in ("_config", "_origins")
+        }
+
+    def origin(self, name: str) -> str | None:
+        """Return where field *name* was resolved from, never its value.
+
+        One of ``"cli"``, ``"config"``, ``"env:NAME"`` (the :class:`EnvField`
+        tier), or ``"default"``; ``None`` for an unknown field. A config value
+        read through an ``_env`` directive reports ``"config"``.
+        """
+
+        return self._origins.get(name)
 
     @staticmethod
     def _validate_branch_document(
@@ -88,6 +325,8 @@ class ArgsContainer:
         where: str,
         depth: int = 0,
         memo: _ValidationMemo | None = None,
+        *,
+        mapping_only: bool = False,
     ) -> None:
         """Validate a selector branch as a complete config document root.
 
@@ -101,9 +340,13 @@ class ArgsContainer:
         the business of the selected branch, later.
 
         *memo* makes YAML alias DAGs linear instead of exponential; see
-        :meth:`_validate_selector_node`.
+        :meth:`_validate_selector_node`. With *mapping_only* (pipeline ``cfg``
+        documents) every branch must be a mapping and ``_defaults``/``configs``
+        carry no meaning.
         """
 
+        if mapping_only and not isinstance(branch, dict):
+            raise ConfigFileError(f"{where} must be a mapping, got {type(branch).__name__}")
         if isinstance(branch, dict):
             branch_dict = cast(dict[Any, Any], branch)
             if SELECT_KEY in branch_dict:
@@ -112,9 +355,11 @@ class ArgsContainer:
                         f"{SELECT_KEY} nesting exceeded the maximum depth "
                         f"of {_MAX_SELECT_DEPTH}"
                     )
-                ArgsContainer._validate_selector_node(branch_dict, depth + 1, memo)
+                ArgsContainer._validate_selector_node(
+                    branch_dict, depth + 1, memo, mapping_only=mapping_only
+                )
                 return
-            if "configs" in branch_dict:
+            if "configs" in branch_dict and not mapping_only:
                 defaults = branch_dict.get("_defaults", {})
                 if not isinstance(defaults, dict):
                     raise ConfigFileError(
@@ -150,6 +395,8 @@ class ArgsContainer:
         node: dict[str, Any],
         depth: int = 0,
         memo: _ValidationMemo | None = None,
+        *,
+        mapping_only: bool = False,
     ) -> _SelectorSummary:
         """Structurally validate one ``_select`` node without reading the env.
 
@@ -217,11 +464,8 @@ class ArgsContainer:
             raise ConfigFileError(f"{SELECT_KEY} requires a 'cases' object")
 
         env_name = selector_dict["env"]
-        if not isinstance(env_name, str) or not _ENV_NAME_PATTERN.match(env_name):
-            raise ConfigFileError(
-                f"{SELECT_KEY}.env must be a valid environment variable name "
-                "matching [A-Za-z_][A-Za-z0-9_]*"
-            )
+        if not _is_env_name(env_name):
+            raise ConfigFileError(f"{SELECT_KEY}.env {_ENV_NAME_RULE}")
 
         cases = selector_dict["cases"]
         if not isinstance(cases, dict):
@@ -246,14 +490,18 @@ class ArgsContainer:
             # Every branch document is shape-checked, not just the selected one,
             # so a malformed selector fails identically in every environment.
             ArgsContainer._validate_branch_document(
-                case_value, f"{SELECT_KEY} case {_render_config_key(case_key)}", depth, memo
+                case_value,
+                f"{SELECT_KEY} case {_render_config_key(case_key)}",
+                depth,
+                memo,
+                mapping_only=mapping_only,
             )
 
         default_branch: Any = None
         if "default" in selector_dict:
             default_branch = selector_dict["default"]
             ArgsContainer._validate_branch_document(
-                default_branch, f"{SELECT_KEY}.default", depth, memo
+                default_branch, f"{SELECT_KEY}.default", depth, memo, mapping_only=mapping_only
             )
 
         allowed = ", ".join(_render_config_key(key) for key in sorted(cases_dict))
@@ -265,7 +513,12 @@ class ArgsContainer:
         return summary
 
     @staticmethod
-    def _select_branch(node: dict[str, Any], memo: _ValidationMemo | None = None) -> Any:
+    def _select_branch(
+        node: dict[str, Any],
+        memo: _ValidationMemo | None = None,
+        *,
+        mapping_only: bool = False,
+    ) -> Any:
         """Validate one ``_select`` node and return the branch chosen by the env.
 
         The whole selector shape, the environment variable name, every
@@ -284,7 +537,7 @@ class ArgsContainer:
         """
 
         env_name, cases_dict, default_branch, allowed = ArgsContainer._validate_selector_node(
-            node, 0, memo
+            node, 0, memo, mapping_only=mapping_only
         )
 
         # Environment is read only after the selector itself is known to be valid.
@@ -307,7 +560,12 @@ class ArgsContainer:
         return cases_dict[env_value]
 
     @staticmethod
-    def _resolve_select(parsed: Any) -> Any:
+    def _resolve_select(
+        parsed: Any,
+        memo: _ValidationMemo | None = None,
+        *,
+        mapping_only: bool = False,
+    ) -> Any:
         """Replace a root ``_select`` node with its selected config branch.
 
         A selected branch is a complete config document in its own right, so it
@@ -317,10 +575,11 @@ class ArgsContainer:
         The whole selector tree is structurally validated up front by
         :meth:`_select_branch`; this loop only walks the chain the environment
         actually selects, and keeps its own bound as a belt-and-braces guard.
-        The validation memo lives for exactly this one document resolution.
+        The validation memo lives for exactly this one document resolution; a
+        caller may pass the memo it already used to validate this document.
         """
 
-        memo: _ValidationMemo = {}
+        memo = {} if memo is None else memo
         node = parsed
         selections = 0
         while isinstance(node, dict) and SELECT_KEY in cast(dict[Any, Any], node):
@@ -328,9 +587,76 @@ class ArgsContainer:
                 raise ConfigFileError(
                     f"{SELECT_KEY} nesting exceeded the maximum depth of {_MAX_SELECT_DEPTH}"
                 )
-            node = ArgsContainer._select_branch(cast(dict[str, Any], node), memo)
+            node = ArgsContainer._select_branch(
+                cast(dict[str, Any], node), memo, mapping_only=mapping_only
+            )
             selections += 1
         return node
+
+    @staticmethod
+    def _validate_env_directives(
+        document: Any, *, mapping_only: bool = False
+    ) -> tuple[bool, list[Any]]:
+        """Structurally validate every ``_env`` directive; read no variable.
+
+        Walks the whole raw document -- every ``_select`` case and ``default``
+        branch (dormant ones included) and helper sections -- so a malformed
+        directive fails identically in every environment. Selector structure
+        must already be validated. Shared nodes are visited once per role.
+        Returns whether any directive exists, and every candidate document
+        root (each non-selector branch, dormant ones included).
+        """
+
+        found = False
+        branches: list[Any] = []
+        seen: set[tuple[str, int]] = set()
+        stack: list[tuple[str, Any, _ConfigPath]] = [("document", document, ())]
+
+        def push(role: str, items: list[tuple[Any, _ConfigPath]]) -> None:
+            # Reversed so diagnostics follow document order.
+            stack.extend((role, node, path) for node, path in reversed(items))
+
+        while stack:
+            role, node, path = stack.pop()
+            if not _is_container(node) or (role, id(node)) in seen:
+                continue
+            seen.add((role, id(node)))
+            if isinstance(node, list):
+                child_role = "value" if role == "value" else "entry"
+                if role != "entry":
+                    items = cast(list[Any], node)
+                    push(child_role, [(item, (*path, i)) for i, item in enumerate(items)])
+                continue
+
+            node_dict = cast(dict[Any, Any], node)
+            if role == "document" and SELECT_KEY not in node_dict:
+                branches.append(node_dict)
+            if role == "value" and ENV_KEY in node_dict:
+                _parse_env_directive(node_dict, path)
+                found = True
+            elif role == "document" and SELECT_KEY in node_dict:
+                selector = cast(dict[Any, Any], node_dict[SELECT_KEY])
+                helpers = [(v, (*path, k)) for k, v in node_dict.items() if k != SELECT_KEY]
+                candidates = [
+                    (branch, (*path, SELECT_KEY, "cases", case))
+                    for case, branch in cast(dict[Any, Any], selector["cases"]).items()
+                ]
+                if "default" in selector:
+                    candidates.append((selector["default"], (*path, SELECT_KEY, "default")))
+                push("document", candidates)
+                push("value", helpers)
+            elif role == "document" and "configs" in node_dict and not mapping_only:
+                for key, value in reversed(list(node_dict.items())):
+                    if key == "_defaults":
+                        push("entry", [(value, (*path, key))])
+                    elif key == "configs" and isinstance(value, list):
+                        push("document", [(value, (*path, key))])
+                    else:
+                        push("value", [(value, (*path, key))])
+            else:
+                # A config entry (or a plain-object document): its values are values.
+                push("value", [(v, (*path, k)) for k, v in node_dict.items()])
+        return found, branches
 
     @staticmethod
     def _load_config_file(
@@ -346,6 +672,11 @@ class ArgsContainer:
 
         A document may instead select one of those shapes at load time with a
         top-level ``_select`` node (see :meth:`_select_branch`).
+
+        ``{_env: NAME}`` / ``{_env: NAME, default: V}`` value directives are
+        then replaced by the variable's string value. Every directive is shape
+        checked first, but only those in the selected document's config
+        entries (and ``_defaults``) are looked up.
         """
 
         log = logger or get_default_logger()
@@ -367,7 +698,9 @@ class ArgsContainer:
         except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
             raise ConfigFileError(f"Error loading config file: {exc}") from exc
 
-        parsed = ArgsContainer._resolve_select(parsed)
+        resolution = resolve_config_document(parsed, path)
+        parsed = resolution.document
+        resolve_entry = resolution.resolve_entry
 
         if isinstance(parsed, dict):
             parsed_dict = cast(dict[str, Any], parsed)
@@ -388,12 +721,17 @@ class ArgsContainer:
                             "configs entry "
                             f"{index} must be an object, got {type(item).__name__}"
                         )
+                defaults = resolve_entry(cast(dict[str, Any], defaults), ("_defaults",))
+                configs_list = [
+                    resolve_entry(item, ("configs", index))
+                    for index, item in enumerate(cast(list[dict[str, Any]], configs_list))
+                ]
                 merged = apply_defaults(configs_list, defaults)
                 assert isinstance(merged, list)
                 log.info(f"Loaded config: {path} ({len(merged)} configs with defaults)")
                 return merged
             log.info(f"Loaded config: {path} (1 config)")
-            return [parsed_dict]
+            return [resolve_entry(parsed_dict, ())]
 
         if isinstance(parsed, list):
             for index, item in enumerate(cast(list[Any], parsed)):
@@ -402,7 +740,10 @@ class ArgsContainer:
                         "Config file entry "
                         f"{index} must be an object, got {type(item).__name__}"
                     )
-            configs = cast(list[dict[str, Any]], parsed)
+            configs = [
+                resolve_entry(item, (index,))
+                for index, item in enumerate(cast(list[dict[str, Any]], parsed))
+            ]
             log.info(f"Loaded config: {path} ({len(configs)} configs)")
             return configs
 
@@ -436,18 +777,20 @@ class ArgsContainer:
 
     @staticmethod
     def _make_enum_converter(field_name: str, enum_type: type[Enum]) -> Callable[[Any], Any]:
-        """Create a converter that accepts enum values by string."""
+        """Create a converter that accepts enum values by string.
+
+        The rejected value is not echoed (it may come from the environment).
+        """
 
         def convert(value: Any) -> Any:
             if isinstance(value, str):
                 try:
                     return enum_type(value)
-                except ValueError as exc:
+                except ValueError:
                     valid_values = [member.value for member in enum_type]
                     raise ConfigFileError(
-                        f"Invalid value '{value}' for {field_name}. "
-                        f"Valid values: {valid_values}"
-                    ) from exc
+                        f"Invalid value for {field_name}. Valid values: {valid_values}"
+                    ) from None
             return value
 
         return convert
@@ -462,13 +805,25 @@ class ArgsContainer:
         - ``(cli_value, default, converter)``: optional with converter;
         - ``(config_key, cli_value, default, is_json)``: explicit key;
         - ``(config_key, cli_value, default, is_json, required)``;
-        - ``(config_key, cli_value, default, is_json, required, converter)``.
+        - ``(config_key, cli_value, default, is_json, required, converter)``;
+        - :class:`EnvField` wrapping any of the above to add the env tier.
+
+        Precedence: an explicit CLI value (one differing from the spec
+        default), then the config key, then the ``EnvField`` variable, then
+        the CLI/default value.
         """
 
         resolved: dict[str, Any] = {}
+        origins: dict[str, str] = {}
         required_fields: list[str] = []
+        env_names: dict[str, str] = {}
 
         for param_name, spec in kwargs.items():
+            env_name: str | None = None
+            if isinstance(spec, EnvField):
+                env_name = spec.env
+                env_names[param_name] = env_name
+                spec = spec.spec
             converter = None
             default_value = None
             if len(spec) == 1:
@@ -502,21 +857,41 @@ class ArgsContainer:
                 converter = ArgsContainer._make_enum_converter(param_name, type(default_value))
 
             if cli_value is not None and cli_value != default_value:
-                value = cli_value
+                value, origin = cli_value, "cli"
             elif config_key in config:
-                value = config[config_key]
+                value, origin = config[config_key], "config"
+            elif env_name is not None and env_name in os.environ:
+                value, origin = os.environ[env_name], f"env:{env_name}"
             else:
-                value = cli_value
+                value, origin = cli_value, "default"
 
-            resolved[param_name] = converter(value) if converter and value is not None else value
+            if converter and value is not None:
+                if env_name is not None and origin == f"env:{env_name}":
+                    try:
+                        value = converter(value)
+                    except (ConfigFileError, ValueError, TypeError):
+                        # A converter message may quote the raw value.
+                        raise ConfigFileError(
+                            f"Invalid value for {param_name} from environment "
+                            f"variable {env_name}"
+                        ) from None
+                else:
+                    value = converter(value)
+            resolved[param_name] = value
+            origins[param_name] = origin
 
         for field_name in required_fields:
             if resolved.get(field_name) is None:
+                if field_name in env_names:
+                    raise ConfigFileError(
+                        f"{field_name} is required (via CLI argument, config file, "
+                        f"or environment variable {env_names[field_name]})"
+                    )
                 raise ConfigFileError(
                     f"{field_name} is required (via CLI argument or config file)"
                 )
 
-        return ArgsContainer(resolved, config)
+        return ArgsContainer(resolved, config, origins)
 
     @staticmethod
     def load(
@@ -530,4 +905,68 @@ class ArgsContainer:
         return [ArgsContainer._resolve(config, **kwargs) for config in configs]
 
 
-__all__ = ["SELECT_KEY", "ArgsContainer", "ConfigFileError"]
+@dataclass(frozen=True)
+class ResolvedConfigDocument:
+    """A config document after ``_select``, before its ``_env`` lookups.
+
+    ``document`` is the selected document root; callers apply their own shape
+    rules and then :meth:`resolve_entry` to each config mapping they keep, so
+    only directives in used entries are looked up. ``branches`` holds every
+    candidate document root, dormant ones included, for fail-closed shape
+    checks. ``env_dependent`` is true when the result can depend on the
+    environment (a root ``_select`` or any ``_env``).
+    """
+
+    document: Any
+    branches: tuple[Any, ...]
+    env_dependent: bool
+    _resolver: _EnvValueResolver | None
+
+    def resolve_entry(self, entry: dict[str, Any], path: _ConfigPath = ()) -> dict[str, Any]:
+        """Replace the ``_env`` directives in one config mapping's values."""
+
+        if self._resolver is None:
+            return entry
+        return self._resolver.resolve_config_object(entry, path)
+
+
+def resolve_config_document(
+    parsed: Any, source: str | Path, *, mapping_only: bool = False
+) -> ResolvedConfigDocument:
+    """Resolve a parsed config document's root ``_select`` chain and ``_env`` plan.
+
+    The single document-level resolution shared by ``--config`` files and
+    pipeline ``cfg`` files: the selector tree and every ``_env`` directive are
+    structurally validated first (dormant branches included, no variable
+    read), then the selector chain is resolved against the environment.
+    *mapping_only* makes every branch a plain mapping (pipeline ``cfg``);
+    otherwise branches take the ``--config`` shapes. *source* labels
+    ``_env`` diagnostics. Raises :class:`ConfigFileError`.
+    """
+
+    memo: _ValidationMemo = {}
+    is_select = isinstance(parsed, dict) and SELECT_KEY in cast(dict[Any, Any], parsed)
+    if is_select:
+        ArgsContainer._validate_selector_node(
+            cast(dict[str, Any], parsed), 0, memo, mapping_only=mapping_only
+        )
+    uses_env, branches = ArgsContainer._validate_env_directives(
+        parsed, mapping_only=mapping_only
+    )
+    selected = ArgsContainer._resolve_select(parsed, memo, mapping_only=mapping_only)
+    resolver: _EnvValueResolver | None = None
+    if uses_env:
+        within = " (within the selected _select branch)" if is_select else ""
+        resolver = _EnvValueResolver(f" in {source}{within}")
+    return ResolvedConfigDocument(selected, tuple(branches), is_select or uses_env, resolver)
+
+
+__all__ = [
+    "ENV_KEY",
+    "SELECT_KEY",
+    "ArgsContainer",
+    "ConfigFileError",
+    "EnvField",
+    "ResolvedConfigDocument",
+    "resolve_config_document",
+]
