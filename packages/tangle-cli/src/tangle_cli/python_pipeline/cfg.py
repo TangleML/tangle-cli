@@ -27,11 +27,17 @@ Contract:
   version='"1.0"'``.
 - ``template_file:`` in the source is rejected — the Python authoring
   layer IS the template authoring layer.
+- The file is resolved like a ``--config`` document first: a root
+  ``_select`` picks one mapping branch (native YAML types) and
+  ``{_env: NAME}`` values become strings, which are NOT YAML-coerced (an
+  environment value is opaque; only raw CLI ``--override`` strings are).
+  Overrides then overlay the resolved mapping.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -99,8 +105,83 @@ class Cfg:
         raise UnknownCfgKeyError(f"unknown config key: {key!r}. Available keys: " f"{sorted(data.keys())!r}")
 
 
+@dataclass(frozen=True)
+class CfgDocument:
+    """A pipeline config file resolved to one mapping, before overrides.
+
+    ``data`` has ``_select`` resolved and ``_env`` values substituted.
+    ``branches`` are every candidate root mapping (dormant ``_select``
+    branches included); ``env_dependent`` is true when ``data`` can differ
+    between environments.
+    """
+
+    data: dict[str, Any]
+    branches: tuple[dict[str, Any], ...]
+    env_dependent: bool
+
+
+def read_cfg_document(path: Path) -> CfgDocument:
+    """Read and resolve the config file at ``path`` into one mapping.
+
+    Shares document resolution with ``--config`` files
+    (:func:`tangle_cli.args_container.resolve_config_document`), with the
+    ``cfg`` shape rule that every branch is a mapping. Applies no overrides
+    and no ``template_file`` check (see :func:`reject_template_file`).
+    """
+    from tangle_cli.args_container import ConfigFileError, resolve_config_document
+
+    parsed = yaml.safe_load(Path(path).read_text()) or {}
+    try:
+        resolution = resolve_config_document(parsed, path, mapping_only=True)
+        document = resolution.document
+        if not isinstance(document, dict):
+            raise CompileError(f"config at {path} must be a YAML mapping, got {type(document).__name__}")
+        data = resolution.resolve_entry(document)
+    except ConfigFileError as exc:
+        raise CompileError(f"config at {path}: {exc}") from exc
+    return CfgDocument(
+        data=data,
+        branches=tuple(resolution.branches),
+        env_dependent=resolution.env_dependent,
+    )
+
+
+def reject_template_file(document: CfgDocument, path: Path) -> None:
+    """Reject a top-level ``template_file:`` in any branch, dormant included."""
+    if any("template_file" in branch for branch in document.branches):
+        raise CompileError(
+            f"config at {path} has a top-level `template_file:` key, but "
+            "the Python authoring layer emits the pipeline directly. Remove "
+            "this key from your config.yaml — the framework is your "
+            "templating layer."
+        )
+
+
+def build_cfg(data: Mapping[str, Any], overrides: Mapping[str, Any] | None = None, *, coerce: bool = True) -> Cfg:
+    """Overlay ``overrides`` on a resolved config mapping; see :func:`load_cfg`."""
+    merged = dict(data)
+    if overrides:
+        if coerce:
+            # Coerce each raw CLI override string to its YAML type so an
+            # override behaves identically to the same key written in the
+            # config file (which is already typed via yaml.safe_load).
+            # Coercion is internal to cfg only: the override dict stays
+            # dict[str, str] everywhere upstream and the compile-cache
+            # fingerprint keeps hashing the raw CLI strings.
+            merged.update({k: _coerce_override(v) for k, v in overrides.items()})
+        else:
+            # Native pass-through: values are already-typed Python natives
+            # (from .override_config / broadcast). Overlay verbatim — no
+            # yaml.safe_load re-coercion (it would mangle e.g. "no" -> False).
+            merged.update(dict(overrides))
+    return Cfg(merged)
+
+
 def load_cfg(path: Path, overrides: Mapping[str, Any] | None = None, *, coerce: bool = True) -> Cfg:
     """Load YAML at ``path`` and overlay ``overrides`` on top.
+
+    The file is first resolved by :func:`read_cfg_document` (``_select`` /
+    ``_env``); overrides always win over the SELECTED values.
 
     Two overlay paths, selected by ``coerce``:
 
@@ -141,29 +222,6 @@ def load_cfg(path: Path, overrides: Mapping[str, Any] | None = None, *, coerce: 
             config must not point at a separate Jinja template).
         FileNotFoundError: if ``path`` doesn't exist.
     """
-    raw = yaml.safe_load(Path(path).read_text()) or {}
-    if not isinstance(raw, dict):
-        raise CompileError(f"config at {path} must be a YAML mapping, got {type(raw).__name__}")
-    if "template_file" in raw:
-        raise CompileError(
-            f"config at {path} has a top-level `template_file:` key, but "
-            "the Python authoring layer emits the pipeline directly. Remove "
-            "this key from your config.yaml — the framework is your "
-            "templating layer."
-        )
-    merged = dict(raw)
-    if overrides:
-        if coerce:
-            # Coerce each raw CLI override string to its YAML type so an
-            # override behaves identically to the same key written in the
-            # config file (which is already typed via yaml.safe_load above).
-            # Coercion is internal to load_cfg only: the override dict stays
-            # dict[str, str] everywhere upstream and the compile-cache
-            # fingerprint keeps hashing the raw CLI strings.
-            merged.update({k: _coerce_override(v) for k, v in overrides.items()})
-        else:
-            # Native pass-through: values are already-typed Python natives
-            # (from .override_config / broadcast). Overlay verbatim — no
-            # yaml.safe_load re-coercion (it would mangle e.g. "no" -> False).
-            merged.update(dict(overrides))
-    return Cfg(merged)
+    document = read_cfg_document(path)
+    reject_template_file(document, path)
+    return build_cfg(document.data, overrides, coerce=coerce)

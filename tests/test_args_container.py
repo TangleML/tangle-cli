@@ -1305,13 +1305,13 @@ def selector_visit_budget(monkeypatch):
     original = ArgsContainer._validate_selector_node
     state = {"calls": 0, "cap": 10**9}
 
-    def counting(node, depth=0, memo=None):
+    def counting(node, depth=0, memo=None, **kwargs):
         state["calls"] += 1
         if state["calls"] > state["cap"]:
             raise _ValidationBudgetExceeded(
                 f"structural validation exceeded {state['cap']} selector visits"
             )
-        return original(node, depth, memo)
+        return original(node, depth, memo, **kwargs)
 
     monkeypatch.setattr(ArgsContainer, "_validate_selector_node", staticmethod(counting))
     return state

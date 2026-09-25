@@ -57,7 +57,7 @@ API-backed commands commonly accept these options. Explicit CLI options win over
 | `--token`, `TANGLE_API_TOKEN` | Bearer token shorthand. |
 | `--auth-header`, `TANGLE_API_AUTH_HEADER`, `TANGLE_AUTH_HEADER` | Full `Authorization` value such as `Bearer ...` or `Basic ...`. |
 | `-H`, `--header`, `TANGLE_API_HEADERS` | Extra headers. Repeatable as CLI flags; env accepts a JSON object or newline-separated `Name: value` entries. |
-| `--config` | YAML/JSON defaults. Many commands accept a single object, a list of objects, or `_defaults` + `configs`, optionally wrapped in a top-level `_select` environment selector. |
+| `--config` | YAML/JSON defaults. Many commands accept a single object, a list of objects, or `_defaults` + `configs`, optionally wrapped in a top-level `_select` environment selector. Values may be read from the environment with `{_env: NAME}`. |
 | `--log-type` | SDK progress logs: `console`, `none`, or `file`. Logs go to stderr or a temp log file so structured stdout stays parseable. |
 | `TANGLE_VERBOSE=1` | Redacted HTTP request/response diagnostics only. This is separate from normal progress logging. |
 | `--ca-bundle` | Global CLI flag: path to a PEM CA bundle used as the TLS trust store for every transport. Overrides `TANGLE_API_CA_BUNDLE`. Place before the subcommand. |
@@ -232,7 +232,7 @@ For generated `tangle api` commands, config keys use generated CLI parameter nam
 
 ### Environment-selected configs (`_select`)
 
-Any command that accepts `--config` can pick one of several config documents from an environment variable by making `_select` the top-level node:
+Any command that accepts `--config`, and any Python pipeline `config.yaml` (see [Environment-selected pipeline config](#environment-selected-pipeline-config-_select-_env)), can pick one of several config documents from an environment variable by making `_select` the top-level node:
 
 ```yaml
 _shared: &shared
@@ -271,7 +271,7 @@ With `default`, an unset variable or a value matching no case resolves to that b
 
 Rules:
 
-- `_select` is the only newly reserved key, and it is an exact key name rather than a prefix. Configs without `_select` are unchanged byte-for-byte and semantically.
+- `_select` is an exact reserved key name rather than a prefix (the only other reserved key is the [`_env`](#environment-variable-values-_env) value directive). Configs without `_select` are unchanged byte-for-byte and semantically.
 - At a `_select` node, only `_select` and other underscore-prefixed helper keys (YAML anchor holders such as `_shared`) may appear; ordinary sibling keys are rejected.
 - `_select` accepts only `env`, `cases`, and the optional `default`. There are no aliases: `else`, `fallback`, and `defaults` are rejected.
 - The selector shape, the `env` name, every `cases` key, and every case and `default` branch are validated before the environment is read, so a malformed selector fails identically in every environment. Branches are checked as complete config documents with the same rules the loader applies to a whole file, and nested selectors are validated recursively.
@@ -279,6 +279,41 @@ Rules:
 - Selector nesting is capped at 32 levels, which also stops a self-referential YAML alias. A node shared by several anchors is validated once, so anchor-heavy files stay fast.
 - Matching uses `os.environ[NAME]` exactly: case sensitive, with no trimming, case folding, or interpolation.
 - Fallback exists only where it is authored. Without `default`, an unset variable or an unmatched value is an error; there is never an implicit default or implicit production branch. The raw environment value is never echoed — diagnostics list only the configured case names.
+
+### Environment-variable values (`_env`)
+
+Any config value — in `--config` files and in [Python pipeline configs](#environment-selected-pipeline-config-_select-_env) — can be read from an environment variable with the `_env` value directive, so a checked-in config can reference a secret or per-machine value without containing it:
+
+```yaml
+base_url: https://api.prod
+token: {_env: TANGLE_PROD_TOKEN}
+header:
+  - {_env: GATEWAY_HEADER}
+  - "X-Team: search"
+limit: {_env: RUN_LIMIT, default: 10}
+```
+
+- The directive is exactly `{_env: NAME}` or `{_env: NAME, default: <scalar>}`. Any other key beside `_env` — including underscore-prefixed keys and aliases such as `fallback` — is rejected, and `NAME` follows the same rule as `_select.env` (`[A-Za-z_][A-Za-z0-9_]*`).
+- It may appear anywhere a value may appear: under a config key, in `_defaults`, in `configs` entries, and inside nested maps and lists. A document or config-entry mapping is never itself a directive, so an `_env:` helper/anchor key at the top level of a config object is unaffected.
+- A missing variable without `default` fails closed with the variable name, the key path (for example `configs[1].token`), and the config file. An empty string counts as set and is used as-is.
+- The resolved value is always a string, and a `default` is stringified the same way: numbers and booleans use their JSON spelling (`10`, `1.5`, `true`), dates use ISO format, and `null`/maps/lists are rejected (quote `''` for an empty default). A field therefore has one type whether or not the variable is set, and the command's usual conversion (JSON fields, repeatable options, enums, typed converters) applies downstream in both cases.
+- Diagnostics name the variable, never its value, and no directive value is logged. There is no `${VAR}` string interpolation.
+
+With `_select`, selection happens first, and `_env` applies to the selected document:
+
+```yaml
+_select:
+  env: TANGLE_ENV
+  cases:
+    prod:
+      token: {_env: TANGLE_PROD_TOKEN}
+    dev:
+      token: {_env: TANGLE_DEV_TOKEN, default: dev-token}
+```
+
+Every `_env` directive — in every case and `default` branch, and in helper sections — is shape-checked before any variable is read, so a malformed directive fails identically in every environment. Only the directives in the selected document's config entries and `_defaults` are looked up; a dormant branch never requires its variables. `_select` itself is unchanged.
+
+Precedence per field is **CLI > config > environment > default**: an explicit CLI value wins, then the config key (including a value read through `_env`), then an environment variable the command has opted that field into (see [`EnvField`](#shared-cli-helpers-and-logging)), then the default. As before, a CLI value equal to the option default is indistinguishable from an omitted one.
 
 ## API schema cache and dynamic commands
 
@@ -508,6 +543,24 @@ def greeting_pipeline(who: In[str], cfg) -> Out[str]:
 ```
 
 `In[T]` parameters become runtime graph inputs. A single `-> Out[T]` return exposes one graph output; use `@pipeline(output_name=...)` to name that output. For multiple outputs, define a frozen dataclass subclass of `Outputs` with `Out[T]` fields and return an instance. A pipeline that accepts a `cfg` parameter reads `config.yaml` (or the path passed via `@pipeline(config="...")`) at compile time, with `--override key=value` values overlaid by the compile command.
+
+##### Environment-selected pipeline config (`_select`, `_env`)
+
+A pipeline `config.yaml` — root or child, including one broadcast with `propagate_config=True` — is resolved by the same loader as `--config` files (see [`_select`](#environment-selected-configs-_select) and [`_env`](#environment-variable-values-_env)), with one shape rule: the selected document, and every case and `default` branch, must be a mapping. `_defaults`/`configs` have no special meaning in a pipeline config; they are ordinary keys.
+
+```yaml
+_select:
+  env: TANGLE_ENV
+  cases:
+    prod: {dataset: prod_ds, batch_size: 500, token: {_env: PROD_TOKEN}}
+    dev: {dataset: dev_ds, batch_size: 10}
+  default: {dataset: local_ds, batch_size: 1}
+```
+
+- Resolution happens first; overrides are layered on the result. Precedence is `--override` / `.override_config` / `propagate_config` broadcast > selected branch. An `.override_config` key must exist in the child's *selected* branch, and a broadcast carries resolved values, never `_select`/`_env` nodes. Each child resolves its own config.
+- `_select` branch values keep their native YAML types (`batch_size` is an `int`). `_env` values are strings (a `default` is stringified) and are **not** YAML-coerced the way raw `--override` strings are: an environment value is opaque (`007` stays `"007"`, `no` stays `"no"`). Convert explicitly in pipeline code (`int(cfg.limit)`), or put typed values in `_select` branches.
+- Every branch is structure-checked in every environment, including the `template_file:` rejection, and a dormant branch never requires its variables. An unset or unmatched selector without `default` fails closed without echoing the value.
+- Compile identity follows the resolved values. For a config that uses `_select` or `_env`, the child sidecar name (`<child>-<hash8>.yaml`) includes a digest of the resolved config, so different selections that produce different values never share a sidecar and identical values keep the same name. Configs without `_select`/`_env` keep their existing names.
 
 Task IDs default from the left-hand variable name at the call site, converted to title case. If there is no simple left-hand variable, or if you want a stable explicit label, call `.named("Task Id")` before invoking the task. Use `.bind(...)` to pre-fill task arguments and `.with_annotations({...})` to add per-task annotations.
 
@@ -967,6 +1020,8 @@ Use these for generic downstream behavior such as alternate storage, extra annot
 ### Shared CLI helpers and logging
 
 `cli_options.py` centralizes shared Cyclopts annotations such as `BaseUrlOption`, `TokenOption`, `AuthHeaderOption`, `HeaderOption`, `ConfigOption`, and `LogTypeOption`. `cli_helpers.py` centralizes config loading, JSON printing, credential-isolation helpers, and the native-safe `LazyTangleApiClient` proxy. `logger.py` provides `ConsoleLogger`, `NullLogger`, `CaptureLogger`, `logger_for_log_type(...)`, and `run_with_logging(...)`.
+
+`ArgsContainer.load(...)` field specs are tuples (see `ArgsContainer._resolve`). To give one field an environment tier, wrap its unchanged spec: `token=EnvField("TANGLE_PROD_TOKEN", (token, None))`. The field then resolves CLI > config > `os.environ["TANGLE_PROD_TOKEN"]` > default; the raw string (empty counts as set) goes through the spec's usual converter, and a conversion error names the variable without echoing its value. Nothing is mapped automatically: fields that are not wrapped never read the environment. `args.origin(name)` reports where each field came from — `cli`, `config`, `env:NAME`, or `default` — without the value.
 
 Use these helpers for new SDK commands so top-level imports remain native-free, `--config` behavior stays consistent, credentials from config do not accidentally mix with ambient environment auth, and progress logs stay off structured stdout.
 
