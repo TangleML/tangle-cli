@@ -603,6 +603,37 @@ The rules live in one place, `tangle_cli.schema_validation`: `check_annotations(
 
 A distribution that reads these annotations from its own config file should call `check_annotations(mapping, policy=CALLER_ANNOTATION_POLICY, error_cls=...)` at config-parse time — passing its own error type and adding the config path and key to the message — so one user mistake produces one diagnostic instead of two competing ones. The compiler's own call is then the backstop for anything arriving by another route.
 
+##### Editor layout (`editor.*`)
+
+The pipeline editor stores graph layout in ordinary annotations, so layout is authorable from Python. `.with_position(x, y)` on a task or subpipeline handle writes `editor.position`, and `@pipeline(flow_direction=...)` writes the root `editor.flow-direction`:
+
+```python
+@pipeline("Daily Pulse", flow_direction="left-to-right")
+def daily_pulse() -> Out[str]:
+    scrape = SCRAPE.named("Scrape").with_position(0, 0)()
+    judge = JUDGE.named("Judge").with_position(300, 0)(rows=scrape.rows)
+    return judge.report
+```
+
+Both are pure sugar over annotations you can still write by hand, and they compile to byte-identical output:
+
+```python
+# Equivalent, and what the sugar emits:
+SCRAPE.with_annotations({"editor.position": '{"x": 0, "y": 0}'})
+@pipeline("Daily Pulse", annotations={"editor.flow-direction": "left-to-right"})
+```
+
+- **Value format is the editor's, not ours.** `editor.position` is a JSON object *string* (`'{"x": 300, "y": 120}'`) because the editor writes `JSON.stringify` and reads `JSON.parse`. Coordinates may be negative. Optional `width=` / `height=` keywords add the node-size fields the editor also reads; they are omitted entirely when not given.
+- **`flow_direction`** accepts `"left-to-right"` (what the editor writes, and what it renders today) and `"top-to-bottom"` (legacy, accepted so existing documents stay expressible). There is no default: omitting the keyword emits no annotation.
+- **Last write wins**, one rule for both spellings. `.with_position(...)` *is* a `.with_annotations({"editor.position": ...})` call, so whichever runs last sets the value, and unrelated annotations are untouched. Within a single `@pipeline(...)`, the typed `flow_direction` keyword is applied after the `annotations` mapping and therefore wins on that key.
+- **Validated without echoing values.** A non-numeric, `bool`, `NaN` or infinite coordinate, or an unknown flow direction, raises `InvalidEditorLayoutError` (a `CompileError`) at the call, before anything is written. Diagnostics name the coordinate or list the allowed directions.
+- **Positions are descriptive.** They are task annotations, not part of any `componentRef`, so they never change component digests, compile identity, or cache behaviour. On a subpipeline handle the position applies to the parent task; the child sidecar is byte-identical either way.
+- **Auto-layout interaction.** At submit time the runner lays a graph out only when no task carries a *non-zero* position, so an explicit `.with_position(...)` suppresses auto-layout and `--force-layout` overrides that. A graph positioned entirely at `(0, 0)` still counts as unpositioned and is laid out. `tangle sdk pipelines layout` writes the same canonical value this sugar writes.
+
+Graph **inputs** and **outputs** carry `editor.position` in the same way, and the editor reads it there, but there is no Python authoring surface for a graph input/output object yet — inputs come from the `In[T]` signature and outputs from the return annotation, neither of which has a place to hang layout. That is follow-up work tied to a public `graph_input()` / `graph_output()` API; until then, position inputs by editing the YAML or by using the editor.
+
+The key names, the serialized format, and the validation live in `tangle_cli.editor_layout` (`POSITION_ANNOTATION`, `FLOW_DIRECTION_ANNOTATION`, `FLOW_DIRECTIONS`, `position_annotation_value`, `validate_flow_direction`), which the CLI's own `pipelines layout` and the runner's auto-layout gate share, so a tool emitting layout cannot drift from what the editor reads. That module is stdlib-only and lives outside `python_pipeline` on purpose, so layout and submit paths do not pull in the authoring/codegen stack; it raises whatever `error_cls` the caller injects, and the authoring surfaces inject `InvalidEditorLayoutError`.
+
 ##### Conditional task execution
 
 Pipeline inputs used as conditions are ordinary `In[str]` values; there is no special conditional input annotation. Pass the value through the reserved task-call metadata keyword `is_enabled=`:

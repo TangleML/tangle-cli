@@ -29,6 +29,15 @@ class InvalidArgumentTypeError(CompileError):
     """Raised on an argument value with no supported emit dispatch."""
 
 
+class InvalidEditorLayoutError(CompileError):
+    """Raised on a malformed value passed to the typed layout sugar.
+
+    Covers ``.with_position`` coordinates and
+    ``@pipeline(flow_direction=...)`` only; hand-written
+    ``.with_annotations`` values still pass through unchecked.
+    """
+
+
 class InvalidPipelineAnnotationsError(CompileError):
     """Raised on a malformed caller-supplied ``pipeline_annotations`` mapping.
 

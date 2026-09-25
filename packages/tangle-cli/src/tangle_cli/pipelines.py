@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 import yaml
 
+from .editor_layout import POSITION_ANNOTATION
 from .pipeline_spec_utils import _extract_task_output_refs
 from .pipeline_validation import (
     PipelineValidationError,
@@ -30,8 +31,6 @@ from .utils import dump_yaml
 
 if TYPE_CHECKING:
     from .pipeline_compiler import CompileResult
-
-POSITION_ANNOTATION = "editor.position"
 
 __all__ = [
     "HydrateResult",
