@@ -38,6 +38,14 @@ class InvalidEditorLayoutError(CompileError):
     """
 
 
+class InvalidInputDefaultError(CompileError):
+    """Raised on an ``In[T]`` parameter default the schema cannot carry.
+
+    Covers an unsupported type, a non-finite float, and a default whose type
+    contradicts the declared ``T``. Messages name the input, never the value.
+    """
+
+
 class InvalidGraphIoError(CompileError):
     """Raised on an unusable ``graph_input()`` / ``graph_output()`` call.
 

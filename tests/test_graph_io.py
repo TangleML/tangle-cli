@@ -224,10 +224,11 @@ def test_optional_alone_emits_no_default(tmp_path):
     ]
 
 
-def test_a_non_string_default_is_refused_without_echoing_it(tmp_path):
-    """``InputSpec.default`` is a string in the pipeline schema; catching it
-    here names the field instead of failing later against a schema path."""
-    message = _expect(
+def test_a_scalar_default_is_rendered_as_the_schema_string(tmp_path):
+    """``InputSpec.default`` is a string in the pipeline schema, so the value
+    is rendered here rather than failing later against a schema path. Full
+    rules and refusals live in ``test_signature_defaults.py``."""
+    doc = _doc(_compile(
         tmp_path,
         '''
         @pipeline("P")
@@ -236,11 +237,27 @@ def test_a_non_string_default_is_refused_without_echoing_it(tmp_path):
             run_greet = greet(greeting=value)
             return run_greet
         ''',
+        "scalar_default",
+    ))
+
+    assert doc["inputs"][0]["default"] == "41"
+
+
+def test_an_unrenderable_default_is_refused_without_echoing_it(tmp_path):
+    message = _expect(
+        tmp_path,
+        '''
+        @pipeline("P")
+        def p() -> Out[str]:
+            value = graph_input("value", "Integer", default=4.1)
+            run_greet = greet(greeting=value)
+            return run_greet
+        ''',
         "bad_default",
     )
 
-    assert "default" in message and "int" in message
-    assert "41" not in message
+    assert "default" in message and "float" in message
+    assert "4.1" not in message
 
 
 # ---------------------------------------------------------------------------

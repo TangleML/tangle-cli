@@ -591,6 +591,23 @@ def greeting_pipeline(who: In[str], cfg) -> Out[str]:
 
 `In[T]` parameters become runtime graph inputs. A single `-> Out[T]` return exposes one graph output; use `@pipeline(output_name=...)` to name that output. For multiple outputs, define a frozen dataclass subclass of `Outputs` with `Out[T]` fields and return an instance. A pipeline that accepts a `cfg` parameter reads `config.yaml` (or the path passed via `@pipeline(config="...")`) at compile time, with `--override key=value` values overlaid by the compile command.
 
+###### Input defaults
+
+A parameter default becomes the input's `default`, which the schema carries as a string, so `threshold: In[int] = 5` emits `default: '5'`. The same rules apply to `graph_input(default=...)`:
+
+| Default | Emitted | Note |
+| --- | --- | --- |
+| `"x"` | `x` | Unchanged, always accepted |
+| `5`, `-1` | `'5'`, `'-1'` | |
+| `1.5` | `'1.5'` | `In[float] = 1` emits `'1'`, not `'1.0'` |
+| `True` / `False` | `'True'` / `'False'` | Python spelling, as `@task` component inputs use; the generated container parses it case-insensitively |
+| `{"b": 1, "a": 2}`, `[2, 1]` | `'{"a": 2, "b": 1}'`, `'[2, 1]'` | JSON with sorted keys, so the document is reproducible |
+| `None` | `null` | Schema-valid; `graph_input` instead rejects an explicit `default=None` — omit the argument |
+
+Anything else — an enum, a dataclass, a `datetime`, a `Path` — raises `InvalidInputDefaultError` (a `CompileError`) naming the input and the type, never the value. Render it yourself and pass the string. A non-finite float (`nan`, `inf`) is rejected for the same reason: JSON has no spelling for it.
+
+The default's type must also agree with the declared one. `In[int] = 1.5`, `In[str] = 5`, and `In[int] = True` (a `bool` is a Python `int`, but not a Tangle `Integer`) are all refused. A `graph_input` type is a Tangle type string describing the wire form, so it additionally accepts an already-rendered string: `graph_input("n_samples", "Integer", default="-1")` emits exactly `-1`, which is how every default in the corpus is written. Types with no scalar Python equivalent, such as `Json`, are not type-checked.
+
 ##### Environment-selected pipeline config (`_select`, `_env`)
 
 A pipeline `config.yaml` — root or child, including one broadcast with `propagate_config=True` — is resolved by the same loader as `--config` files (see [`_select`](#environment-selected-configs-_select) and [`_env`](#environment-variable-values-_env)), with one shape rule: the selected document, and every case and `default` branch, must be a mapping. `_defaults`/`configs` have no special meaning in a pipeline config; they are ordinary keys.
@@ -664,7 +681,8 @@ def daily_pulse() -> Out[str]:
 - **A name is declared once.** Duplicates are rejected, including a collision with an `In[...]` parameter or with the name the return annotation contributes (`Out[T]`'s `output_name`, or an `Outputs` field).
 - **Outputs wire to a handle, never a constant** — a task output or a graph input, the same rule the `Outputs` return path enforces. Returning a value *and* declaring outputs is supported: the returned output is appended after the declared ones.
 - **Layout comes along**: `position=(x, y)` writes the same canonical `editor.position` annotation as `.with_position(...)`, which is how a graph input gets a position in the editor. `annotations={...}` is validated under the same caller policy as `pipeline_annotations`.
-- **Validated up front, without echoing values.** A non-string `default` (the schema's `InputSpec.default` is a string), a non-string name/type/description, a non-boolean `optional`, a constant output, or a call outside a `@pipeline` body raises `InvalidGraphIoError` (a `CompileError`) naming the field, never the value.
+- **`default` follows the [input-default rules](#input-defaults)** — scalars and JSON containers are rendered for you, an already-rendered string is passed through untouched, and the type must agree with the declared Tangle type.
+- **Validated up front, without echoing values.** A non-string name/type/description, a non-boolean `optional`, a constant output, or a call outside a `@pipeline` body raises `InvalidGraphIoError` (a `CompileError`) naming the field, never the value.
 
 The signature route remains the recommended default: it is typed, it is checked by your IDE, and it reads better. Reach for these when porting existing YAML or when the shape genuinely needs it.
 
