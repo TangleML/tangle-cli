@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Callable, Iterator
 
 from cyclopts import App, Parameter
 
-from .args_container import ArgsContainer
+from .args_container import ArgsContainer, strict_bool, strict_int
 from .cli_helpers import (
     LazyTangleApiClient,
     api_arg_specs,
@@ -276,10 +276,10 @@ def pipeline_runs_submit(
         "arg_secrets_config": ("arg_secrets", None, None, True),
         "annotation": (annotation, None),
         "hydrate": (hydrate, True),
-        "dry_run": (dry_run, None),
+        "dry_run": (dry_run, None, strict_bool),
         "run_as": (run_as, None),
         "trusted_source": (trusted_source, None),
-        "trusted_hydration_cli": ("trusted_hydration_cli", trusted_hydration, None, False),
+        "trusted_hydration_cli": ("trusted_hydration_cli", trusted_hydration, None, False, False, strict_bool),
         "submit_recovery_attempts": (submit_recovery_attempts, _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
@@ -590,10 +590,10 @@ def pipeline_runs_submit_from_python(
         "arg_secret": (arg_secret, None),
         "arg_secrets_config": ("arg_secrets", None, None, True),
         "annotation": (annotation, None),
-        "dry_run": (dry_run, None),
+        "dry_run": (dry_run, None, strict_bool),
         "run_as": (run_as, None),
         "trusted_source": (trusted_source, None),
-        "trusted_hydration_cli": ("trusted_hydration_cli", trusted_hydration, None, False),
+        "trusted_hydration_cli": ("trusted_hydration_cli", trusted_hydration, None, False, False, strict_bool),
         "submit_recovery_attempts": (submit_recovery_attempts, _DEFAULT_SUBMIT_RECOVERY_ATTEMPTS),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
@@ -676,9 +676,9 @@ def pipeline_runs_details(
     specs = {
         "run_id": (run_id,),
         "execution_id": (execution_id, None),
-        "include_implementations": (include_implementations, None),
-        "include_annotations": (include_annotations, None),
-        "include_execution_state": (include_execution_state, None),
+        "include_implementations": (include_implementations, None, strict_bool),
+        "include_annotations": (include_annotations, None, strict_bool),
+        "include_execution_state": (include_execution_state, None, strict_bool),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
@@ -896,7 +896,7 @@ def pipeline_runs_logs(
     """Print Tangle API container logs for an execution id."""
     specs = {
         "execution_id": (execution_id,),
-        "stream": (stream, None),
+        "stream": (stream, None, strict_bool),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }
@@ -964,12 +964,12 @@ def pipeline_runs_search(
         "annotations_json": (annotations_json, None),
         "start_date": (start_date, None),
         "end_date": (end_date, None),
-        "local_time": (local_time, None),
+        "local_time": (local_time, None, strict_bool),
         "raw_query": (raw_query, None),
-        "limit": (limit, None),
+        "limit": (limit, None, strict_int),
         "page_token": (page_token, None),
-        "include_pipeline_names": (include_pipeline_names, None),
-        "include_execution_stats": (include_execution_stats, None),
+        "include_pipeline_names": (include_pipeline_names, None, strict_bool),
+        "include_execution_stats": (include_execution_stats, None, strict_bool),
         "output": (output, "json"),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
@@ -1052,7 +1052,7 @@ def pipeline_runs_export(
     specs = {
         "run_id": (run_id,),
         "output": (output, None, optional_path),
-        "dehydrate": (dehydrate, None),
+        "dehydrate": (dehydrate, None, strict_bool),
         "log_type": (log_type, "console"),
         **api_arg_specs(base_url=base_url, token=token, auth_header=auth_header, header=header),
     }

@@ -4691,10 +4691,20 @@ def test_submit_from_python_rejects_a_misspelled_config_key_in_a_later_entry(
     [
         # A non-int budget crashes an ambiguous submit before its recovery
         # lookup, so a possibly-created run is never reconciled.
-        ({"submit_recovery_attempts": "oops"}, "submit_recovery_attempts must be"),
+        (
+            {"submit_recovery_attempts": "oops"},
+            "Invalid value for submit_recovery_attempts from config key "
+            "'submit_recovery_attempts': expected an integer",
+        ),
         ({"submit_recovery_attempts": -1}, "submit_recovery_attempts must be"),
-        # bool("false") is True, which would silently allow all hydration.
-        ({"trusted_hydration_cli": "false"}, "trusted_hydration_cli must be a boolean"),
+        # bool("maybe") is True, which would silently allow all hydration; the
+        # field is strictly typed, so only an explicit boolean spelling passes.
+        (
+            {"trusted_hydration_cli": "maybe"},
+            "Invalid value for trusted_hydration_cli from config key "
+            "'trusted_hydration_cli': expected a boolean",
+        ),
+        ({"trusted_hydration_cli": ["yes"]}, "'trusted_hydration_cli': expected a boolean"),
     ],
 )
 def test_submit_from_python_rejects_unsafe_config_types(

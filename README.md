@@ -296,7 +296,7 @@ limit: {_env: RUN_LIMIT, default: 10}
 - The directive is exactly `{_env: NAME}` or `{_env: NAME, default: <scalar>}`. Any other key beside `_env` — including underscore-prefixed keys and aliases such as `fallback` — is rejected, and `NAME` follows the same rule as `_select.env` (`[A-Za-z_][A-Za-z0-9_]*`).
 - It may appear anywhere a value may appear: under a config key, in `_defaults`, in `configs` entries, and inside nested maps and lists. A document or config-entry mapping is never itself a directive, so an `_env:` helper/anchor key at the top level of a config object is unaffected.
 - A missing variable without `default` fails closed with the variable name, the key path (for example `configs[1].token`), and the config file. An empty string counts as set and is used as-is.
-- The resolved value is always a string, and a `default` is stringified the same way: numbers and booleans use their JSON spelling (`10`, `1.5`, `true`), dates use ISO format, and `null`/maps/lists are rejected (quote `''` for an empty default). A field therefore has one type whether or not the variable is set, and the command's usual conversion (JSON fields, repeatable options, enums, typed converters) applies downstream in both cases.
+- The resolved value is always a string, and a `default` is stringified the same way: numbers and booleans use their JSON spelling (`10`, `1.5`, `true`), dates use ISO format, and `null`/maps/lists are rejected (quote `''` for an empty default). A field therefore has one type whether or not the variable is set, and the command's field typing (below) applies in both cases.
 - Diagnostics name the variable, never its value, and no directive value is logged. There is no `${VAR}` string interpolation.
 
 With `_select`, selection happens first, and `_env` applies to the selected document:
@@ -314,6 +314,17 @@ _select:
 Every `_env` directive — in every case and `default` branch, and in helper sections — is shape-checked before any variable is read, so a malformed directive fails identically in every environment. Only the directives in the selected document's config entries and `_defaults` are looked up; a dormant branch never requires its variables. `_select` itself is unchanged.
 
 Precedence per field is **CLI > config > environment > default**: an explicit CLI value wins, then the config key (including a value read through `_env`), then an environment variable the command has opted that field into (see [`EnvField`](#shared-cli-helpers-and-logging)), then the default. As before, a CLI value equal to the option default is indistinguishable from an omitted one.
+
+#### Scalar field typing
+
+Command flags and numeric options are typed strictly, so an environment or config string can never reach them as the wrong type. This matters most for flags: `force: {_env: DELETE_FORCE, default: false}` yields the string `"false"`, which Python treats as truthy, so without typing it would skip the delete confirmation.
+
+- A field is typed when its default is a `bool`, `int`, or `float`, or when its spec names a strict converter (`strict_bool`, `strict_int`, `strict_float` from `tangle_cli.args_container`). The latter is how a `bool | None` / `int | None` option with a `None` default is typed; the built-in commands use it for their flags, e.g. `dry_run`, `trusted_hydration_cli`, `allow_downgrade`, and `limit`.
+- **bool** accepts a YAML/JSON boolean, `0`/`1`, or exactly one of `true`/`false`, `yes`/`no`, `1`/`0` (case-insensitive, no surrounding whitespace). Anything else is rejected, including `""`, `on`/`off`, lists, and maps.
+- **int** accepts an integer or a string of ASCII digits with an optional sign. `1.0`, `1e3`, `0x1f`, `1_000`, and booleans are rejected. **float** accepts a number or a decimal string with an optional exponent; `nan`/`inf` are rejected.
+- The same rule applies to a config **string literal** (`force: "false"` → `False`), a value read through `_env`, and an `EnvField` variable. Before 0.1.21 a quoted `"false"` also reached a flag as a truthy string. CLI values are already typed by the parser.
+- A rejection names the field and its source — config key, variable, or `_env` at a config key — never the value.
+- Only scalar fields are typed. String fields, JSON fields, repeatable options, enums, and values nested inside maps or lists are unchanged: an `_env` inside a nested structure stays a string. Pipeline `cfg` files keep their own typing rules (native YAML values; `_env` strings are not coerced).
 
 ## API schema cache and dynamic commands
 
@@ -1021,7 +1032,7 @@ Use these for generic downstream behavior such as alternate storage, extra annot
 
 `cli_options.py` centralizes shared Cyclopts annotations such as `BaseUrlOption`, `TokenOption`, `AuthHeaderOption`, `HeaderOption`, `ConfigOption`, and `LogTypeOption`. `cli_helpers.py` centralizes config loading, JSON printing, credential-isolation helpers, and the native-safe `LazyTangleApiClient` proxy. `logger.py` provides `ConsoleLogger`, `NullLogger`, `CaptureLogger`, `logger_for_log_type(...)`, and `run_with_logging(...)`.
 
-`ArgsContainer.load(...)` field specs are tuples (see `ArgsContainer._resolve`). To give one field an environment tier, wrap its unchanged spec: `token=EnvField("TANGLE_PROD_TOKEN", (token, None))`. The field then resolves CLI > config > `os.environ["TANGLE_PROD_TOKEN"]` > default; the raw string (empty counts as set) goes through the spec's usual converter, and a conversion error names the variable without echoing its value. Nothing is mapped automatically: fields that are not wrapped never read the environment. `args.origin(name)` reports where each field came from — `cli`, `config`, `env:NAME`, or `default` — without the value.
+`ArgsContainer.load(...)` field specs are tuples (see `ArgsContainer._resolve`). To give one field an environment tier, wrap its unchanged spec: `token=EnvField("TANGLE_PROD_TOKEN", (token, None))`. The field then resolves CLI > config > `os.environ["TANGLE_PROD_TOKEN"]` > default; the raw string (empty counts as set) goes through the spec's converter or the [scalar typing](#scalar-field-typing), and a conversion error names the variable without echoing its value. Nothing is mapped automatically: fields that are not wrapped never read the environment. `args.origin(name)` reports where each field came from — `cli`, `config`, `env:NAME`, or `default` — without the value.
 
 Use these helpers for new SDK commands so top-level imports remain native-free, `--config` behavior stays consistent, credentials from config do not accidentally mix with ambient environment auth, and progress logs stay off structured stdout.
 

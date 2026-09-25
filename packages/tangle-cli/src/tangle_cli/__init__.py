@@ -14,6 +14,6 @@ from tangle_cli.dynamic_discovery_client import TangleDynamicDiscoveryClient
 try:
     __version__ = metadata_version("tangle-cli")
 except PackageNotFoundError:
-    __version__ = "0.1.20"
+    __version__ = "0.1.21"
 
 __all__ = ["TangleDynamicDiscoveryClient", "__version__"]

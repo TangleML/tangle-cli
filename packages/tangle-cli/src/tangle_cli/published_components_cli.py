@@ -7,6 +7,7 @@ from typing import Annotated, Any
 
 from cyclopts import App, Parameter
 
+from .args_container import strict_bool
 from .cli_helpers import (
     LazyTangleApiClient,
     api_arg_specs,
@@ -79,7 +80,7 @@ def published_components_search(
     for args in load_args_or_exit(
         config,
         name=(name, None),
-        include_deprecated=(include_deprecated, None),
+        include_deprecated=(include_deprecated, None, strict_bool),
         published_by=(published_by, None),
         digest=(digest, None),
         log_type=(log_type, "console"),
@@ -141,10 +142,10 @@ def published_components_inspect(
         config,
         name=(name, None),
         digest=(digest, None),
-        all_versions=(all_versions, None),
-        include_deprecated=(include_deprecated, None),
-        follow_deprecated=(follow_deprecated, None),
-        full_spec=(full_spec, None),
+        all_versions=(all_versions, None, strict_bool),
+        include_deprecated=(include_deprecated, None, strict_bool),
+        follow_deprecated=(follow_deprecated, None, strict_bool),
+        full_spec=(full_spec, None, strict_bool),
         published_by=(published_by, None),
         log_type=(log_type, "console"),
         **api_arg_specs(
@@ -278,8 +279,8 @@ def published_components_publish(
         name=(name, None),
         description=(description, None),
         annotations=("annotations", annotations, None, True),
-        dry_run=(dry_run, None),
-        allow_downgrade=(allow_downgrade, None),
+        dry_run=(dry_run, None, strict_bool),
+        allow_downgrade=(allow_downgrade, None, strict_bool),
         git_remote_sha=(git_remote_sha, None),
         git_remote_branch=(git_remote_branch, None),
         git_remote_url=(git_remote_url, None),
