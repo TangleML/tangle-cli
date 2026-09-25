@@ -15,7 +15,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .errors import CompileError
+from tangle_cli.editor_layout import POSITION_ANNOTATION, position_annotation_value
+
+from .errors import CompileError, InvalidEditorLayoutError
 from .graph import EXECUTION_OPTIONS_UNSET, IS_ENABLED_UNSET
 
 _UNWRAPPED_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -221,6 +223,36 @@ class CallableRef:
         for k, v in ann.items():
             merged[k] = v  # type: ignore[assignment]
         return self._replace(annotations=merged)
+
+    def with_position(
+        self,
+        x: float,
+        y: float,
+        *,
+        width: float | None = None,
+        height: float | None = None,
+    ) -> "CallableRef":
+        """Return a new CallableRef carrying the ``editor.position``
+        annotation for ``x``/``y``, with optional node ``width``/``height``.
+
+        Sugar over :meth:`with_annotations`, which is what makes the last
+        write to ``editor.position`` win regardless of spelling.
+
+        Raises:
+            InvalidEditorLayoutError: On a non-numeric or non-finite
+                coordinate.
+        """
+        return self.with_annotations(
+            {
+                POSITION_ANNOTATION: position_annotation_value(
+                    x,
+                    y,
+                    width=width,
+                    height=height,
+                    error_cls=InvalidEditorLayoutError,
+                )
+            }
+        )
 
     # ------------------------------------------------------------------
     # @task codegen — materialize() writes the component YAML.

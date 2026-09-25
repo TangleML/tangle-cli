@@ -13,7 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from tangle_cli.editor_layout import (
+    FLOW_DIRECTION_ANNOTATION,
+    validate_flow_direction,
+)
+
 from . import emit
+from .errors import InvalidEditorLayoutError
 from .graph import GraphBuilder
 
 
@@ -130,6 +136,7 @@ def pipeline(
     config: str | None = None,
     annotations: dict[str, Any] | None = None,
     task_annotations: dict[str, Any] | None = None,
+    flow_direction: str | None = None,
     output_name: str = "wait_for_output",
     propagate_config: bool = False,
 ) -> Callable[[Callable[..., Any]], PipelineFn]:
@@ -149,6 +156,10 @@ def pipeline(
             time so ``--override key=value`` pairs can merge in.
         annotations: ``metadata.annotations`` block (e.g. ``version``,
             ``author``).
+        flow_direction: Editor rendering direction, written as the
+            ``editor.flow-direction`` root annotation
+            (``"left-to-right"`` / ``"top-to-bottom"``). Sugar over
+            ``annotations``; applied last, so it wins on that key.
         task_annotations: Per-task default annotations applied to every
             task in the pipeline. Accepted for API completeness but not
             wired through in MVP — the PoC sets per-task annotations
@@ -168,12 +179,20 @@ def pipeline(
             # Tests inside generated modules may not have a real file.
             caller_dir = None
 
+        merged_annotations = dict(annotations or {})
+        if flow_direction is not None:
+            # Assigned after the mapping: the typed keyword wins, and an
+            # existing key keeps its position in key order.
+            merged_annotations[FLOW_DIRECTION_ANNOTATION] = validate_flow_direction(
+                flow_direction, error_cls=InvalidEditorLayoutError
+            )
+
         return PipelineFn(
             fn=fn,
             name=name,
             description=description,
             config_path=config,
-            annotations=dict(annotations or {}),
+            annotations=merged_annotations,
             task_annotations=dict(task_annotations or {}),
             caller_dir=caller_dir,
             output_name=output_name,

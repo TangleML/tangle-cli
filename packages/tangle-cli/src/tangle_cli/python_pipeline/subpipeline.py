@@ -36,7 +36,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from .errors import CompileError
+from tangle_cli.editor_layout import POSITION_ANNOTATION, position_annotation_value
+
+from .errors import CompileError, InvalidEditorLayoutError
 
 if TYPE_CHECKING:  # pragma: no cover
     from .pipeline import PipelineFn
@@ -89,6 +91,32 @@ class SubpipelineRef:
         for k, v in ann.items():
             merged[k] = v  # type: ignore[assignment]
         return replace(self, annotations=merged)
+
+    def with_position(
+        self,
+        x: float,
+        y: float,
+        *,
+        width: float | None = None,
+        height: float | None = None,
+    ) -> "SubpipelineRef":
+        """Return a new handle carrying ``editor.position`` for ``x``/``y``.
+
+        Positions the PARENT task in the enclosing graph — the same scope
+        :meth:`with_annotations` writes to; child layout is authored inside
+        the child pipeline. Otherwise as :meth:`CallableRef.with_position`.
+        """
+        return self.with_annotations(
+            {
+                POSITION_ANNOTATION: position_annotation_value(
+                    x,
+                    y,
+                    width=width,
+                    height=height,
+                    error_cls=InvalidEditorLayoutError,
+                )
+            }
+        )
 
     def override_config(self, **kwargs: Any) -> "SubpipelineRef":
         """Return a new handle with compile-time cfg overrides for the direct

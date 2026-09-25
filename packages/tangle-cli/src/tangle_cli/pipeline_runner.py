@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from .editor_layout import POSITION_ANNOTATION
 from .pipeline_run_manager import (
     PipelineRunContext,
     PipelineRunError,
@@ -124,7 +125,7 @@ class PipelineRunnerHooks(PipelineRunHooks):
             if not isinstance(task, Mapping):
                 continue
             annotations = task.get("annotations", {})
-            position = annotations.get("editor.position") if isinstance(annotations, Mapping) else None
+            position = annotations.get(POSITION_ANNOTATION) if isinstance(annotations, Mapping) else None
             if isinstance(position, str):
                 try:
                     import json
