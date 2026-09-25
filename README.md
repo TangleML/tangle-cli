@@ -603,6 +603,37 @@ The rules live in one place, `tangle_cli.schema_validation`: `check_annotations(
 
 A distribution that reads these annotations from its own config file should call `check_annotations(mapping, policy=CALLER_ANNOTATION_POLICY, error_cls=...)` at config-parse time — passing its own error type and adding the config path and key to the message — so one user mistake produces one diagnostic instead of two competing ones. The compiler's own call is then the backstop for anything arriving by another route.
 
+##### Declaring graph inputs and outputs from the body
+
+A pipeline's inputs normally come from its `In[T]` parameters and its outputs from the return annotation. That only covers graphs whose I/O is Python-shaped. `graph_input()` / `graph_output()` declare the same entries directly on the active pipeline, for the shapes a signature cannot express:
+
+```python
+from tangle_cli.python_pipeline import Out, graph_input, graph_output, pipeline
+
+@pipeline("Daily Pulse")
+def daily_pulse() -> Out[str]:
+    created = graph_input(
+        "Pipeline Creation Time", "String", default="Use as a cache busting mechanism"
+    )
+    limit = graph_input("query_limit", "Integer", optional=True, when=has_limit)
+    scrape = SCRAPE.named("Scrape").with_position(0, 0)(created=created, limit=limit)
+    graph_output("scrape_date", scrape.scrape_date, "String")
+    return scrape
+```
+
+- **A name is a string, not an identifier.** `"Pipeline Creation Time"` is a legal Tangle input name and an illegal Python parameter name; same for a type that is a Tangle type string (`"Json"`) rather than a Python type.
+- **`when=False` declares nothing** and returns `None`, so a conditional input stays a single assignment instead of an `if`/`else` around the call site.
+- **`default` implies `optional: true`** unless `optional=False` is passed. This matches what a defaulted `In[T]` parameter emits; the corpus also contains defaulted-but-required inputs, which is why the implication is overridable.
+- **Declaration order is signature parameters first, then body order**, and it is the order the entries appear in the document.
+- **A name is declared once.** Duplicates are rejected, including a collision with an `In[...]` parameter or with the name the return annotation contributes (`Out[T]`'s `output_name`, or an `Outputs` field).
+- **Outputs wire to a handle, never a constant** — a task output or a graph input, the same rule the `Outputs` return path enforces. Returning a value *and* declaring outputs is supported: the returned output is appended after the declared ones.
+- **Layout comes along**: `position=(x, y)` writes the same canonical `editor.position` annotation as `.with_position(...)`, which is how a graph input gets a position in the editor. `annotations={...}` is validated under the same caller policy as `pipeline_annotations`.
+- **Validated up front, without echoing values.** A non-string `default` (the schema's `InputSpec.default` is a string), a non-string name/type/description, a non-boolean `optional`, a constant output, or a call outside a `@pipeline` body raises `InvalidGraphIoError` (a `CompileError`) naming the field, never the value.
+
+The signature route remains the recommended default: it is typed, it is checked by your IDE, and it reads better. Reach for these when porting existing YAML or when the shape genuinely needs it.
+
+Porting an existing helper that appended to the builder by hand (for example relevance-tools' `_gin` / `_gout`): the emitted document is identical except in two places. An input declared with a `default` and no explicit `optional` gains `optional: true`, because that is what a defaulted `In[T]` parameter already emits and what the majority of the corpus carries; pass `optional=False` to keep it required. An input declaring both keys emits `default` before `optional`, which is the order the corpus uses 28 times against 3 for the reverse.
+
 ##### Editor layout (`editor.*`)
 
 The pipeline editor stores graph layout in ordinary annotations, so layout is authorable from Python. `.with_position(x, y)` on a task or subpipeline handle writes `editor.position`, and `@pipeline(flow_direction=...)` writes the root `editor.flow-direction`:
@@ -630,7 +661,7 @@ SCRAPE.with_annotations({"editor.position": '{"x": 0, "y": 0}'})
 - **Positions are descriptive.** They are task annotations, not part of any `componentRef`, so they never change component digests, compile identity, or cache behaviour. On a subpipeline handle the position applies to the parent task; the child sidecar is byte-identical either way.
 - **Auto-layout interaction.** At submit time the runner lays a graph out only when no task carries a *non-zero* position, so an explicit `.with_position(...)` suppresses auto-layout and `--force-layout` overrides that. A graph positioned entirely at `(0, 0)` still counts as unpositioned and is laid out. `tangle sdk pipelines layout` writes the same canonical value this sugar writes.
 
-Graph **inputs** and **outputs** carry `editor.position` in the same way, and the editor reads it there, but there is no Python authoring surface for a graph input/output object yet — inputs come from the `In[T]` signature and outputs from the return annotation, neither of which has a place to hang layout. That is follow-up work tied to a public `graph_input()` / `graph_output()` API; until then, position inputs by editing the YAML or by using the editor.
+Graph **inputs** and **outputs** carry `editor.position` in the same way. An `In[T]` parameter has nowhere to hang layout, so positioning those means declaring them with `graph_input(..., position=(x, y))` instead — see the section above.
 
 The key names, the serialized format, and the validation live in `tangle_cli.editor_layout` (`POSITION_ANNOTATION`, `FLOW_DIRECTION_ANNOTATION`, `FLOW_DIRECTIONS`, `position_annotation_value`, `validate_flow_direction`), which the CLI's own `pipelines layout` and the runner's auto-layout gate share, so a tool emitting layout cannot drift from what the editor reads. That module is stdlib-only and lives outside `python_pipeline` on purpose, so layout and submit paths do not pull in the authoring/codegen stack; it raises whatever `error_cls` the caller injects, and the authoring surfaces inject `InvalidEditorLayoutError`.
 

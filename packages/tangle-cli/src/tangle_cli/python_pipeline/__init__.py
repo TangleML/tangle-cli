@@ -21,6 +21,7 @@ and lowered to the dehydrated dict shape by :mod:`.emit`.
 from __future__ import annotations
 
 from .dynamic_data import dynamic_secret
+from .graph_io import graph_input, graph_output
 from .pipeline import pipeline
 from .raw import raw
 from .ref import ref
@@ -33,6 +34,8 @@ from .types import In, Out, Outputs
 
 __all__ = [
     "pipeline",
+    "graph_input",
+    "graph_output",
     "task",
     "Publish",
     "registered",
