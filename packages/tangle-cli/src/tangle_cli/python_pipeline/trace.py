@@ -285,13 +285,20 @@ def trace_pipeline(
         inner = _annotation_inner_type(return_anno)
         type_str = _python_type_to_tangle_type(inner)
         output_name = pipeline_fn.output_name
+        _ensure_no_duplicate_output(builder, output_name)
         builder.outputs.append({"name": output_name, "type": type_str})
         builder.output_name = output_name
-        builder.output_taskref = EdgeRef(
+        edge = EdgeRef(
             kind="taskOutput",
             task_id=result._task_id,
             output=result._resolved_output_name(),
         )
+        builder.output_taskref = edge
+        if builder.output_values:
+            # graph_output() already populated the multi-output map, which
+            # emit PREFERS; the returned output has to join it or it would be
+            # silently dropped. Declared last, after the body's own outputs.
+            builder.output_values[output_name] = edge
     elif return_anno is not inspect.Signature.empty and _is_outputs_class(return_anno):
         _trace_multi_output(builder, pipeline_fn, return_anno, result)
 
@@ -355,8 +362,21 @@ def _trace_multi_output(
                 "outputs."
             )
         type_str = _python_type_to_tangle_type(inner)
+        _ensure_no_duplicate_output(builder, field_name)
         builder.outputs.append({"name": field_name, "type": type_str})
         builder.output_values[field_name] = edge
+
+
+def _ensure_no_duplicate_output(builder: GraphBuilder, name: str) -> None:
+    """Reject a return-annotation output that ``graph_output()`` already
+    declared, instead of emitting the name twice."""
+    if any(entry.get("name") == name for entry in builder.outputs):
+        from .errors import InvalidGraphIoError
+
+        raise InvalidGraphIoError(
+            f"graph output {name!r} is declared by graph_output() and by the "
+            f"return annotation of pipeline {builder.name!r}. Declare it once."
+        )
 
 
 # Re-export commonly-used names.

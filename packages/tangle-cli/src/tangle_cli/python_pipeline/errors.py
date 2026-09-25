@@ -38,6 +38,15 @@ class InvalidEditorLayoutError(CompileError):
     """
 
 
+class InvalidGraphIoError(CompileError):
+    """Raised on an unusable ``graph_input()`` / ``graph_output()`` call.
+
+    Covers declaration outside a trace, duplicate names, fields the pipeline
+    schema would reject, and constant graph outputs. Messages name the field,
+    never the value.
+    """
+
+
 class InvalidPipelineAnnotationsError(CompileError):
     """Raised on a malformed caller-supplied ``pipeline_annotations`` mapping.
 

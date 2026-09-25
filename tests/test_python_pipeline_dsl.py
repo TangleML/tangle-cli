@@ -52,6 +52,8 @@ class TestPublicSurface:
     def test_all_names_are_exported(self):
         assert set(pp.__all__) == {
             "pipeline",
+            "graph_input",
+            "graph_output",
             "task",
             "Publish",
             "registered",
