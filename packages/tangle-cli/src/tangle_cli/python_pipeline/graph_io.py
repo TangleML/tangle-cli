@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from tangle_cli.editor_layout import POSITION_ANNOTATION, position_annotation_value
+from tangle_cli.input_defaults import serialize_input_default
 from tangle_cli.schema_validation import CALLER_ANNOTATION_POLICY, check_annotations
 
 from .errors import InvalidEditorLayoutError, InvalidGraphIoError
@@ -74,9 +75,21 @@ def graph_input(
     if description is not None:
         entry["description"] = _check_str("description", description)
     if default is not _UNSET:
-        # InputSpec.default is a string in the schema; a non-string default
-        # would only fail later, against a schema path instead of this call.
-        entry["default"] = _check_str("default", default, hint="pass str(value)")
+        # InputSpec.default is a string in the schema, so the value is
+        # rendered here rather than failing later against a schema path.
+        # An explicit default=None is a mistake worth reporting: omit the
+        # argument to declare no default.
+        if default is None:
+            raise InvalidGraphIoError(
+                "default must not be None. Omit the argument to declare "
+                "an input with no default."
+            )
+        entry["default"] = serialize_input_default(
+            default,
+            field=f"graph input {name!r}",
+            declared_type=type,
+            error_cls=InvalidGraphIoError,
+        )
         entry["optional"] = True if optional is None else _check_bool(optional)
     elif optional is not None:
         entry["optional"] = _check_bool(optional)

@@ -32,7 +32,9 @@ import typing
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
-from .errors import CompileError
+from tangle_cli.input_defaults import serialize_input_default
+
+from .errors import CompileError, InvalidInputDefaultError
 from .graph import EdgeRef, GraphBuilder
 from .placeholders import GraphInputPlaceholder, TaskOutputProxy
 from .types import In, Out, Outputs
@@ -166,6 +168,20 @@ def declared_output_names(pipeline_fn: "PipelineFn") -> tuple[str, ...] | None:
     return None
 
 
+def _serialize_signature_default(value: Any, name: str, inner: Any) -> Any:
+    """Return the YAML form of an ``In[T]`` parameter default.
+
+    ``None`` is passed through: ``default: null`` is schema-valid, and
+    rewriting it would change existing documents for no gain.
+    """
+    return serialize_input_default(
+        value,
+        field=f"input {name!r}",
+        declared_type=inner,
+        error_cls=InvalidInputDefaultError,
+    )
+
+
 def _python_type_to_tangle_type(t: Any) -> str:
     """Map ``str``/``int``/etc. to Tangle type strings."""
     if t is str:
@@ -243,7 +259,11 @@ def trace_pipeline(
 
             has_default = param.default is not inspect.Parameter.empty
             if has_default:
-                entry["default"] = param.default
+                # ``InputSpec.default`` is a string in the schema, so a bare
+                # ``In[int] = 5`` used to emit a schema-invalid ``default: 5``.
+                entry["default"] = _serialize_signature_default(
+                    param.default, param_name, inner
+                )
                 entry["optional"] = True
             builder.inputs.append(entry)
 
