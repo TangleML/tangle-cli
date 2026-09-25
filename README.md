@@ -57,6 +57,7 @@ API-backed commands commonly accept these options. Explicit CLI options win over
 | `--token`, `TANGLE_API_TOKEN` | Bearer token shorthand. |
 | `--auth-header`, `TANGLE_API_AUTH_HEADER`, `TANGLE_AUTH_HEADER` | Full `Authorization` value such as `Bearer ...` or `Basic ...`. |
 | `-H`, `--header`, `TANGLE_API_HEADERS` | Extra headers. Repeatable as CLI flags; env accepts a JSON object or newline-separated `Name: value` entries. |
+| `TANGLE_ROOT_CONFIG` | Path to a per-command YAML/JSON root config layered beneath `--config` (see [Per-command root config](#per-command-root-config-tangle_root_config)). |
 | `--config` | YAML/JSON defaults. Many commands accept a single object, a list of objects, or `_defaults` + `configs`, optionally wrapped in a top-level `_select` environment selector. Values may be read from the environment with `{_env: NAME}`. |
 | `--log-type` | SDK progress logs: `console`, `none`, or `file`. Logs go to stderr or a temp log file so structured stdout stays parseable. |
 | `TANGLE_VERBOSE=1` | Redacted HTTP request/response diagnostics only. This is separate from normal progress logging. |
@@ -229,6 +230,41 @@ uv run tangle sdk pipeline-runs submit --config submit.yaml
 ```
 
 For generated `tangle api` commands, config keys use generated CLI parameter names such as `base_url`, `schema_source`, `body`, and endpoint parameters like `limit`, `filter`, or `id`.
+
+### Per-command root config (`TANGLE_ROOT_CONFIG`)
+
+Set `TANGLE_ROOT_CONFIG` to a YAML/JSON file that gives individual commands a base config beneath their `--config`. The file is keyed by command, because the same values rarely suit every command:
+
+```yaml
+# $TANGLE_ROOT_CONFIG
+_shared: &search {annotations: {team: search}}     # underscore keys: YAML anchor helpers
+
+commands:
+  "tangle sdk pipeline-runs submit":
+    <<: *search
+    base_url: https://api.example
+  "tangle sdk published-components publish": *search
+  "tangle-deploy pipeline-run submit": *search      # another CLI's commands can share the file
+```
+
+- **Shape.** The top level must be the `commands` selector. Besides it, only underscore-prefixed helper keys (for YAML anchors) may appear at the top level; any other key is an error. Each `commands` key is a command's full invocation path, program first. Each value is a single config object.
+- **Command identity.** `ArgsContainer.load(..., command=...)` and `load_config(..., command=...)` take the running command's full path explicitly, program first (e.g. `"tangle sdk secrets delete"`). Without `command=` (a plain library call), `TANGLE_ROOT_CONFIG` is ignored and not read. `tangle` builds the path as Cyclopts resolves the command line: the program, then each group, then the leaf, with options and arguments excluded and each level canonicalized to its first registered name. Its CLI helpers (`load_args_or_exit`, `load_config_or_exit`) then pass it as `command=`. Another CLI builds its own path the same way, e.g. from click contexts as groups resolve.
+- **Normalization.** `normalize_command(path, aliases)` collapses whitespace and rewrites alias or deprecated prefixes to the canonical path (`COMMAND_ALIASES` maps `tangle-cli` to `tangle`; a downstream CLI passes its own table, such as legacy entry-point names). Root keys and the running command are compared after normalization, exact and case-sensitive.
+- **Selection.** Only the running command's entry applies. A command with no entry gets no root config; that is a no-op, not an error. Entries for unknown commands, including other CLIs' commands, are ignored. A key that closely matches the running command logs a warning naming both keys, never a value.
+- **Layering.** Without `--config`, the entry is the config. With `--config`, each command config entry is deep-merged over the root entry, with `--config` winning at each leaf. Lists and scalars from `--config` replace root values wholesale. For `_defaults` + `configs`, the file's own `_defaults` are applied first (still a shallow merge), so the order is root < `_defaults` < entry. Precedence per field is **CLI > `--config` > `TANGLE_ROOT_CONFIG` > environment (`EnvField`) > default**, and a CLI value still replaces the whole field.
+- **`null`.**
+  - `null` is rejected anywhere in `TANGLE_ROOT_CONFIG`; the error names the key path.
+  - In a `--config` layered over an active root entry, a `null` mapping value means *absent*, at any depth:
+    - at a key the root entry provides, it unsets the inherited value, so `annotations: {team: null}` removes just `team`;
+    - at a key the root does not set, it is ignored rather than setting `None`.
+
+    Either way, resolution falls through to the environment tier, then the default. `null` items inside lists are values and are kept.
+  - Without an active root entry — `TANGLE_ROOT_CONFIG` unset, no entry for the command, or no command identity — `--config` `null` keeps its existing meaning: the config supplies `None`.
+- **`_select` / `_env`.** A document-level `_select` may choose between whole `commands` documents. After the command's entry is picked, the entry itself may be a `_select`, and its `_env` values are looked up then — only for the running command. Every directive in the file, in any command, is structure-checked in every environment. Scalar typing applies to the merged value.
+- **Relative paths** resolve against the file a value came from. `args.config_source(name)` names that file, at top-level-key granularity. A value inherited from `TANGLE_ROOT_CONFIG` is never resolved against the `--config` directory.
+- **`base_url`** is allowed in an entry. It counts as config for credential isolation: ambient environment credentials (such as `TANGLE_API_TOKEN`) are not sent to a URL that came from config.
+- **Errors fail closed.** An unset or empty `TANGLE_ROOT_CONFIG` means no root config. A set path that is missing, not a file, unreadable, malformed, or contains `null` is an error naming `TANGLE_ROOT_CONFIG` and the path, never a value. A relative path is relative to the current directory.
+- **Scope.** `TANGLE_ROOT_CONFIG` applies to `--config` loading only; pipeline `config.yaml` files and `TaskEnv.from_config` are never layered. For `tangle api`, the pre-dispatch schema bootstrap takes the identity from the leading command tokens (`tangle api <group> <operation>`).
 
 ### Environment-selected configs (`_select`)
 
@@ -1094,7 +1130,9 @@ Use these for generic downstream behavior such as alternate storage, extra annot
 
 `cli_options.py` centralizes shared Cyclopts annotations such as `BaseUrlOption`, `TokenOption`, `AuthHeaderOption`, `HeaderOption`, `ConfigOption`, and `LogTypeOption`. `cli_helpers.py` centralizes config loading, JSON printing, credential-isolation helpers, and the native-safe `LazyTangleApiClient` proxy. `logger.py` provides `ConsoleLogger`, `NullLogger`, `CaptureLogger`, `logger_for_log_type(...)`, and `run_with_logging(...)`.
 
-`ArgsContainer.load(...)` field specs are tuples (see `ArgsContainer._resolve`). To give one field an environment tier, wrap its unchanged spec: `token=EnvField("TANGLE_PROD_TOKEN", (token, None))`. The field then resolves CLI > config > `os.environ["TANGLE_PROD_TOKEN"]` > default; the raw string (empty counts as set) goes through the spec's converter or the [scalar typing](#scalar-field-typing), and a conversion error names the variable without echoing its value. Nothing is mapped automatically: fields that are not wrapped never read the environment. `args.origin(name)` reports where each field came from — `cli`, `config`, `env:NAME`, or `default` — without the value.
+`ArgsContainer.load(...)` field specs are tuples (see `ArgsContainer._resolve`). To give one field an environment tier, wrap its unchanged spec: `token=EnvField("TANGLE_PROD_TOKEN", (token, None))`. The field then resolves CLI > config > `os.environ["TANGLE_PROD_TOKEN"]` > default; the raw string (empty counts as set) goes through the spec's converter or the [scalar typing](#scalar-field-typing), and a conversion error names the variable without echoing its value. Nothing is mapped automatically: fields that are not wrapped never read the environment.
+
+Code that reads config values without `ArgsContainer.load` should call `load_config(config_path, command=...)` (in `tangle_cli.args_container`) so it sees the same [`TANGLE_ROOT_CONFIG`](#per-command-root-config-tangle_root_config) layering; `ArgsContainer._load_config_file` reads exactly one file. A CLI other than `tangle` passes its own resolved command path, e.g. `ArgsContainer.load(config, command="tangle-deploy pipeline-run submit", **specs)`. To resolve a relative path from config against the file it was written in, use `args.config_source(name)` (or `LoadedConfig.sources`) rather than the `--config` path: a value inherited from `TANGLE_ROOT_CONFIG` names the root file.
 
 Use these helpers for new SDK commands so top-level imports remain native-free, `--config` behavior stays consistent, credentials from config do not accidentally mix with ambient environment auth, and progress logs stay off structured stdout.
 

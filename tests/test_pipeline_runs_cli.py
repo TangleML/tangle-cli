@@ -4745,3 +4745,38 @@ def test_submit_from_python_reports_an_unwritable_script_directory(monkeypatch, 
         app(["sdk", "pipeline-runs", "submit-from-python", str(script), "--log-type", "none"])
 
     assert "Cannot create a compile output" in str(exc_info.value)
+
+
+def test_submit_from_python_root_config_entry_is_per_command(monkeypatch, tmp_path: Path, capsys):
+    """Only the running command's TANGLE_ROOT_CONFIG entry applies, and its keys
+    are checked like the command's own --config."""
+
+    script = _python_project(tmp_path)
+    root = tmp_path / "root.yaml"
+    root.write_text(
+        yaml.safe_dump(
+            {
+                "commands": {
+                    # Valid for `submit`, never applied to submit-from-python.
+                    "tangle sdk pipeline-runs submit": {"hydrate": True, "pipeline_path": "x.yaml"},
+                    "tangle sdk pipeline-runs submit-from-python": {"log_type": "none"},
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("TANGLE_ROOT_CONFIG", str(root))
+    fake_client = FakeClient()
+    monkeypatch.setattr(pipeline_runs_cli, "LazyTangleApiClient", lambda **kwargs: fake_client)
+
+    run_app(cli.build_app().meta, ["sdk", "pipeline-runs", "submit-from-python", str(script)])
+
+    assert len(fake_client.created) == 1
+    assert capsys.readouterr().err == ""  # log_type: none came from the root entry
+
+    root.write_text(
+        yaml.safe_dump({"commands": {"tangle sdk pipeline-runs submit-from-python": {"hydrate": True}}})
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        cli.build_app().meta(["sdk", "pipeline-runs", "submit-from-python", str(script)])
+    assert "'hydrate' is not supported by submit-from-python" in str(exc_info.value)
+    assert len(fake_client.created) == 1

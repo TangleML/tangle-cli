@@ -17,6 +17,7 @@ from . import (
     secrets_cli,
 )
 from .api_transport import configure_cli_verify
+from .cli_helpers import dispatching
 from .cli_options import CaBundleOption, VerifyTlsOption
 
 
@@ -59,6 +60,33 @@ def _configure_tls_from_argv(argv: list[str]) -> None:
             continue
         break
     configure_cli_verify(ca_bundle, verify_tls)
+
+
+#: Canonical program name for command identities (``tangle-cli`` is an alias).
+PROGRAM_NAME = "tangle"
+
+
+def _command_identity(app: App, tokens: tuple[str, ...]) -> str | None:
+    """The dispatched command path, e.g. ``"tangle sdk secrets delete"``.
+
+    Accumulated as Cyclopts resolves the command line: the program name, then
+    each group, then the leaf, with options and positional arguments excluded.
+    Each level is canonicalized to its first registered name, so an alias
+    resolves to the real command. Selects the command's
+    ``TANGLE_ROOT_CONFIG`` entry.
+    """
+
+    try:
+        chain, _apps, _unused = app.parse_commands(list(tokens))
+        path = [PROGRAM_NAME]
+        current = app
+        for token in chain:
+            target = current[token]
+            path.append(next(name for name in current if current[name] is target))
+            current = target
+    except Exception:  # an unparsable command line reports its own error later
+        return None
+    return " ".join(path) if chain else None
 
 
 def build_sdk_app() -> App:
@@ -105,7 +133,8 @@ def build_app(argv: list[str] | None = None) -> App:
         """Apply global TLS options, then dispatch the requested command."""
 
         configure_cli_verify(ca_bundle, verify_tls)
-        app(tokens)
+        with dispatching(_command_identity(app, tokens)):
+            app(tokens)
 
     return app
 
