@@ -92,6 +92,22 @@ def _is_in_annotation(annotation: Any) -> bool:
     return getattr(annotation, "__origin__", None) is In
 
 
+def _strip_optional_none(annotation: Any, default: Any) -> Any:
+    """Drop an ``Optional`` wrapper paired with a ``None`` default.
+
+    Python 3.10's ``get_type_hints`` still applies PEP 484 implicit
+    ``Optional``, which 3.11 removed. A wider union is left alone.
+    """
+    if default is not None:
+        return annotation
+    if typing.get_origin(annotation) is not typing.Union:
+        return annotation
+    args = [a for a in typing.get_args(annotation) if a is not type(None)]
+    if len(args) != 1:
+        return annotation
+    return args[0]
+
+
 def _is_out_annotation(annotation: Any) -> bool:
     return getattr(annotation, "__origin__", None) is Out
 
@@ -246,7 +262,9 @@ def trace_pipeline(
     call_kwargs: dict[str, Any] = {}
 
     for param_name, param in sig.parameters.items():
-        annotation = resolved_hints.get(param_name, param.annotation)
+        annotation = _strip_optional_none(
+            resolved_hints.get(param_name, param.annotation), param.default
+        )
 
         if param_name == "cfg" and not _is_in_annotation(annotation):
             call_kwargs[param_name] = cfg

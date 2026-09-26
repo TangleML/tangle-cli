@@ -77,7 +77,7 @@ from .python_pipeline.pipeline import PipelineFn
 from .python_pipeline.ref import CallableRef
 from .python_pipeline.registered import _REGISTERED_URL_PLACEHOLDER
 from .python_pipeline.subpipeline import _SUBPIPELINE_URL_PLACEHOLDER, SubpipelineRef
-from .python_pipeline.trace import trace_pipeline
+from .python_pipeline.trace import _strip_optional_none, trace_pipeline
 from .python_pipeline.types import In
 from .schema_validation import (
     CALLER_ANNOTATION_POLICY,
@@ -2589,6 +2589,7 @@ def _pipeline_accepts_cfg(pipeline_fn: PipelineFn) -> bool:
         annotation = resolved_hints.get("cfg", annotation)
     except Exception:
         pass
+    annotation = _strip_optional_none(annotation, param.default)
     return getattr(annotation, "__origin__", None) is not In
 
 

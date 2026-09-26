@@ -476,11 +476,11 @@ def ref(
 ) -> CallableRef:
     """Build a CallableRef pointing at a Tangle component.
 
-    A ref carries a *locator* — either a ``url`` or a published ``name`` —
-    and may optionally pin a ``digest`` alongside either (or stand on its
-    own). All values are stored verbatim (no normalization). The emitter
-    turns the locator into the matching ``componentRef`` form, and the
-    hydrator resolves it via ``_fetch_component_by_{url,name,digest}``.
+    A ref carries at least one *locator* — a ``url``, a published ``name``,
+    or a ``digest`` — and may carry several. All values are stored verbatim
+    (no normalization). The emitter turns the locators into the matching
+    ``componentRef`` form, and the hydrator resolves it via
+    ``_fetch_component_by_{url,name,digest}``.
 
     Supported (WORKING) locator combinations:
 
@@ -495,6 +495,11 @@ def ref(
       ``{"digest": …}``.
     - ``ref(url="gs://b/x.yaml", digest="<64hex>")`` — a URL pinned to a
       digest — emits ``{"url": …, "digest": …}``.
+    - ``ref(url="file://./c.yaml", name="My Comp")`` — emits
+      ``{"url": …, "name": …}``, optionally with ``digest``. Note the
+      hydrator resolves EVERY locator present and keeps the highest
+      component version, so the name can win over the url; see the README.
+      This is an upgrade path, not a narrowing one.
 
     ``tag`` is accepted in the signature for forward compatibility but is
     **NOT supported yet**: the hydrator has no tag fetcher, so a ``tag``
@@ -503,9 +508,8 @@ def ref(
     ``name=`` and/or ``digest=`` instead.
 
     Raises:
-        CompileError: if ``tag`` is passed (deferred); if both ``url`` and
-            ``name`` are passed (conflicting primary locators); or if no
-            locator at all is given.
+        CompileError: if ``tag`` is passed (deferred), or if no locator at
+            all is given.
     """
     # 1. tag is not resolvable end-to-end yet (hydrator has no tag fetcher).
     if tag is not None:
@@ -513,13 +517,9 @@ def ref(
             "ref(tag=...) is not supported yet: the hydrator resolves "
             "digest/name/url only. Pin by name=... and/or digest=... instead."
         )
-    # 2. exactly one PRIMARY locator family: url XOR name (digest is optional
-    #    and may accompany either, or stand alone).
-    if url is not None and name is not None:
-        raise CompileError(
-            "ref() takes EITHER url=... OR name=..., not both (conflicting "
-            "locators). Use digest=... to pin a version alongside either."
-        )
+    # 2. at least one locator. Any combination of url/name/digest is legal:
+    #    the dehydrated schema allows them together, and the hydrator treats
+    #    each as an independent candidate.
     if url is None and name is None and digest is None:
         raise CompileError(
             "ref() requires a locator: pass url=..., or name=...[, digest=...], "
