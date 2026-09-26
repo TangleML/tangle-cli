@@ -182,17 +182,14 @@ def _emit_task(
 
 
 def _emit_component_ref(node: TaskNode) -> dict[str, Any]:
-    """Render ``componentRef`` as a PURE ref — ``{url[, digest]}``,
-    ``{name[, digest]}`` or ``{digest}``. Never emits ``spec`` or ``text``.
+    """Render ``componentRef`` as a PURE ref over whichever locators the
+    ref carries. Never emits ``spec`` or ``text``.
 
-    Locator dispatch (first matching branch wins):
-
-    * ``ref_url`` set        -> ``{"url": …}``; a ``ref_digest`` pins it
-      (``{"url": …, "digest": …}``). Subpipeline refs always take this
-      branch via their ``subpipeline://pending`` sentinel URL.
-    * ``ref_name`` set       -> ``{"name": …}``; a ``ref_digest`` pins it
-      (``{"name": …, "digest": …}``).
-    * ``ref_digest`` alone   -> ``{"digest": …}``.
+    Key order is canonical — ``url``, ``name``, ``digest`` — and every
+    locator present is emitted; the schema allows them together and the
+    hydrator resolves each one, keeping the highest component version.
+    Subpipeline refs arrive here with their ``subpipeline://pending``
+    sentinel URL and no other locator.
 
     A node with ``ref_url=None`` AND no name/digest is only reachable via
     ``@task`` refs (the ``ref()`` factory rejects a no-locator call). Such
@@ -203,18 +200,15 @@ def _emit_component_ref(node: TaskNode) -> dict[str, Any]:
     placeholder never reaches the written output. It is still a pure ref
     — no ``spec``/``text``.
     """
+    cref: dict[str, Any] = {}
     if node.ref_url:
-        cref: dict[str, Any] = {"url": node.ref_url}
-        if node.ref_digest:
-            cref["digest"] = node.ref_digest
-        return cref
+        cref["url"] = node.ref_url
     if node.ref_name:
-        cref = {"name": node.ref_name}
-        if node.ref_digest:
-            cref["digest"] = node.ref_digest
-        return cref
+        cref["name"] = node.ref_name
     if node.ref_digest:
-        return {"digest": node.ref_digest}
+        cref["digest"] = node.ref_digest
+    if cref:
+        return cref
     # Transient placeholder for @task refs. The compile driver computes
     # the real ``resolve://./<stem>.components.yaml#<fragment>`` URL after
     # tracing (it depends on the output path) and rewrites this in place

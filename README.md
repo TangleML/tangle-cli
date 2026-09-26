@@ -905,6 +905,26 @@ def parent(seed: In[str]) -> Out[str]:
 
 Use `ref(url=...)`, `ref(name=...)`, or `ref(digest=...)` to call an existing component YAML or published component instead of authoring a local `@task`. Use `@registered(fragment=..., gen_config=...)` for operation wrappers that are already present in an existing `gen_config.yaml`; the compiler rewrites those calls to `resolve://...#fragment` without generating a new sidecar.
 
+##### Component locators
+
+`ref()` takes any combination of `url`, `name` and `digest`, and emits every one it is given, always in the key order `url, name, digest`:
+
+| Call | `componentRef` |
+| --- | --- |
+| `ref(url="file://./c.yaml")` | `{url}` |
+| `ref(name="My Comp")` | `{name}` |
+| `ref(digest="<64hex>")` | `{digest}` |
+| `ref(url="gs://b/c.yaml", digest="<64hex>")` | `{url, digest}` |
+| `ref(name="My Comp", digest="<64hex>")` | `{name, digest}` |
+| `ref(url="file://./c.yaml", name="My Comp")` | `{url, name}` |
+| `ref(url="file://./c.yaml", name="My Comp", digest="<64hex>")` | `{url, name, digest}` |
+
+Multiple locators are **not** a narrowing filter. The hydrator resolves each one independently and keeps whichever resolves to the **highest component version**, tie-breaking `digest` > `name` > `url`; a locator that fails to resolve is warned about and skipped, and the resolved `componentRef` is replaced wholesale by the winner's `{name, digest, spec}`. So `ref(url=..., name=...)` means "use this file, but prefer the published component if it is newer" — the name can win. Pass a single locator when you want exactly one component, and add `digest=` to pin a version.
+
+`tag=` is accepted in the signature but rejected at compile time: the hydrator has no tag fetcher and `tag` is not a property of the dehydrated schema.
+
+A ref with no locator at all is rejected. Diagnostics name the offending keyword, never the value.
+
 ##### Dynamic arguments and runtime placeholders
 
 Task argument values can be literals, graph inputs, task outputs, or supported dynamic data. Use `dynamic_secret("NAME")` to emit a runtime secret reference:
