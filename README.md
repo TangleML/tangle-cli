@@ -545,6 +545,256 @@ flags are the same as `pipeline-runs submit`; the extra compile-tier flags are
 `--pipeline`, repeatable `--override KEY=VALUE`, and repeatable `--image ID=REF`.
 Use `pipelines compile` instead when the compiled YAML itself is what you want.
 
+##### Decompiling YAML back to Python
+
+`pipelines decompile` is the reverse direction: it turns a pipeline YAML —
+**hydrated or dehydrated** — into `python_pipeline` source, so an existing YAML
+pipeline can be adopted into Python authoring without being retyped.
+
+```bash
+uv run tangle sdk pipelines decompile pipeline.yaml -o pipeline.py
+```
+
+**Dehydration is part of decompiling, not an option.** The command always
+produces canonical pinned references before generating any code, using the
+same `PipelineDehydrator` as `pipelines dehydrate --mode digest`. A dehydrated
+input is resolved first and then dehydrated; a hydrated input goes to that same
+dehydrator directly. Both gates below run on that portable form: each leaf
+behind a resolve fragment listing a verified published digest first, when the
+library has one, and then a local copy.
+
+What is written then depends on `--local-fallbacks`:
+
+- **By default**, a leaf the library verified becomes `ref(digest=...)` — its
+  exact published content, with no local copy — so **hydrating the output
+  needs the component library**. A leaf with no published digest becomes
+  `ref(url="resolve://./<output stem>.leaves.yaml#<fragment>")` with its only
+  copy in `<output stem>.leaves/`; when every leaf is published, neither is
+  written.
+- **With `--local-fallbacks`** (`include_local_fallbacks=True`), every leaf
+  keeps the portable form — digest first, local copy behind it — so the
+  script compiles and hydrates with the library unreachable.
+
+(The sidecar is not `<stem>.components.yaml`: that is where
+`compile <stem>.py -o <stem>.yaml` writes its own `@task` sidecar. An existing
+`.components*` artifact is never touched, as it may be the compiler's.)
+
+**Task layout uses `.with_position()`.** A task's `editor.position` — on an
+ordinary ref, a recovered `@task` or a parent `subpipeline(...)` card — is
+written as `.with_position(x, y[, width=..., height=...])`, after any other
+annotations, but only when upstream's own rendering reproduces the stored
+string exactly. Anything else (the editor's compact `{"x":1,"y":2}`, reordered
+keys, extra fields, non-finite, boolean or null values, a non-canonical
+exponent like `1e3`, a number too large to convert) stays
+verbatim in `.with_annotations(...)`, so no value is ever re-rendered. Graph
+inputs and outputs use the same rule through `graph_input(...)` /
+`graph_output(...)`'s `position=(x, y)`, applied after `annotations=`; as that
+takes x and y only, a position with `width`/`height` stays in `annotations=`.
+
+**Every graph becomes Python.** Each nested graph, at any depth, becomes its
+own `@pipeline` function in a companion `<output stem>_subgraphs.py`, which the
+root script imports. The parent calls it through
+`subpipeline(fn).named(<task id>)(...)`, keeping task IDs, arguments, edges and
+annotations. Identical graphs share one function. A graph whose name is already
+taken by different content gets a short content-digest suffix, so the naming is
+deterministic. Functions are defined deepest first, and `compile <stem>.py`
+works with no `--pipeline` flag. Only leaf components go through the resolve
+sidecar. A nested-graph task that sets `isEnabled` or `executionOptions` is
+refused with `unsupported-subgraph-task`: Tangle does not apply those to
+graph-component tasks, and `subpipeline(...)` rejects them. A cycle of
+component references is refused with `cyclic-component-reference`. Because the
+script imports its companion by name, a pipeline with nested graphs needs an
+output name that makes `<stem>_subgraphs` a valid ASCII Python module name (e.g.
+`gen.py`, not `foo-bar.py`); anything else is refused with
+`unsupported-output-name` before anything is written. A canonical URL is
+deliberately *not* kept: its contents can change underneath the reference. See
+[Resolve-config fallback entries](#resolve-config-fallback-entries) for the
+sidecar format.
+
+**Python components become `@task` functions** (unless `--no-python-tasks`).
+A leaf the Python component generator made — carrying its markers, the full
+`python_original_code`, `tangle_cli_generation_function_name` and
+`tangle_cli_generation_mode: inline` — is written as source instead of a pinned
+YAML leaf. Each recorded module goes byte-for-byte into its own directory,
+`<output stem>_tasks/<module>/<module>.py`, next to a TOML file holding its
+`python_dependencies`; `<output stem>_tasks/__init__.py` exports it. The root
+and the companion import it by name, so a leaf they share is defined once.
+Nothing is inferred from the container command.
+
+- A plain function is wrapped once, in
+  `task(image=<recorded image>, mode="inline", dependencies_from=...)`.
+- Source that is already `python_pipeline` authoring — one literal
+  `@task(...)` from an unaliased `from tangle_cli.python_pipeline import task`,
+  with only `image`, `image_id`, `mode="inline"`, a relative `.toml`
+  `dependencies_from` and `unwrap` — is re-exported as it is, never wrapped a
+  second time. Its own `dependencies_from` path is honoured inside its
+  directory; without one, `<module>.toml` is what the generator's discovery
+  finds first, so a `pyproject.toml` further up cannot change the list.
+- `image=` must equal the recorded image. **`image_id=` is kept as the source's
+  intent: compile resolves it in your environment** (`--image ID=REF`, then
+  registered defaults), which may give a different image than the input
+  recorded. Use `--no-python-tasks` for the digest-exact component.
+- `@task(unwrap=...)` inputs are checked by name: every input must be exactly
+  one dict parameter's (`dict`, or `Dict` from `typing`) `<param>__<key>`, and every task using it must pass
+  exactly those inputs. The call is written back as `param={key: ...}` in the
+  spec's input order. Their types are derived again at compile.
+
+This is a source transform only: **the decompiler never imports, runs,
+regenerates, compiles or hydrates recovered source** — nor any input's local
+Python: a dehydrated input whose components resolve through
+`local_from_python` (a compiled `@task` pipeline) is refused with
+`unsupported-local-python-source`, whatever the cwd or `--trusted-source`
+trust. So is any other resolver kind that may build or run code —
+`local_from_docker` and the other docker/container spellings, or any kind a
+downstream package registers — with `unsupported-executable-component-source`,
+and a `template_file` component config, whose Jinja could reach Python, with
+`unsupported-template-component-source`: decompile resolves only digests,
+names, http(s) URLs and plain files, through the built-in resolvers and URI
+readers; a URI scheme only a downstream reader handles is refused the same way. Run `tangle sdk pipelines hydrate` on such a pipeline first — that is
+where trusted sources execute — and decompile the hydrated YAML, which carries
+the recorded source for recovery. Candidates are checked
+statically, against the generator's own rules — the source parses, binds the
+recorded function exactly once at module scope; the docstring yields the
+spec's name, description and metadata annotations; every input and output
+names one parameter. Anything `@task` cannot express, or that cannot be
+checked from the text — bundle mode, a resolve root, a custom name or
+annotation, any other decorator or decorator setting, a relative import or
+star import, any container field beyond `image`/`command`/`args` or
+input/output field the generator does not write, a name rebound anywhere at
+module scope — stays a pinned YAML leaf, and is only counted in the output.
+Both gates run on the all-YAML form; the final script is then checked to differ
+from that verified form only at the converted call sites.
+
+What that does **not** prove is the component Tangle rebuilds: parameter types,
+the generated container program (which follows the installed generator's
+version), an `image_id`'s resolution, digests and provenance annotations
+(`git_*`, the code and YAML paths) are produced later, when `compile` imports
+`<stem>_tasks` and hydrate, submit or run execute it. Review that package
+before compiling; its top-level imports must be installed, and hydration
+executes it only from the current directory tree or a `--trusted-source`.
+Converted components are no longer digest-pinned — use `--no-python-tasks` for
+an output whose every component is. The tasks package follows the same
+one-to-one output name rule as the companion.
+
+Because canonicalization resolves components, the command needs whatever access
+the input's references require. If any reference cannot be resolved the whole
+operation is refused; a pipeline is never emitted with some components pinned
+and others left dangling.
+
+**Two independent gates** must both pass before anything is written:
+
+| Gate | Question | How |
+| --- | --- | --- |
+| (a) | Did pinning preserve the pipeline? | The pinned document is resolved again from the script's own directory, through its sidecar, and must yield the same component specs hydration produced. Every leaf task must use exactly `resolve://./<stem>.leaves.yaml#<fragment>`, and every sidecar entry must be a digest or a local copy inside `<stem>.leaves/`. An absolute, traversing, foreign or mutable locator is refused even when it happens to resolve. |
+| (b) | Does the Python reproduce the pinned document? | The generated source is recompiled and must match the pinned document's *semantic digest* (`compute_spec_digest`, sha256 of sorted-key YAML). |
+
+Both are needed because they check different things. The generated Python
+names only a sidecar fragment, never the component's contents, so gate (b)
+alone cannot tell a correct pin from a wrong one. Both run on the portable
+form; the default output then replaces each verified leaf's fragment with its
+already-verified `ref(digest=...)`, a substitution checked statically to be
+the only difference from the verified source.
+
+**Exactness is scoped to seed time.** Decompiling is a one-time seeding
+transform: it reproduces the *exact* component every input reference names.
+Canonicalization and both parts of gate (a) resolve with deprecation successors
+**disabled**, so a deprecated digest is seeded and verified as its own content,
+not as its successor's. After that, ordinary `pipelines hydrate`,
+`pipeline-runs submit` and `run` follow successors as they always do. Taking up
+an upgrade that changes a component is the maintainer's decision, not
+something decompile makes on their behalf.
+
+Pass `--no-verify` to skip gate (b) — which removes the only proof the *source* is
+faithful. Gate (a) always runs.
+
+`-o/--output` is always replaced, with no existence check and no `--force`.
+The script, its `<stem>_subgraphs.py` companion (when there are nested graphs),
+its `<stem>.leaves.yaml` sidecar and its `<stem>.leaves/` bundle are
+staged together and published only after both gates pass. Gate (b) verifies
+each generated `@pipeline` function on its own, including which child each
+`subpipeline(...)` call targets. A refusal
+therefore leaves any existing output and its previous products untouched, and
+no staging directory is left behind. Publication itself is renames only, with
+the script renamed last (replacing a symlink rather than writing through it).
+Previous products are moved aside rather than deleted, so a failed rename at
+any boundary restores the whole previous generation. A stale companion,
+sidecar or bundle from an earlier run of the same output is replaced
+wholesale, or removed when the new run no longer needs it; it is never merged
+into.
+
+**What it accepts.** A pipeline document in either shape: *dehydrated* (what
+`pipelines compile` emits and `pipelines validate` accepts) or *hydrated* (with
+inline `componentRef.spec`s, including nested graphs). The input is classified
+and validated against the contract matching its own shape **before** anything
+else looks at it, because resolution would otherwise launder an unsupported
+document into one that passes a later check. Inline component `text`, legacy
+keys and compile-time `{%` templates remain out of scope in both shapes and are
+refused up front — `text` in particular is dropped by hydration, so accepting it
+would silently generate a script missing part of its input.
+
+Both shapes are canonicalized before codegen, so the input's shape does not
+change the *pipeline* that is generated. It can still change the **locators**,
+because a dehydrated reference carries provenance an inline spec does not: the
+hydrator records the digest of the reference's source text, and a component
+published under that digest gets it as its verified primary. An inline
+`componentRef.spec` has no source text, so it is addressed by its sorted-spec
+digest and gets only its local copy. Equivalent inputs therefore agree
+exactly when the lookup outcome agrees — always for an unpublished component,
+and not necessarily for a published one.
+
+**What it does not guarantee.** Not byte identity in general. Comments, key
+order and quoting style are not recoverable. Task order *is* preserved: ready
+tasks are emitted one at a time in the document's own order, so a document
+whose tasks are already in dependency order keeps that order exactly, and only
+a document that lists a consumer before its producer gets reordered. When the
+input was itself produced by `pipelines compile` there is therefore nothing
+left to lose and the bytes do match — that fixpoint is covered by a test over
+the repo's example pipelines, exercised through the in-memory
+`decompile_pipeline` API, since the file command re-pins locators by design and
+so cannot preserve bytes.
+
+**Nothing echoes document values — on any channel.** A schema failure reports
+the structural location only, taken from the validator's own path metadata
+rather than parsed out of its message, because the rejected value may be a
+credential in an argument or annotation. A parse failure reports line and
+column only. Locators in resolution errors *are* shown — they are what you
+must fix — with any URL userinfo or query string redacted. Resolution and
+pinning run with a silent logger, so component names, locators and the source
+lines of a malformed referenced component never reach stdout or stderr
+either; progress is reported by this command instead.
+
+**Two comparator normalizations** are applied before digests are compared, and
+both are reported on the command line when they fire:
+
+| | Rule | Why |
+| --- | --- | --- |
+| N1 | An input with `default` and no explicit `optional` compares as `optional: true`. | `graph_input()` always writes `optional` alongside a `default`. |
+| N2 | An empty block at a known optional location (`metadata`, `inputs`, `outputs`, `outputValues`, or a task's `annotations`, `arguments`, `executionOptions`) compares as absent. | Such a block declares nothing, and the authoring API omits the key rather than writing an empty one. A block with any content is never dropped. |
+
+Neither rule edits the generated source or the input; they exist only inside
+the comparator.
+
+**Scope.** `pipelines decompile` accepts hydrated or dehydrated input (see
+*What it accepts*). Inline component text, legacy keys, `{%`/`{#` compile-time
+templates, `cfg` lifting and schedule/deploy metadata are out of scope and fail
+closed with a diagnostic code. The in-memory `decompile_pipeline` API takes
+only a dehydrated document, whose nested graphs are therefore references rather
+than inline graphs. Refusal messages name the construct and its location and
+never echo the value, which may be a secret.
+
+**Safety.** Verification imports the generated file, so decompiling an
+untrusted export executes code derived from it (never recovered Python source,
+which is only copied). Every recovered value is built
+as an `ast` literal node rather than interpolated as text, no input text is
+placed in a comment or docstring, and the finished source is re-parsed and
+checked against a node allowlist before it is imported.
+
+One practical note: the compiler resolves relative component URLs against the
+*compiled YAML's* directory, not the script's. Extracted components therefore
+travel with the script, and recompiling generated source has to target the
+directory holding them — compile the script in place. The same applies to a
+relative `resolve://./<stem>.leaves.yaml` ref, which is preserved verbatim.
+
 The two value tiers are distinct and easy to confuse:
 
 | Flag | Tier | Meaning |

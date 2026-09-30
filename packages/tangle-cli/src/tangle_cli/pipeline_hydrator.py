@@ -235,6 +235,11 @@ class PipelineHydrator(TangleCliHandler):
             "header": header,
             "include_env_credentials": include_env_credentials,
         }
+        # Only an EXPLICIT logger is forwarded to an internally created client.
+        # Passing the default one would override the client's own verbosity
+        # gating and make ordinary non-verbose runs start logging.
+        if logger is not None:
+            self._client_options["logger"] = logger
         self.cache: dict[str, Any] = {}
         self.upgrade_deprecated = upgrade_deprecated
         self.verbose = verbose

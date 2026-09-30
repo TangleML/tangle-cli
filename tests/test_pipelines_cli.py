@@ -2245,3 +2245,132 @@ def test_shared_compile_flag_parsers():
     for bad in (["nope"], ["id="], ["=ref"]):
         with pytest.raises(SystemExit):
             parse_image_overrides(bad)
+
+
+# ---------------------------------------------------------------------------
+# pipelines decompile
+
+
+def _decompilable(tmp_path: Path, component_name: str = "Leaf") -> Path:
+    """A dehydrated pipeline whose one component is a local file."""
+    (tmp_path / "leaf.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": component_name,
+                "implementation": {"container": {"image": "i", "command": ["p"]}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / "pipeline.yaml"
+    return _write_pipeline(
+        source,
+        {
+            "name": "Outer",
+            "implementation": {
+                "graph": {"tasks": {"a": {"componentRef": {"url": "file://./leaf.yaml"}}}}
+            },
+        },
+    )
+
+
+def test_pipelines_decompile_help_lists_the_pinning_flag(capsys):
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipelines", "decompile", "--help"])
+
+    output = capsys.readouterr().out
+    assert "--verify" in output
+    assert "--pin-components" not in output, "canonicalization is not optional"
+
+
+def test_pipelines_decompile_writes_a_script_and_its_components(tmp_path: Path, capsys):
+    source = _decompilable(tmp_path)
+    output = tmp_path / "generated.py"
+    app = cli.build_app()
+
+    run_app(app, ["sdk", "pipelines", "decompile", str(source), "--output", str(output)])
+
+    printed = capsys.readouterr().out
+    assert output.is_file()
+    assert (tmp_path / "generated.leaves").is_dir()
+    assert (tmp_path / "generated.leaves.yaml").is_file()
+    assert "resolve://./generated.leaves.yaml#" in output.read_text(encoding="utf-8")
+    assert "generated.leaves.yaml" in printed
+    assert "Verified:" in printed
+    assert "compile the script in place" in printed, "the relative-URL caveat is surfaced"
+
+
+@pytest.mark.parametrize("flag", [[], ["--no-python-tasks"]])
+def test_pipelines_decompile_python_tasks_flag(tmp_path: Path, capsys, flag: list[str]):
+    from test_pipeline_decompiler import _python_leaf
+
+    source = _write_pipeline(tmp_path / "in.yaml", {"name": "Outer", "implementation": {"graph": {"tasks": {"a": {"componentRef": {"spec": _python_leaf(tmp_path)}}}}}})
+    output = tmp_path / "generated.py"
+
+    run_app(cli.build_app(), ["sdk", "pipelines", "decompile", str(source), "--output", str(output), *flag])
+
+    printed = capsys.readouterr().out
+    converted = not flag
+    assert (tmp_path / "generated_tasks").is_dir() == converted
+    assert ("review it first" in printed) == converted, "the later-execution caveat is surfaced"
+    assert ("stayed YAML leaves" in printed) == (not converted)
+
+
+def test_pipelines_decompile_discloses_image_id_resolution(tmp_path: Path, capsys):
+    from test_pipeline_decompiler import _authored_task
+
+    source = _write_pipeline(tmp_path / "in.yaml", {"name": "Outer", "implementation": {"graph": {"tasks": {"Score": _authored_task(tmp_path)}}}})
+
+    run_app(cli.build_app(), ["sdk", "pipelines", "decompile", str(source), "--output", str(tmp_path / "generated.py")])
+
+    printed = capsys.readouterr().out
+    assert "may pick a different image" in printed and "--no-python-tasks" in printed
+    assert "unwrap" in printed
+
+
+@pytest.mark.parametrize("flag", [[], ["--local-fallbacks"]])
+def test_pipelines_decompile_local_fallbacks_flag(tmp_path: Path, capsys, monkeypatch, flag: list[str]):
+    import tangle_cli.pipelines_cli as pipelines_cli
+    from test_pipeline_decompiler import _leaf, _published, _ref
+
+    published = _leaf("published")
+    digest, library = _published(published)
+    real = pipelines_cli.decompile_pipeline_file
+    monkeypatch.setattr(pipelines_cli, "decompile_pipeline_file", lambda *a, **k: real(*a, client=library, **k))
+    source = _write_pipeline(tmp_path / "in.yaml", {"name": "Outer", "implementation": {"graph": {"tasks": {"a": _ref(digest=digest, spec=published)}}}})
+
+    run_app(cli.build_app(), ["sdk", "pipelines", "decompile", str(source), "--output", str(tmp_path / "generated.py"), *flag])
+
+    printed = capsys.readouterr().out
+    assert (tmp_path / "generated.leaves.yaml").is_file() == bool(flag)
+    assert ("needs the component library" in printed) == (not flag)
+
+
+def test_pipelines_decompile_exits_nonzero_without_echoing_values(tmp_path: Path):
+    """A refusal must fail the command and must not print document content."""
+    source = _write_pipeline(
+        tmp_path / "bad.yaml",
+        {
+            "name": "Outer",
+            "implementation": {
+                "graph": {
+                    "tasks": {
+                        "a": {
+                            "componentRef": {"digest": "a" * 64},
+                            "arguments": {"token": {"malformed": "SYNTHETIC_CLI_SECRET bad"}},
+                        }
+                    }
+                }
+            },
+        },
+    )
+    app = cli.build_app()
+
+    with pytest.raises(SystemExit) as excinfo:
+        app(["sdk", "pipelines", "decompile", str(source), "--output", str(tmp_path / "o.py")])
+
+    assert excinfo.value.code not in (0, None)
+    assert "SYNTHETIC_CLI_SECRET" not in str(excinfo.value.code)
+    assert not (tmp_path / "o.py").exists()

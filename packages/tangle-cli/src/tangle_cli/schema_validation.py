@@ -60,8 +60,14 @@ class SchemaValidationError(ValueError):
     """Raised when a dehydrated pipeline fails schema/contract validation.
 
     The compiler wraps this in a ``CompileError`` so the CLI exits 1 with
-    a friendly message; tests may assert on it directly.
+    a friendly message; tests may assert on it directly. ``location`` carries
+    the structural path when one is known, so a caller that must not echo the
+    rejected value has an alternative to parsing the message.
     """
+
+    def __init__(self, *args: Any, location: str | None = None) -> None:
+        super().__init__(*args)
+        self.location = location
 
 
 def _schema_path() -> Path:
@@ -127,7 +133,8 @@ def validate_dehydrated_data(data: Mapping[str, Any]) -> None:
     )
     raise SchemaValidationError(
         f"dehydrated pipeline failed schema validation at {location}: "
-        f"{best.message}"
+        f"{best.message}",
+        location=location,
     )
 
 

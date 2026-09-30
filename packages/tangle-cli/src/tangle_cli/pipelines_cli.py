@@ -23,6 +23,7 @@ from .cli_options import (
     TokenOption,
 )
 from .logger import logger_for_log_type
+from .pipeline_decompiler import DecompileError, decompile_pipeline_file
 from .pipelines import (
     PipelineValidationError,
     compile_pipeline_file,
@@ -391,6 +392,135 @@ def pipelines_compile(
         print(f"Wrote subgraph: {subgraph_path}")
     for warning in result.warnings:
         print(f"warning: {warning}")
+
+
+@app.command(name="decompile")
+def pipelines_decompile(
+    pipeline_path: pathlib.Path,
+    *,
+    output: Annotated[
+        pathlib.Path,
+        Parameter(
+            name="--output",
+            alias="-o",
+            help=(
+                "Output path for the generated Python pipeline source. "
+                "Always replaced, atomically."
+            ),
+        ),
+    ],
+    verify: Annotated[
+        bool,
+        Parameter(
+            name="--verify",
+            help=(
+                "Recompile the generated source and require semantic "
+                "equality with the input. Disabling this removes the only "
+                "proof the output is faithful."
+            ),
+        ),
+    ] = True,
+    python_tasks: Annotated[
+        bool,
+        Parameter(
+            name="--python-tasks",
+            help=(
+                "Write components the Python component generator made, whose "
+                "source is recorded in full, as @task functions in "
+                "<stem>_tasks/. The source is copied, never run; compiling the "
+                "script later imports it. --no-python-tasks keeps every "
+                "component a digest-pinned YAML leaf."
+            ),
+        ),
+    ] = True,
+    local_fallbacks: Annotated[
+        bool,
+        Parameter(
+            name="--local-fallbacks",
+            negative="",
+            help=(
+                "Also keep a local copy of every component the library "
+                "verified, behind its published digest, so the output "
+                "compiles and hydrates with the library unreachable. By "
+                "default those components are referenced by digest alone."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Generate Python pipeline source from a pipeline YAML.
+
+    Accepts hydrated or dehydrated YAML. Components are always resolved and
+    re-pinned before code generation.
+    """
+
+    try:
+        result = decompile_pipeline_file(
+            pipeline_path, output, verify=verify, python_tasks=python_tasks, include_local_fallbacks=local_fallbacks
+        )
+    except DecompileError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(
+        f"Decompiled {pipeline_path} -> {result.output_path} "
+        f"({result.task_count} task(s))."
+    )
+    if result.subgraph_module is not None:
+        print(f"Nested graphs are @pipeline functions in {result.subgraph_module}; keep it beside the script.")
+    if result.resolve_config is not None:
+        print(
+            f"Components resolve through {result.resolve_config}, with "
+            f"{len(result.component_files)} local copy(ies) in "
+            f"{result.components_dir}. Keep both beside the script: the "
+            "compiler resolves relative component URLs against the compiled "
+            "YAML's directory, so compile the script in place."
+        )
+    if result.digest_refs:
+        print(
+            f"{result.digest_refs} component(s) are referenced by their published digest "
+            "alone: hydrating the output needs the component library. Pass "
+            "--local-fallbacks to also keep local copies for offline use."
+        )
+    if result.tasks_package is not None:
+        print(
+            f"{result.python_tasks} Python component(s) are @task functions in "
+            f"{result.tasks_package}, holding source recovered verbatim from the "
+            "input. It was not run here: `compile` imports it, and hydrate/submit/"
+            "run execute it to rebuild each component (from the current "
+            "directory tree or a --trusted-source), so review it first. Those "
+            "components are no longer digest-pinned, and their rebuilt specs "
+            "carry new provenance annotations."
+        )
+    if result.image_id_tasks:
+        print(
+            f"{result.image_id_tasks} of them set @task(image_id=...): compile resolves it "
+            "in your environment (--image ID=REF, then registered defaults) and may "
+            "pick a different image than the input recorded. Use --no-python-tasks "
+            "for the digest-exact components."
+        )
+    if result.unwrap_tasks:
+        print(
+            f"{result.unwrap_tasks} of them use @task(unwrap=...): the flattened inputs' "
+            "names were checked, their types are derived again at compile."
+        )
+    kept = result.python_candidates - result.python_tasks
+    if kept > 0:
+        print(f"{kept} component(s) with recorded Python source stayed YAML leaves.")
+    if result.verified:
+        print(
+            "Verified: recompiling the output reproduces the input's "
+            "semantic digest. This is not byte identity \u2014 comments, key "
+            "order and task order are not recoverable."
+            + (
+                " For the Python components this proves the pipeline around "
+                "them, not the components Tangle will rebuild from source."
+                if result.tasks_package is not None
+                else ""
+            )
+        )
+    else:
+        print("warning: --no-verify was passed; the output is unproven.")
+    for note in result.normalizations:
+        print(f"normalization applied when comparing: {note}")
 
 
 @app.command(name="layout")
