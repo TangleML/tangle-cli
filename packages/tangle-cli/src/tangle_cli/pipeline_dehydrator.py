@@ -138,6 +138,7 @@ class PipelineDehydrator(TangleCliHandler):
         *,
         base_url: str | None = None,
         client_factory: Callable[[], Any] | None = None,
+        extract_subgraphs: bool = True,
         uri_readers: Mapping[str, UriReader] | None = None,
         uri_writers: Mapping[str, UriWriter] | None = None,
     ) -> None:
@@ -148,6 +149,7 @@ class PipelineDehydrator(TangleCliHandler):
             base_url=base_url or DEFAULT_API_URL,
         )
         self.remembered_choices = dict(remembered_choices or {})
+        self.extract_subgraphs = extract_subgraphs
         self.output_file = output_file
         self.component_extension = component_extension or ".yaml"
 
@@ -756,7 +758,14 @@ class PipelineDehydrator(TangleCliHandler):
         # Every choice that promises a dehydrated document must replace nested
         # graph boundaries too; otherwise they keep their inline spec. A nested
         # graph has no canonical URL of its own, so URL extracts it to a file.
-        if default_choice in (DehydrateChoice.AUTO, DehydrateChoice.FILE, DehydrateChoice.URL):
+        #
+        # ``extract_subgraphs=False`` keeps every boundary inline and dehydrates
+        # only the leaf components inside it, in place. It is for callers that
+        # represent nested graphs themselves (the decompiler turns each into
+        # Python), so the output is deliberately not a fully dehydrated document.
+        if not self.extract_subgraphs:
+            pass
+        elif default_choice in (DehydrateChoice.AUTO, DehydrateChoice.FILE, DehydrateChoice.URL):
             self._extract_subgraphs_to_files(working)
         elif default_choice in (DehydrateChoice.DIGEST, DehydrateChoice.NAME):
             self._extract_subgraphs_portable(working, default_choice)

@@ -416,3 +416,22 @@ def test_errors_still_propagate_outside_the_generated_fallback_contract(
 
     with pytest.raises(ConnectionError):
         PipelineHydrator(client=Library(error=ConnectionError("down"))).hydrate_file(pipeline)
+
+
+@pytest.mark.parametrize("choice", [DehydrateChoice.DIGEST, DehydrateChoice.FILE, DehydrateChoice.AUTO])
+def test_extract_subgraphs_false_dehydrates_only_the_leaves_in_place(tmp_path: Path, choice: str) -> None:
+    """A caller that represents nested graphs itself keeps every boundary
+    inline; only the leaf components inside it are dehydrated, in place, with
+    no subgraph file written."""
+    document = _pipeline({"spec": INNER}, task="sub")
+
+    result = PipelineDehydrator(
+        {"": choice}, output_file=tmp_path / "out.yaml", client=Library({}), extract_subgraphs=False
+    ).dehydrate(document)
+
+    boundary = result["implementation"]["graph"]["tasks"]["sub"]["componentRef"]
+    assert boundary["spec"]["name"] == "Inner", "the graph boundary stays inline"
+    leaf = boundary["spec"]["implementation"]["graph"]["tasks"]["leaf"]["componentRef"]
+    assert "spec" not in leaf and set(leaf) == {"url"}, "the leaf inside it is dehydrated"
+    assert not (tmp_path / "subgraphs").exists()
+    assert not [p for p in tmp_path.rglob("*.yaml") if "inner" in p.name.lower()]
