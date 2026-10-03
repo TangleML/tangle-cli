@@ -65,6 +65,11 @@ class TestPublicSurface:
             "In",
             "Out",
             "Outputs",
+            "Layout",
+            "GraphLayoutContext",
+            "GraphLayoutTransform",
+            "TaskInterface",
+            "InvalidLayoutError",
         }
 
     def test_every_all_name_is_present_on_module(self):

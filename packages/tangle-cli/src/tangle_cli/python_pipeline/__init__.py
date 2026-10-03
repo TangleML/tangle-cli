@@ -4,6 +4,10 @@ End users write::
 
     from tangle_cli.python_pipeline import pipeline, task, registered, ref, raw, subpipeline, TaskEnv, In, Out
 
+``Layout`` (``@Layout()`` / ``@Layout("name", recursive=...)``) requests
+compile-time graph auto-layout, performed by a caller-supplied
+``GraphLayoutTransform``; without one it does not change compiled YAML.
+
 ``cfg`` is NOT a top-level export — it is a parameter the framework
 injects into the user's pipeline function at trace time. Importing the
 :class:`tangle_cli.python_pipeline.cfg.Cfg` class is reserved for the
@@ -21,7 +25,9 @@ and lowered to the dehydrated dict shape by :mod:`.emit`.
 from __future__ import annotations
 
 from .dynamic_data import dynamic_secret
+from .errors import InvalidLayoutError
 from .graph_io import graph_input, graph_output
+from .layout import GraphLayoutContext, GraphLayoutTransform, Layout, TaskInterface
 from .pipeline import pipeline
 from .raw import raw
 from .ref import ref
@@ -47,4 +53,9 @@ __all__ = [
     "In",
     "Out",
     "Outputs",
+    "Layout",
+    "GraphLayoutContext",
+    "GraphLayoutTransform",
+    "TaskInterface",
+    "InvalidLayoutError",
 ]

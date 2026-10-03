@@ -36,6 +36,7 @@ seam so the compiler can resolve an explicit relative
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import inspect
@@ -43,7 +44,9 @@ import json
 import os
 import re
 import sys
+import types
 import uuid
+import warnings as _warnings
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -54,6 +57,7 @@ import yaml
 
 from .authenticated_identity import ME
 from .component_from_func import build_unwrapped_inputs_schema
+from .editor_layout import POSITION_ANNOTATION
 from .handler import TangleCliHandler
 from .python_pipeline.cfg import (
     Cfg,
@@ -73,6 +77,12 @@ from .python_pipeline.compiler_context import (
 )
 from .python_pipeline.emit import _TASK_URL_PLACEHOLDER, emit_pipeline
 from .python_pipeline.errors import CompileError, InvalidPipelineAnnotationsError
+from .python_pipeline.layout import (
+    GraphLayoutContext,
+    GraphLayoutTransform,
+    Layout,
+    TaskInterface,
+)
 from .python_pipeline.pipeline import PipelineFn
 from .python_pipeline.ref import CallableRef
 from .python_pipeline.registered import _REGISTERED_URL_PLACEHOLDER
@@ -154,6 +164,7 @@ def compile_pipeline(
     emit_components_sidecar: bool = True,
     image_overrides: Mapping[str, str] | None = None,
     pipeline_annotations: Mapping[str, str] | None = None,
+    layout_transform: GraphLayoutTransform | None = None,
 ) -> CompileResult:
     """Compile ``script`` to a single pipeline YAML at ``output``.
 
@@ -199,6 +210,13 @@ def compile_pipeline(
             :data:`tangle_cli.schema_validation.CALLER_ANNOTATION_POLICY`
             for the accepted shape; a malformed mapping raises
             :class:`~tangle_cli.python_pipeline.errors.InvalidPipelineAnnotationsError`.
+        layout_transform: Optional :class:`GraphLayoutTransform` that lays out
+            every graph covered by ``@Layout()`` before validation and writing,
+            so the written root/sidecar YAML carries its ``editor.position``
+            annotations. See :func:`_layout_policy_for` for coverage and
+            :func:`_apply_layout_transform` for the call contract. ``None``
+            (the default) leaves output byte-identical to an undecorated
+            compile and adds one warning per decorated pipeline.
 
     Returns:
         A :class:`CompileResult`. ``components_path`` is the sidecar path
@@ -276,6 +294,7 @@ def compile_pipeline(
             source_dirs=purge_dirs,
             image_overrides=image_overrides,
             pipeline_annotations=root_annotations,
+            layout_transform=layout_transform,
         )
 
         # 5. Compile the root (and, recursively, all children) into in-memory
@@ -289,6 +308,8 @@ def compile_pipeline(
             overrides,
             is_root=True,
             base_dir=script_path.parent,
+            layout_policy=_layout_policy_for(pipeline_fn, None, ctx),
+            occurrence_path=(),
         )
 
         # 6. The full bundle: the root plus every deduped child in the registry.
@@ -318,6 +339,308 @@ def compile_pipeline(
         # Purge bundle-local modules so a subsequent in-process compile
         # re-imports them fresh. Runs on success AND on error.
         _purge_bundle_local_modules(purge_dirs)
+
+
+# ---------------------------------------------------------------------------
+# Compile-time graph layout (``@Layout()``)
+
+
+@dataclass(frozen=True)
+class _LayoutPolicy:
+    """Layout coverage of one graph occurrence.
+
+    ``apply`` is the :class:`Layout` this graph is laid out with (``None``:
+    not laid out); ``carry`` is the one its undecorated subgraphs inherit
+    (``None``: they inherit nothing). Both always ``None`` without a
+    transform, which keeps plain compiles identical.
+    """
+
+    apply: Layout | None = None
+    carry: Layout | None = None
+
+    def variant(self) -> str | None:
+        """Canonical artifact-variant fingerprint, ``None`` when uncovered.
+
+        Folded into a child's dedup key and sidecar filename, so a child laid
+        out under two different policies becomes two artifacts while the same
+        policy still dedups. ``None`` keeps the pre-layout key and filename.
+        """
+        if self.apply is None and self.carry is None:
+            return None
+
+        def encode(layout: Layout | None) -> dict[str, Any] | None:
+            if layout is None:
+                return None
+            return {"algorithm": layout.algorithm, "recursive": layout.recursive}
+
+        return json.dumps(
+            {"apply": encode(self.apply), "carry": encode(self.carry)},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+
+_NO_LAYOUT = _LayoutPolicy()
+
+
+def _layout_policy_for(
+    pipeline_fn: PipelineFn,
+    inherited: Layout | None,
+    ctx: CompileContext,
+) -> _LayoutPolicy:
+    """Resolve the layout coverage of one occurrence of ``pipeline_fn``.
+
+    The graph's own ``@Layout()`` wins over anything inherited, and its
+    ``recursive`` flag decides whether undecorated descendants inherit it.
+    An undecorated graph is laid out with, and passes down, whatever its
+    nearest recursive ancestor declared. Without a transform nothing is
+    covered, and each decorated pipeline produces one warning.
+    """
+    explicit = pipeline_fn.layout
+    if ctx.layout_transform is None:
+        if explicit is not None and pipeline_fn.name not in ctx.layout_warned:
+            ctx.layout_warned.add(pipeline_fn.name)
+            ctx.warnings.append(
+                f"pipeline {pipeline_fn.name!r} has @Layout() but no layout transform "
+                "is installed for this compile, so no auto-layout positions were "
+                "written. Compile through a tool that provides a layout transform."
+            )
+        return _NO_LAYOUT
+    if explicit is not None:
+        return _LayoutPolicy(apply=explicit, carry=explicit if explicit.recursive else None)
+    if inherited is not None:
+        return _LayoutPolicy(apply=inherited, carry=inherited)
+    return _NO_LAYOUT
+
+
+def _variant_hash8(key: PipelineCompileKey, variant: str | None) -> str:
+    """Sidecar filename hash: the plain key hash unless a layout variant applies."""
+    if variant is None:
+        return key.hash8()
+    blob = json.dumps({**key.canonical_fields(), "layout": variant}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8]
+
+
+def _task_interface_for_ref(ref: CallableRef, unwrapped: Mapping[str, Any] | None) -> TaskInterface | None:
+    """Ordered component interface of an ``@task`` call, or ``None`` if unknown.
+
+    Built from the traced function with the same ``extract_interface`` the
+    hydrator later generates the component from (best effort: geometry only).
+    """
+    fn = vars(ref).get("__wrapped__")
+    if not callable(fn):
+        return None
+    try:
+        from .component_from_func import extract_interface
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            spec = extract_interface(fn, {}, unwrapped_inputs=dict(unwrapped) if unwrapped else None)
+    except Exception:  # noqa: BLE001 — geometry is best effort; never fail the compile here
+        return None
+    return TaskInterface(
+        inputs=tuple(p.yaml_name for p in spec.inputs),
+        outputs=tuple(p.yaml_name for p in spec.all_outputs),
+    )
+
+
+def _graph_io_names(body: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    specs = body.get(key) or []
+    return tuple(s["name"] for s in specs if isinstance(s, dict) and isinstance(s.get("name"), str))
+
+
+def _observed_task_ports(body: Mapping[str, Any]) -> dict[str, tuple[list[str], list[str]]]:
+    """Task ID -> ``(input names, output names)`` observed in ``body``.
+
+    Inputs are EVERY argument name the task supplies, in argument order:
+    edges (``taskOutput`` / ``graphInput``) and filled literal values alike.
+    Outputs are the distinct ``taskOutput`` names other tasks consume, as
+    arguments or in their ``isEnabled`` condition, or that ``outputValues``
+    expose, in first-seen order. ``isEnabled`` is not an input port.
+    """
+    graph = body.get("implementation", {}).get("graph", {}) or {}
+    tasks = graph.get("tasks", {}) or {}
+    observed: dict[str, tuple[list[str], list[str]]] = {}
+    for task_id, task_spec in tasks.items():
+        arguments = task_spec.get("arguments") if isinstance(task_spec, dict) else None
+        names = [name for name in arguments if isinstance(name, str)] if isinstance(arguments, dict) else []
+        observed[task_id] = (names, [])
+
+    def consume(value: Any) -> None:
+        task_output = value.get("taskOutput") if isinstance(value, dict) else None
+        if not isinstance(task_output, dict):
+            return
+        target = observed.get(task_output.get("taskId"))  # type: ignore[arg-type]
+        name = task_output.get("outputName")
+        if target is not None and isinstance(name, str) and name not in target[1]:
+            target[1].append(name)
+
+    def consume_nested(value: Any) -> None:
+        # ``isEnabled`` may be a bare reference or a nested predicate.
+        if isinstance(value, dict):
+            consume(value)
+            for nested in value.values():
+                consume_nested(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                consume_nested(nested)
+
+    for task_spec in tasks.values():
+        if not isinstance(task_spec, dict):
+            continue
+        arguments = task_spec.get("arguments")
+        if isinstance(arguments, dict):
+            for value in arguments.values():
+                consume(value)
+        consume_nested(task_spec.get("isEnabled"))
+    output_values = graph.get("outputValues")
+    if isinstance(output_values, dict):
+        for value in output_values.values():
+            consume(value)
+    return observed
+
+
+def _union_interface(
+    known: TaskInterface | None,
+    observed_inputs: list[str],
+    observed_outputs: list[str],
+) -> TaskInterface:
+    """Known interface extended by any observed port it lacks; or the observed
+    ports alone, marked ``approximate``, when nothing is known."""
+    if known is None:
+        return TaskInterface(inputs=tuple(observed_inputs), outputs=tuple(observed_outputs), approximate=True)
+    return TaskInterface(
+        inputs=known.inputs + tuple(n for n in observed_inputs if n not in known.inputs),
+        outputs=known.outputs + tuple(n for n in observed_outputs if n not in known.outputs),
+    )
+
+
+def _layout_task_interfaces(
+    artifact: SubgraphArtifact,
+    builder: Any,
+    sidecar_plan: TaskSidecarPlan | None,
+) -> dict[str, TaskInterface]:
+    """Graph task ID -> :class:`TaskInterface`, in task order.
+
+    Exact for ``subpipeline`` tasks (the child body) and ``@task`` tasks (the
+    traced signature), unioned with observed names defensively. Opaque
+    ``ref`` / ``@registered`` tasks get only their observed names (every
+    supplied argument, edge or literal, plus consumed outputs), marked
+    ``approximate``; nothing is read remotely.
+    """
+    task_refs = dict(builder.task_refs_for_local_from_python)
+    interfaces: dict[str, TaskInterface] = {}
+    for task_id, (observed_inputs, observed_outputs) in _observed_task_ports(artifact.body).items():
+        known: TaskInterface | None = None
+        child = artifact.subpipeline_children.get(task_id)
+        ref = task_refs.get(task_id)
+        if child is not None:
+            known = TaskInterface(
+                inputs=_graph_io_names(child.body, "inputs"),
+                outputs=_graph_io_names(child.body, "outputs"),
+            )
+        elif ref is not None and sidecar_plan is not None:
+            fragment = sidecar_plan.fragment_by_task.get(task_id)
+            entry = sidecar_plan.entries.get(fragment, {}) if fragment is not None else {}
+            unwrapped = (entry.get("local_from_python") or {}).get("unwrapped_inputs")
+            known = _task_interface_for_ref(ref, unwrapped)
+        interfaces[task_id] = _union_interface(known, observed_inputs, observed_outputs)
+    return interfaces
+
+
+def _layout_items(body: Any) -> list[tuple[str, Any]]:
+    """``(label, item)`` for every annotatable layout target in ``body``."""
+    items: list[tuple[str, Any]] = []
+    if not isinstance(body, dict):
+        return items
+    implementation = body.get("implementation")
+    graph = implementation.get("graph") if isinstance(implementation, dict) else None
+    tasks = graph.get("tasks") if isinstance(graph, dict) else None
+    if isinstance(tasks, dict):
+        items.extend((f"task {task_id!r}", task) for task_id, task in tasks.items())
+    for key in ("inputs", "outputs"):
+        specs = body.get(key)
+        if isinstance(specs, list):
+            items.extend((f"{key[:-1]} #{index}", spec) for index, spec in enumerate(specs))
+    return items
+
+
+def _strip_positions(body: Any, reference: Any) -> Any:
+    """Copy of ``body`` without ``editor.position`` on layout targets.
+
+    An ``annotations`` block left empty is dropped when the same item in
+    ``reference`` had none or only a position, so a transform may create or
+    remove a position-only block, but not drop an explicit empty one.
+    """
+    stripped = copy.deepcopy(body)
+    reference_items = dict(_layout_items(reference))
+    for label, item in _layout_items(stripped):
+        if not isinstance(item, dict):
+            continue
+        annotations = item.get("annotations")
+        if not isinstance(annotations, dict):
+            continue
+        annotations.pop(POSITION_ANNOTATION, None)
+        original = reference_items.get(label)
+        original_annotations = original.get("annotations") if isinstance(original, dict) else None
+        position_only = isinstance(original_annotations, dict) and set(original_annotations) == {POSITION_ANNOTATION}
+        if not annotations and (original_annotations is None or position_only):
+            del item["annotations"]
+    return stripped
+
+
+def _apply_layout_transform(
+    artifact: SubgraphArtifact,
+    builder: Any,
+    sidecar_plan: TaskSidecarPlan | None,
+    ctx: CompileContext,
+    *,
+    layout: Layout,
+    occurrence_path: tuple[str, ...],
+) -> None:
+    """Run the compile's layout transform on one artifact body, in place.
+
+    Called once per artifact variant, after its refs are final and its
+    subgraphs are compiled, before validation/writing. The transform gets a
+    private deep copy and must return a dict that differs only in
+    ``editor.position`` annotations (string values) on graph tasks and
+    top-level inputs/outputs; anything else is a :class:`CompileError` naming
+    the location, and nothing is written.
+    """
+    name = artifact.key.pipeline_name
+    where = f"pipeline {name!r} (occurrence path {occurrence_path!r})"
+    context = GraphLayoutContext(
+        layout=layout,
+        path=occurrence_path,
+        pipeline_name=name,
+        task_interfaces=types.MappingProxyType(_layout_task_interfaces(artifact, builder, sidecar_plan)),
+        artifact_dir=artifact.output_path.parent,
+    )
+    before = artifact.body
+    try:
+        after = ctx.layout_transform(copy.deepcopy(before), context)
+    except CompileError:
+        raise
+    except Exception as exc:
+        raise CompileError(f"layout transform failed for {where}: {type(exc).__name__}: {exc}") from exc
+    if type(after) is not dict:
+        raise CompileError(f"layout transform for {where} must return a dict pipeline body.")
+    # Detach from anything the transform may have retained, so a later
+    # mutation of its own reference cannot reach the guarded, written body.
+    after = copy.deepcopy(after)
+    for label, item in _layout_items(after):
+        annotations = item.get("annotations") if isinstance(item, dict) else None
+        if isinstance(annotations, dict) and POSITION_ANNOTATION in annotations:
+            if type(annotations[POSITION_ANNOTATION]) is not str:
+                raise CompileError(
+                    f"layout transform for {where} set a non-string {POSITION_ANNOTATION} on {label}."
+                )
+    if _strip_positions(after, before) != _strip_positions(before, before):
+        raise CompileError(
+            f"layout transform for {where} changed the pipeline beyond "
+            f"{POSITION_ANNOTATION} annotations on graph tasks and inputs/outputs."
+        )
+    artifact.body = after
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +750,8 @@ def _compile_pipeline_fn(
     base_dir: Path,
     rebroadcast_overrides: Mapping[str, Any] | None = None,
     precomputed_key: PipelineCompileKey | None = None,
+    layout_policy: _LayoutPolicy = _NO_LAYOUT,
+    occurrence_path: tuple[str, ...] = (),
 ) -> SubgraphArtifact:
     """Trace + emit ``pipeline_fn`` into an in-memory :class:`SubgraphArtifact`.
 
@@ -445,6 +770,9 @@ def _compile_pipeline_fn(
        ``resolve://`` URLs.
     4. Compile any ``subpipeline(child)`` children recursively and
        rewrite the parent task refs to pure ``file://`` URLs.
+
+    5. When ``layout_policy`` covers this graph, run the layout transform
+       on the final body (post-order: subgraphs are already laid out).
 
     Returns the planned artifact; validation + writing happen later in
     :func:`compile_pipeline` once the whole bundle is built.
@@ -513,6 +841,7 @@ def _compile_pipeline_fn(
     #    placeholder never reaches output.
     components_entries: dict[str, Any] = {}
     components_path: Path | None = None
+    sidecar_plan: TaskSidecarPlan | None = None
     task_refs = builder.task_refs_for_local_from_python
     if task_refs and not ctx.emit_components_sidecar:
         task_ids = sorted(tid for tid, _ref in task_refs)
@@ -637,11 +966,29 @@ def _compile_pipeline_fn(
         ctx.broadcast_stack.append(BroadcastLayer(config={**raw_cfg, **dict(rebroadcast)}))
         pushed_broadcast = True
     try:
-        _process_subpipeline_children(artifact, builder, ctx, parent_propagate_config=pipeline_fn.propagate_config)
+        _process_subpipeline_children(
+            artifact,
+            builder,
+            ctx,
+            parent_propagate_config=pipeline_fn.propagate_config,
+            layout_carry=layout_policy.carry,
+            occurrence_path=occurrence_path,
+        )
     finally:
         ctx.active_stack.pop()
         if pushed_broadcast:
             ctx.broadcast_stack.pop()
+
+    # 7. Compile-time layout, once per artifact variant, on the final body.
+    if layout_policy.apply is not None:
+        _apply_layout_transform(
+            artifact,
+            builder,
+            sidecar_plan,
+            ctx,
+            layout=layout_policy.apply,
+            occurrence_path=occurrence_path,
+        )
 
     return artifact
 
@@ -652,6 +999,8 @@ def _process_subpipeline_children(
     ctx: CompileContext,
     *,
     parent_propagate_config: bool,
+    layout_carry: Layout | None = None,
+    occurrence_path: tuple[str, ...] = (),
 ) -> None:
     """Compile each ``subpipeline(child)(...)`` recorded during ``builder``'s
     trace and rewrite the parent task's ``componentRef`` to a pure
@@ -772,7 +1121,13 @@ def _process_subpipeline_children(
                 "published component boundary."
             )
 
-        child_artifact = ctx.registry.get(child_key)
+        # Layout policy of THIS occurrence (the edge's own PipelineFn wins over
+        # the inherited one). It selects the artifact VARIANT; cycle detection
+        # above deliberately uses the layout-free ``child_key``.
+        child_policy = _layout_policy_for(child_fn, layout_carry, ctx)
+        child_variant = child_policy.variant()
+        registry_key = (child_key, child_variant)
+        child_artifact = ctx.registry.get(registry_key)
         if child_artifact is None:
             # Max-depth guard: the chain TO the child would be one deeper
             # than the current stack.
@@ -785,7 +1140,7 @@ def _process_subpipeline_children(
                     "pipeline graph."
                 )
             slug = _slugify(child_fn.name)
-            child_output_path = ctx.subgraph_dir / f"{slug}-{child_key.hash8()}.yaml"
+            child_output_path = ctx.subgraph_dir / f"{slug}-{_variant_hash8(child_key, child_variant)}.yaml"
             # Per-edge explicit-override depth: an
             # explicit ``.override_config`` set on THIS edge flows deep iff the
             # CALLER (this parent) is flagged. When it is, push a broadcast
@@ -820,17 +1175,20 @@ def _process_subpipeline_children(
                     base_dir=child_base_dir,
                     rebroadcast_overrides={},
                     precomputed_key=child_key,
+                    layout_policy=child_policy,
+                    occurrence_path=(*occurrence_path, task_id),
                 )
             finally:
                 if pushed_edge_override:
                     ctx.broadcast_stack.pop()
-            ctx.registry[child_key] = child_artifact
+            ctx.registry[registry_key] = child_artifact
             parent_artifact.children.append(child_artifact)
         else:
             # Reused (dedup / diamond) — still a child of this parent for
             # structural completeness, but compiled only once.
             if child_artifact not in parent_artifact.children:
                 parent_artifact.children.append(child_artifact)
+        parent_artifact.subpipeline_children[task_id] = child_artifact
 
         # Rewrite this task's componentRef to a pure file:// URL relative to
         # the REFERENCING artifact's directory.
@@ -2866,6 +3224,7 @@ class PipelineCompiler(TangleCliHandler):
         emit_components_sidecar: bool = True,
         image_overrides: Mapping[str, str] | None = None,
         pipeline_annotations: Mapping[str, str] | None = None,
+        layout_transform: GraphLayoutTransform | None = None,
     ) -> CompileResult:
         """Compile ``script`` to a single dehydrated pipeline YAML at ``output``.
 
@@ -2886,6 +3245,7 @@ class PipelineCompiler(TangleCliHandler):
             emit_components_sidecar=emit_components_sidecar,
             image_overrides=image_overrides,
             pipeline_annotations=pipeline_annotations,
+            layout_transform=layout_transform,
         )
         self.log.info(f"wrote {result.pipeline_path}")
         if result.components_path is not None:

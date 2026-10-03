@@ -231,6 +231,9 @@ class SubgraphArtifact:
     # Child sub-artifacts this artifact references (for structure only —
     # the authoritative write/dedup list is ``CompileContext.registry``).
     children: list["SubgraphArtifact"] = field(default_factory=list)
+    # ``subpipeline(...)`` task ID -> the child artifact it runs, one entry
+    # per task (dedup hits included). Used for layout task interfaces.
+    subpipeline_children: dict[str, "SubgraphArtifact"] = field(default_factory=dict)
     # Cached dumped YAML text, filled during validation so the write pass
     # does not re-dump (and writes the exact bytes that were validated).
     dumped_text: str | None = None
@@ -262,9 +265,12 @@ class CompileContext:
     # filenames stay identity-derived rather than content-derived.
     pipeline_annotations: dict[str, str] = field(default_factory=dict)
     max_depth: int = 32
-    # Compiled CHILD artifacts keyed by compile key (Decision M dedup).
-    # The root is NOT stored here; it is returned directly.
-    registry: dict[PipelineCompileKey, SubgraphArtifact] = field(default_factory=dict)
+    # Compiled CHILD artifacts keyed by ``(compile key, layout policy)``
+    # (Decision M dedup). The policy is ``None`` unless a layout transform is
+    # installed and a ``@Layout()`` covers the child, so plain compiles dedup
+    # exactly as before; a child laid out under two different policies is
+    # two artifacts. The root is NOT stored here; it is returned directly.
+    registry: dict[tuple[PipelineCompileKey, str | None], SubgraphArtifact] = field(default_factory=dict)
     # Keys on the current recursive compile chain, for cycle detection
     # (Decision L). Pushed before recursing into a child, popped after.
     active_stack: list[PipelineCompileKey] = field(default_factory=list)
@@ -284,3 +290,8 @@ class CompileContext:
     # not reuse a stale cached sibling module (the P2 sibling-import leak).
     source_dirs: set[Path] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
+    # Compile-time ``GraphLayoutTransform`` (``None``: ``@Layout()`` has no
+    # effect on output and only produces a warning).
+    layout_transform: Any = None
+    # Display names of decorated pipelines already warned about (no transform).
+    layout_warned: set[str] = field(default_factory=set)

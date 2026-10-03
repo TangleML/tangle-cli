@@ -23,6 +23,7 @@ from tangle_cli.schema_validation import PIPELINE_LABELS_POLICY, check_annotatio
 from . import emit
 from .errors import InvalidEditorLayoutError, InvalidPipelineLabelsError
 from .graph import GraphBuilder
+from .layout import Layout, layout_marker_of
 
 
 @dataclass
@@ -55,6 +56,11 @@ class PipelineFn:
     # Off by default (Decision F isolation is preserved). Metadata only — no
     # config is read at decoration time; the compile driver acts on it.
     propagate_config: bool = False
+    # Graph auto-layout INTENT from ``@Layout()`` (either stacking order).
+    # Authoring metadata only: never emitted into YAML and not part of the
+    # compile/dedup key. The compiler reports it per graph occurrence in
+    # ``CompileResult.layout_requests``; a consumer runs the layout.
+    layout: Layout | None = field(default=None, compare=False)
 
     # ------------------------------------------------------------------
     # Calling the decorated PipelineFn directly is reserved for the
@@ -213,6 +219,10 @@ def pipeline(
             caller_dir=caller_dir,
             output_name=output_name,
             propagate_config=propagate_config,
+            # ``@pipeline`` over ``@Layout()``: snapshot the function's own
+            # marker into THIS wrapper. An outer ``@Layout()`` later sets
+            # only the wrapper it decorates.
+            layout=layout_marker_of(fn),
         )
 
     return decorator

@@ -38,6 +38,16 @@ class InvalidEditorLayoutError(CompileError):
     """
 
 
+class InvalidLayoutError(CompileError):
+    """Raised on a misused ``@Layout()`` graph auto-layout request.
+
+    Covers bare ``@Layout`` / positional arguments, an ``algorithm`` that is
+    not ``None`` or a non-empty ``str``, an unsupported decoration target,
+    and a second ``@Layout()`` on one graph definition. Messages never echo
+    the rejected value or target.
+    """
+
+
 class InvalidInputDefaultError(CompileError):
     """Raised on an ``In[T]`` parameter default the schema cannot carry.
 

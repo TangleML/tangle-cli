@@ -361,6 +361,7 @@ def compile_pipeline_file(
     image_overrides: Mapping[str, str] | None = None,
     pipeline_annotations: Mapping[str, str] | None = None,
     logger: Any | None = None,
+    layout_transform: Any | None = None,
 ) -> CompileResult:
     """Compile a Python-authored pipeline to a dehydrated YAML bundle.
 
@@ -378,6 +379,10 @@ def compile_pipeline_file(
     caller winning on collision; it applies to the root only and is a no-op
     when omitted or empty. See
     :func:`~tangle_cli.pipeline_compiler.compile_pipeline`.
+
+    ``layout_transform`` is the optional compile-time
+    :class:`~tangle_cli.python_pipeline.GraphLayoutTransform` for ``@Layout()``
+    graphs, forwarded unchanged.
     """
 
     from .pipeline_compiler import PipelineCompiler
@@ -397,6 +402,7 @@ def compile_pipeline_file(
             # takes its own copy, so a malformed mapping fails with the
             # compiler's value-free CompileError instead of a bare TypeError.
             pipeline_annotations=pipeline_annotations,
+            layout_transform=layout_transform,
         )
     except (CompileError, SchemaValidationError) as exc:
         raise PipelineValidationError(str(exc)) from exc

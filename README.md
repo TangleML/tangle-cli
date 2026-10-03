@@ -760,6 +760,37 @@ Graph **inputs** and **outputs** carry `editor.position` in the same way. An `In
 
 The key names, the serialized format, and the validation live in `tangle_cli.editor_layout` (`POSITION_ANNOTATION`, `FLOW_DIRECTION_ANNOTATION`, `FLOW_DIRECTIONS`, `position_annotation_value`, `validate_flow_direction`), which the CLI's own `pipelines layout` and the runner's auto-layout gate share, so a tool emitting layout cannot drift from what the editor reads. That module is stdlib-only and lives outside `python_pipeline` on purpose, so layout and submit paths do not pull in the authoring/codegen stack; it raises whatever `error_cls` the caller injects, and the authoring surfaces inject `InvalidEditorLayoutError`.
 
+##### Compile-time auto-layout (`@Layout()`)
+
+`@Layout()` asks the compiler to auto-layout a graph, so that the compiled root and subgraph YAML already contain `editor.position` annotations. Tangle CLI ships no layout algorithm. The caller passes a `layout_transform` to `compile_pipeline(...)`, `PipelineCompiler.compile_file(...)` or `tangle_cli.pipelines.compile_pipeline_file(...)`; a downstream distribution typically installs one for all of its compile paths:
+
+```python
+from tangle_cli.python_pipeline import Layout, pipeline, subpipeline
+
+@Layout("banded", recursive=False)  # either order around @pipeline works
+@pipeline("Judge")
+def judge(...): ...
+
+@pipeline("Daily Pulse")
+@Layout()                           # algorithm=None: the transform's default
+def daily_pulse(...):
+    first = subpipeline(judge).named("First")(...)
+    ...
+```
+
+- **Coverage.** `@Layout(...)` covers its own graph. With `recursive=True` (the default) it also covers every undecorated descendant subgraph; with `recursive=False` it covers only its own graph. A descendant with its own `@Layout(...)` always uses that declaration, and its `recursive` flag governs further down. `@Layout()` therefore resets to the transform's default rather than inheriting an ancestor's algorithm. An undecorated root with decorated descendants lays out only those descendants. Only authored `@pipeline` graphs are laid out. External `ref(...)` / `@registered` components are never read remotely or modified.
+- **The transform.** It is called as `transform(graph, context)` once per covered compiled artifact, post-order (subgraphs first). The call comes after the graph's references are final and before validation and writing. `graph` is a private deep copy of the compiled body. The function returns the body to write, which may differ only in `editor.position` string values on graph tasks and on top-level `inputs`/`outputs`. Both creating and replacing positions are allowed, and an explicit `.with_position(...)` is overwritten. Any other difference, a non-string position or a non-dict return value raises `CompileError`, and nothing is written. A `CompileError` raised by the transform propagates as-is; any other exception is wrapped. The `GraphLayoutContext` carries:
+  - `layout`: the governing `Layout`;
+  - `path`: the task-ID path of the first occurrence, with the root `()`;
+  - `pipeline_name`;
+  - `task_interfaces`: every task ID → `TaskInterface(inputs, outputs, approximate)` with ordered port names. `@task` and `subpipeline` tasks get their exact interface, extended with any other observed names. Opaque `ref` / `@registered` tasks get observed names only, with `approximate=True`: every argument the task supplies (edges and filled literal values alike) as inputs, and the outputs consumed elsewhere in the graph as outputs, so their cards may be smaller than the real component. Nothing is hydrated remotely, and interface data is never written back;
+  - `artifact_dir`.
+
+  The transform must be deterministic, because occurrences that share an artifact share its result.
+- **Variants and filenames.** A shared child is still compiled once per definition, config and layout policy. The same child reached under two different policies (for example `A` from one parent and `B` from another) becomes two correctly laid-out sidecars with distinct filenames; the same policy still dedups, diamonds included. Uncovered children keep their existing sidecar filenames. Cycle detection ignores layout.
+- **No transform, no change.** Without a `layout_transform`, `@Layout()` changes nothing in the output: bytes, filenames and keys are identical to an undecorated compile, and `CompileResult.warnings` notes each decorated pipeline. Without `@Layout()`, an installed transform is never called.
+- **Validated structurally, without echoing values.** `algorithm` must be `None` or a non-empty `str` (positional or keyword); which names are supported is the transform's decision. `recursive` must be a `bool`. A bare `@Layout` (without parentheses), a second `@Layout()` on the same definition, or a non-pipeline target (a `@task`, a `subpipeline(...)` handle, a class, a partial, a `PipelineFn` subclass, …) raises `InvalidLayoutError` (a `CompileError`). `Layout` objects are immutable, and the request stays attached to the `PipelineFn`, so an imported or cached child keeps it.
+
 ##### Conditional task execution
 
 Pipeline inputs used as conditions are ordinary `In[str]` values; there is no special conditional input annotation. Pass the value through the reserved task-call metadata keyword `is_enabled=`:
