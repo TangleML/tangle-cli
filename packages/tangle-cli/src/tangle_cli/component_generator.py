@@ -120,7 +120,7 @@ class ComponentGenerator:
         container_image: str,
         function_name: str | None = None,
         dependencies_from: Path | None = None,
-        mode: Literal["inline", "bundle"] = "inline",
+        mode: Literal["inline", "bundle", "bundle-bz2"] = "inline",
         custom_name: str | None = None,
         custom_annotations: dict[str, str] | None = None,
         strip_code: bool = False,
@@ -138,7 +138,8 @@ class ComponentGenerator:
             container_image: Container image to place in the component spec.
             function_name: Function to generate, or ``None`` to auto-detect.
             dependencies_from: Optional dependency file for pip installs.
-            mode: ``"inline"`` or ``"bundle"`` generation mode.
+            mode: ``"inline"``, ``"bundle"`` (zlib/Base64), or opt-in
+                ``"bundle-bz2"`` (bz2/Base85) generation mode.
             custom_name: Optional component name override.
             custom_annotations: Optional metadata annotations to merge.
             strip_code: Omit original source annotations when true.

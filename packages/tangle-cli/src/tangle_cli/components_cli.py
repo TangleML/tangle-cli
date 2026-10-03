@@ -128,8 +128,8 @@ def _components_generate_from_python_impl(
 
         generator = ComponentGenerator(logger=logger, verbose=True)
         selected_mode = args.mode or "inline"
-        if selected_mode not in {"inline", "bundle"}:
-            raise SystemExit("--mode must be 'inline' or 'bundle'")
+        if selected_mode not in {"inline", "bundle", "bundle-bz2"}:
+            raise SystemExit("--mode must be 'inline', 'bundle', or 'bundle-bz2'")
         python_path = pathlib.Path(args.python_file)
         output_path = generator.determine_output_path(
             python_path,

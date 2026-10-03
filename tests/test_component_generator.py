@@ -259,7 +259,9 @@ def bad_authoring() -> str:
     assert not (tmp_path / "bad-authoring.yaml").exists()
 
 
-def test_bundle_mode_with_local_imports(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize("mode", ["bundle", "bundle-bz2"])
+@pytest.mark.parametrize("use_cli", [False, True])
+def test_bundle_mode_with_local_imports(monkeypatch, tmp_path: Path, mode, use_cli):
     monkeypatch.setattr("tangle_cli.utils._fill_from_ci_env", lambda info: None)
     helpers_dir = tmp_path / "helpers"
     helpers_dir.mkdir()
@@ -278,11 +280,19 @@ def my_component(name: str) -> str:
 ''', encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "test"\ndependencies = []\n', encoding="utf-8")
 
-    assert regenerate_yaml(py_file, image="python:3.12", function_name="my_component", mode="bundle") is True
+    if use_cli:
+        run_app(cli.build_app(), [
+            "sdk", "components", "generate", "from-python", str(py_file),
+            "--image", "python:3.12", "--function", "my_component", "--mode", mode,
+        ])
+    else:
+        assert regenerate_yaml(py_file, image="python:3.12", function_name="my_component", mode=mode) is True
 
     generated = yaml.safe_load((tmp_path / "my-component.yaml").read_text(encoding="utf-8"))
     program = generated["implementation"]["container"]["command"][-1]
     assert generated["name"] == "My component"
+    assert generated["metadata"]["annotations"]["tangle_cli_generation_mode"] == mode
+    assert ("base64.b85decode" if mode == "bundle-bz2" else "base64.b64decode") in program
     assert "_EMBEDDED_MODULES" in program
     assert "helpers.utils" in program
 

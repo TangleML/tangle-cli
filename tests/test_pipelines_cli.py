@@ -1284,9 +1284,11 @@ def test_pipelines_hydrate_local_from_python_trusts_project_paths(
     assert regenerated == [python_file.resolve()]
 
 
+@pytest.mark.parametrize("mode", ["bundle", "bundle-bz2"])
 def test_pipelines_hydrate_local_from_python_forwards_bundle_mode_and_resolve_root(
     monkeypatch,
     tmp_path: Path,
+    mode,
 ):
     from tangle_cli import pipeline_hydrator as hydrator_module
     from tangle_cli.pipelines import hydrate_pipeline_file
@@ -1300,7 +1302,7 @@ def test_pipelines_hydrate_local_from_python_forwards_bundle_mode_and_resolve_ro
     pipeline_path = _write_local_from_python_pipeline(
         project_dir,
         "./src/component.py",
-        mode="bundle",
+        mode=mode,
         resolve_root="./src",
     )
     calls: list[dict[str, object]] = []
@@ -1318,7 +1320,7 @@ def test_pipelines_hydrate_local_from_python_forwards_bundle_mode_and_resolve_ro
     hydrate_pipeline_file(pipeline_path)
 
     assert calls[0]["python_file"] == python_file.resolve()
-    assert calls[0]["mode"] == "bundle"
+    assert calls[0]["mode"] == mode
     assert calls[0]["resolve_root"] == src_dir.resolve()
 
 

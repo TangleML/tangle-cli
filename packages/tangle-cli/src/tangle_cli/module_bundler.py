@@ -239,8 +239,18 @@ class ModuleBundler:
         return result
 
     @staticmethod
-    def encode(module_sources: dict[str, str]) -> str | None:
-        """Compress and base64-encode a dict of module sources for embedding.
+    def encode(
+        module_sources: dict[str, str],
+        *,
+        mode: Literal["bundle", "bundle-bz2"] = "bundle",
+    ) -> str | None:
+        """Compress and encode module sources for embedding.
+
+        ``bundle`` retains the zlib/Base64 format. Opt-in ``bundle-bz2`` uses
+        bz2/Base85 to reduce the single command-line argument carrying the
+        payload. This postpones, but does not remove, Linux's per-argument
+        size limit. Both codecs are in the standard library; ``bundle-bz2``
+        additionally requires Python's optional ``_bz2`` extension at runtime.
 
         Modules are sorted so that dependencies execute before dependents.
         We perform a topological sort over the module-level import graph
@@ -257,39 +267,59 @@ class ModuleBundler:
 
         Args:
             module_sources: ``{module_name: source_text}`` dict.
+            mode: Bundle format, also passed to ``build_injection``.
 
         Returns:
-            Base64-encoded string, or ``None`` if *module_sources* is empty.
+            Encoded string, or ``None`` if *module_sources* is empty.
         """
         if not module_sources:
             return None
-        import zlib
         ordered_names = _topological_order(module_sources)
         ordered = {name: module_sources[name] for name in ordered_names}
         sources_json = json.dumps(ordered)
-        compressed = zlib.compress(sources_json.encode(), level=9)
-        return base64.b64encode(compressed).decode("ascii")
+        if mode == "bundle":
+            import zlib
+
+            return base64.b64encode(zlib.compress(sources_json.encode(), level=9)).decode("ascii")
+        if mode == "bundle-bz2":
+            import bz2
+
+            return base64.b85encode(bz2.compress(sources_json.encode(), compresslevel=9)).decode("ascii")
+        raise ValueError(f"Unsupported bundle mode: {mode}")
 
     @staticmethod
-    def build_injection(bundled_modules_b64: str) -> str:
-        """Return a Python snippet that decodes and injects bundled modules into ``sys.modules``.
-
-        The snippet is self-contained: it imports ``sys``, ``types``, ``base64``,
-        ``json``, and ``zlib``, then decompresses the embedded blob and registers
-        each module via ``types.ModuleType`` + ``exec``.
+    def build_injection(
+        bundled_modules_b64: str,
+        *,
+        mode: Literal["bundle", "bundle-bz2"] = "bundle",
+    ) -> str:
+        """Return a self-contained snippet that decodes and injects bundled modules.
 
         Args:
-            bundled_modules_b64: Base64 string produced by ``encode``.
+            bundled_modules_b64: Encoded string produced by ``encode``. The
+                name is kept for keyword-call compatibility.
+            mode: Bundle format used by ``encode`` (defaults to zlib/Base64).
         """
+        if mode == "bundle":
+            compression, decoder = "zlib", "b64decode"
+        elif mode == "bundle-bz2":
+            compression, decoder = "bz2", "b85decode"
+        else:
+            raise ValueError(f"Unsupported bundle mode: {mode}")
+
+        # Hydration may parse the generated YAML as Jinja before Python runs.
+        # Python hex escapes preserve Base85 bytes without exposing any Jinja
+        # opening delimiters ({{, {%, {#}), even through repeated rendering.
+        payload_literal = repr(bundled_modules_b64).replace("{", "\\x7b")
         return textwrap.dedent(f"""\
             # --- Inject local dependency modules from embedded source ---
             import sys
             import types
             import base64
             import json
-            import zlib
+            import {compression}
 
-            _EMBEDDED_MODULES = json.loads(zlib.decompress(base64.b64decode({repr(bundled_modules_b64)})))
+            _EMBEDDED_MODULES = json.loads({compression}.decompress(base64.{decoder}({payload_literal})))
             # Pass 1: register all modules in sys.modules (without executing source)
             # so transitive imports between bundled modules can resolve in any order.
             _module_objs = {{}}

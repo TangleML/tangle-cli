@@ -110,7 +110,8 @@ def task(
         mode: Optional local-from-python generation mode. ``None``
             preserves the hydrator default (currently ``inline``).
             Use ``"bundle"`` to ask hydrate-time codegen to embed
-            first-party imports using the existing module bundler.
+            first-party imports using zlib/Base64, or ``"bundle-bz2"`` for
+            the opt-in bz2/Base85 format.
         resolve_root: Optional module resolution root for bundle mode.
             Relative strings are resolved relative to the task source
             file, then emitted into
@@ -170,8 +171,8 @@ def task(
     # still resolved relative to the @task source file.
     raw_dependencies_from = effective_deps_raw
     raw_resolve_root = resolve_root
-    if mode is not None and mode not in {"inline", "bundle"}:
-        raise ValueError("@task(mode=...) must be 'inline', 'bundle', or None")
+    if mode is not None and mode not in {"inline", "bundle", "bundle-bz2"}:
+        raise ValueError("@task(mode=...) must be 'inline', 'bundle', 'bundle-bz2', or None")
 
     if unwrap is None:
         unwrap_names: tuple[str, ...] = ()

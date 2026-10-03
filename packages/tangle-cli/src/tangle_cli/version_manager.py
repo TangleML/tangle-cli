@@ -382,7 +382,7 @@ def bump_version(
     generation_mode = annotations.get("tangle_cli_generation_mode") or (
         "bundle" if annotations.get("bundled_modules") else "inline"
     )
-    if generation_mode not in {"inline", "bundle"}:
+    if generation_mode not in {"inline", "bundle", "bundle-bz2"}:
         error = f"Unsupported generation mode: {generation_mode}"
         log.error(f"❌ {error}")
         return {"status": "failed", "yaml_file": str(yaml_path), "error": error}
