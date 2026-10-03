@@ -1048,6 +1048,17 @@ def test_only_an_explicit_logger_is_forwarded_to_internal_api_clients() -> None:
     assert PipelineHydrator(logger=quiet)._client_options.get("logger") is quiet  # type: ignore[arg-type]
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_component_library(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test that passes no client must never reach a real component library:
+    the API client retries for about a minute per lookup where the network is
+    blocked (CI), and silently answers where it is not. Explicit clients are
+    unaffected."""
+    from tangle_cli.handler import TangleCliHandler
+
+    monkeypatch.setattr(TangleCliHandler, "_create_client", lambda self: _UnreachableLibrary())
+
+
 # ---------------------------------------------------------------------------
 # Every graph becomes Python: nested graphs are @pipeline functions in the
 # companion <stem>_subgraphs.py, called through subpipeline(...)

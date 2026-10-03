@@ -2275,6 +2275,16 @@ def _decompilable(tmp_path: Path, component_name: str = "Leaf") -> Path:
     )
 
 
+@pytest.fixture
+def no_ambient_component_library(monkeypatch):
+    """Decompile tests must never reach a real component library (see
+    test_pipeline_decompiler._no_ambient_component_library)."""
+    from tangle_cli.handler import TangleCliHandler
+    from tangle_cli.pipeline_decompiler import _UnreachableLibrary
+
+    monkeypatch.setattr(TangleCliHandler, "_create_client", lambda self: _UnreachableLibrary())
+
+
 def test_pipelines_decompile_help_lists_the_pinning_flag(capsys):
     app = cli.build_app()
 
@@ -2285,6 +2295,7 @@ def test_pipelines_decompile_help_lists_the_pinning_flag(capsys):
     assert "--pin-components" not in output, "canonicalization is not optional"
 
 
+@pytest.mark.usefixtures("no_ambient_component_library")
 def test_pipelines_decompile_writes_a_script_and_its_components(tmp_path: Path, capsys):
     source = _decompilable(tmp_path)
     output = tmp_path / "generated.py"
@@ -2302,6 +2313,7 @@ def test_pipelines_decompile_writes_a_script_and_its_components(tmp_path: Path, 
     assert "compile the script in place" in printed, "the relative-URL caveat is surfaced"
 
 
+@pytest.mark.usefixtures("no_ambient_component_library")
 @pytest.mark.parametrize("flag", [[], ["--no-python-tasks"]])
 def test_pipelines_decompile_python_tasks_flag(tmp_path: Path, capsys, flag: list[str]):
     from test_pipeline_decompiler import _python_leaf
@@ -2318,6 +2330,7 @@ def test_pipelines_decompile_python_tasks_flag(tmp_path: Path, capsys, flag: lis
     assert ("stayed YAML leaves" in printed) == (not converted)
 
 
+@pytest.mark.usefixtures("no_ambient_component_library")
 def test_pipelines_decompile_discloses_image_id_resolution(tmp_path: Path, capsys):
     from test_pipeline_decompiler import _authored_task
 
@@ -2330,6 +2343,7 @@ def test_pipelines_decompile_discloses_image_id_resolution(tmp_path: Path, capsy
     assert "unwrap" in printed
 
 
+@pytest.mark.usefixtures("no_ambient_component_library")
 @pytest.mark.parametrize("flag", [[], ["--local-fallbacks"]])
 def test_pipelines_decompile_local_fallbacks_flag(tmp_path: Path, capsys, monkeypatch, flag: list[str]):
     import tangle_cli.pipelines_cli as pipelines_cli
@@ -2348,6 +2362,7 @@ def test_pipelines_decompile_local_fallbacks_flag(tmp_path: Path, capsys, monkey
     assert ("needs the component library" in printed) == (not flag)
 
 
+@pytest.mark.usefixtures("no_ambient_component_library")
 def test_pipelines_decompile_exits_nonzero_without_echoing_values(tmp_path: Path):
     """A refusal must fail the command and must not print document content."""
     source = _write_pipeline(
