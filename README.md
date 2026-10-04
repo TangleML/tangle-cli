@@ -529,6 +529,9 @@ uv run tangle sdk pipelines compile pipeline.py -o pipeline.yaml
 uv run tangle sdk pipelines compile pipeline.py -o pipeline.yaml --pipeline pipeline_fn_name
 ```
 
+Relative `file://` and `resolve://` refs are written relative to the `.py` file.
+The compiler rewrites them so they still resolve from wherever `-o` points.
+
 To compile and submit in one step, without keeping the compiled YAML around, use
 `pipeline-runs submit-from-python`:
 

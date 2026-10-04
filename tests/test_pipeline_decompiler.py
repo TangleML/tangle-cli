@@ -478,14 +478,15 @@ def test_compiling_a_decompiled_example_reproduces_the_original_bytes(example: P
     """compile -> decompile -> compile is a byte fixpoint on compiler output.
 
     Uses the in-memory API: the file command re-pins every component, which
-    rewrites locators by design. Both compiles share one directory because a
-    ``@task`` compiles to a relative sidecar ref resolved against the output.
+    rewrites locators by design. The generated source sits next to the
+    compiled YAML because it keeps that YAML's relative refs, which resolve
+    from the source file's directory.
     """
     workdir = tmp_path / "out"
     workdir.mkdir()
     compile_pipeline(example, workdir / "p.yaml")
     original = (workdir / "p.yaml").read_text(encoding="utf-8")
-    generated = tmp_path / "generated.py"
+    generated = workdir / "generated.py"
     generated.write_text(decompile_pipeline(parse_yaml_string(original)).source, encoding="utf-8")
     compile_pipeline(generated, workdir / "p2.yaml")
     assert (workdir / "p2.yaml").read_text(encoding="utf-8") == original

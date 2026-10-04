@@ -874,22 +874,21 @@ def _compile_pipeline_fn(
             components_yaml_name=components_path.name,
         )
 
-    # 4b. A CHILD artifact is written under ``<root>.subgraphs/``, away from
-    #     its own source directory. Its author-written relative local refs
-    #     (plain ``ref(url="file://./leaf.yaml")``) point at files next to
-    #     the child SOURCE, so relocate them to be relative to the child
-    #     SIDECAR directory — the URL still resolves to the SAME original
-    #     file (no copying), just from the sidecar's location. Compiler-
-    #     managed refs (``@task`` resolver + subpipeline) already point at
-    #     bundle files and are skipped. The root is never relocated: its
-    #     output dir is its bundle root (in-place compile contract).
-    if not is_root:
-        _relocate_child_local_refs(
-            body_dict=body_dict,
-            builder=builder,
-            source_dir=base_dir,
-            sidecar_dir=output_path.parent,
-        )
+    # 4b. An artifact may be written away from its own source directory (a
+    #     CHILD under ``<root>.subgraphs/``; the ROOT wherever ``--output``
+    #     points). Its author-written relative local refs (plain
+    #     ``ref(url="file://./leaf.yaml")``) point at files next to the
+    #     SOURCE, so relocate them to be relative to the artifact's OUTPUT
+    #     directory — the URL still resolves to the SAME original file (no
+    #     copying), just from the output's location. Compiler-managed refs
+    #     (``@task`` resolver + subpipeline) already point at bundle files
+    #     and are skipped. Compiling in place leaves the URLs unchanged.
+    _relocate_local_refs(
+        body_dict=body_dict,
+        builder=builder,
+        source_dir=base_dir,
+        sidecar_dir=output_path.parent,
+    )
 
     # 4c. @registered refs point at an EXISTING gen_config.yaml (the
     #     operation is registered/published elsewhere), so there is no
@@ -1468,16 +1467,15 @@ def _validate_artifact(artifact: SubgraphArtifact, ctx: CompileContext) -> None:
     # Asset policy. EVERY
     # artifact's relative local refs are validated relative to THAT
     # artifact's own output directory:
-    #   * the ROOT body relative to the root output dir (``label`` is None,
-    #     preserving the verbatim single-pipeline error message);
+    #   * the ROOT body relative to the root output dir (``label`` is None);
     #   * each CHILD body relative to ITS child-sidecar dir (``label`` adds
     #     child-sidecar + task context to the error).
     # Generated bundle files the compiler is about to write — child graph
     # sidecars and child ``@task`` components sidecars — are in
     # ``ctx.planned_files`` and count as present, so the compiler-managed
-    # parent→child / child→child / child @task refs pass. A child's
+    # parent→child / child→child / child @task refs pass. An artifact's
     # author-written relative leaf ref was relocated to be relative to
-    # the child-sidecar dir, so it is validated against the real source-side
+    # its output dir, so it is validated against the real source-side
     # file via ``../``; a missing external leaf fails clearly here, before
     # any file is written.
     _validate_local_component_refs_for_artifact(
@@ -1924,19 +1922,19 @@ def _rewrite_registered_componentref_urls(
         tasks[task_id]["componentRef"] = {"url": url}
 
 
-def _relocate_child_local_refs(
+def _relocate_local_refs(
     *,
     body_dict: dict[str, Any],
     builder: Any,
     source_dir: Path,
     sidecar_dir: Path,
 ) -> None:
-    """Rewrite a child's author-written relative local componentRefs from
-    being relative to its SOURCE dir to relative to its SIDECAR dir.
+    """Rewrite an artifact's author-written relative local componentRefs from
+    being relative to its SOURCE dir to relative to its output (``sidecar_dir``).
 
-    A child compiles into ``<root>.subgraphs/`` but its ``ref(url=...)``
-    URLs were authored relative to the child's own source file. Rewriting
-    them keeps each ref pointing at the SAME original file (no copying) so
+    A child compiles into ``<root>.subgraphs/`` and the root into any
+    ``--output`` dir, but their ``ref(url=...)`` URLs were authored relative
+    to their own source file. Rewriting them keeps each ref pointing at the SAME original file (no copying) so
     the existing hydrator — which resolves child refs relative to the
     loaded sidecar's directory — still finds it.
 
@@ -2578,8 +2576,7 @@ def _validate_local_component_refs_for_artifact(
     External relative refs must already exist on disk.
 
     Args:
-        artifact_label: ``None`` for the ROOT (uses the legacy error wording
-            relative to the OUTPUT directory); a ``child pipeline '<name>'
+        artifact_label: ``None`` for the ROOT; a ``child pipeline '<name>'
             (<file>)`` label for a child sidecar (uses child-context wording
             relative to the child sidecar's directory).
 
@@ -2608,13 +2605,9 @@ def _validate_local_component_refs_for_artifact(
         if artifact_label is None:
             raise CompileError(
                 f"task {task_id!r} references local component {url!r}, but the "
-                f"target does not exist relative to the output directory: "
-                f"{target}. Hydrate resolves componentRef URLs relative to the "
-                "compiled YAML's location, so the referenced file must sit "
-                "next to the compiled output. Fix options: compile into the "
-                "pipeline source directory so referenced files are colocated "
-                "with the output; place the referenced component next to the "
-                "compiled YAML; or use an absolute file:///… / gs://… URL or a "
+                f"target does not exist: {target}. Relative componentRef URLs "
+                "are authored relative to the pipeline source file's directory. "
+                "Fix the path, or use an absolute file:///… / gs://… URL or a "
                 "published name: ref."
             )
         raise CompileError(

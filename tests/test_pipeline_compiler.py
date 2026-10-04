@@ -11,6 +11,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -25,6 +26,7 @@ from tangle_cli.pipeline_compiler import (
     compile_pipeline,
     register_image_id,
 )
+from tangle_cli.pipeline_hydrator import PipelineHydrator
 from tangle_cli.pipelines import PipelineValidationError, compile_pipeline_file
 from tangle_cli.python_pipeline.errors import CompileError
 from tangle_cli.schema_validation import validate_dehydrated_data
@@ -41,12 +43,11 @@ def run_app(app, args: list[str]) -> None:
 
 
 def _provide_noop(out: Path) -> None:
-    """Colocate the referenced ``noop.yaml`` component next to the output.
+    """Place the ``noop.yaml`` component in the output's directory.
 
-    Fixtures like ``pipeline.py`` / ``multi_arg_pipeline.py`` reference
-    ``file://./noop.yaml``; the compiler validates that relative local
-    componentRef targets exist relative to the OUTPUT directory, so the
-    referenced component must sit next to the compiled YAML.
+    Pipelines written next to the output reference ``file://./noop.yaml``,
+    which resolves from the pipeline SOURCE directory, so the component must
+    exist there.
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(FIXTURES / "noop.yaml", out.parent / "noop.yaml")
@@ -82,8 +83,12 @@ def test_compile_writes_single_dehydrated_yaml(tmp_path):
     task_body = tasks["Wait For Noop"]
 
     # componentRef is a PURE ref — no inline spec / text.
+    # The source-relative ref is relocated to resolve from the output dir.
     cref = task_body["componentRef"]
-    assert cref == {"url": "file://./noop.yaml"}
+    assert list(cref) == ["url"]
+    assert (out.parent / cref["url"].removeprefix("file://")).resolve() == (
+        FIXTURES / "noop.yaml"
+    ).resolve()
     assert "spec" not in cref
     assert "text" not in cref
 
@@ -147,21 +152,64 @@ def test_compile_pipeline_does_not_leak_sys_state(tmp_path):
 # Free-function compile: user-facing failure modes.
 
 
+def _script_missing_noop(tmp_path: Path) -> Path:
+    """Copy ``pipeline.py`` (and its config) to a dir WITHOUT ``noop.yaml``,
+    so its relative ``file://./noop.yaml`` ref is unresolvable."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("pipeline.py", "config.yaml"):
+        shutil.copy(FIXTURES / name, src / name)
+    return src / "pipeline.py"
+
+
 def test_compile_unresolvable_local_ref_fails(tmp_path):
-    """A relative file:// componentRef whose target is NOT colocated with
-    the output fails clearly with guidance, and writes no output."""
+    """A relative file:// componentRef whose target does NOT exist next to
+    the pipeline source fails clearly with guidance, and writes no output."""
     out = tmp_path / "compiled.yaml"
-    # Deliberately do NOT colocate noop.yaml next to the output.
     with pytest.raises(CompileError) as exc:
-        compile_pipeline(FIXTURES / "pipeline.py", out)
+        compile_pipeline(_script_missing_noop(tmp_path), out)
     msg = str(exc.value)
-    assert "file://./noop.yaml" in msg
-    assert "output directory" in msg
+    assert "noop.yaml" in msg
     # Guidance for the user.
-    assert "compile into the pipeline source directory" in msg.lower()
+    assert "relative to the pipeline source file's directory" in msg
     # No output written on failure (neither pipeline nor sidecar).
     assert not out.exists()
     assert not (tmp_path / "compiled.components.yaml").exists()
+
+
+@pytest.mark.parametrize("out_rel", ["pipe/compiled.yaml", "pipe/temp/compiled.yaml", "other/deep/compiled.yaml"])
+def test_compile_relocates_root_local_refs_to_any_output_dir(tmp_path, out_rel):
+    """The ROOT's source-relative ``file://`` / ``resolve://`` refs are
+    rewritten to resolve from wherever the output lands: in place, a deeper
+    dir, or an unrelated one. Each compiled YAML then hydrates."""
+    comp = tmp_path / "comp"
+    comp.mkdir()
+    shutil.copy(FIXTURES / "noop.yaml", comp / "noop.yaml")
+    (comp / "resolve.yaml").write_text(yaml.safe_dump({"frag": {"local": "./noop.yaml"}}))
+    src = tmp_path / "pipe"
+    src.mkdir()
+    (src / "pipeline.py").write_text(
+        "from tangle_cli.python_pipeline import Out, pipeline, ref\n"
+        "\n"
+        "@pipeline('Relocated')\n"
+        "def relocated() -> Out[str]:\n"
+        "    ref(url='file://../comp/noop.yaml').named('By File')()\n"
+        "    return ref(url='resolve://../comp/resolve.yaml#frag').named('By Resolve')()\n"
+    )
+    out = tmp_path / out_rel
+
+    compile_pipeline(src / "pipeline.py", out)
+
+    tasks = yaml.safe_load(out.read_text())["implementation"]["graph"]["tasks"]
+    urls = {task_id: task["componentRef"]["url"] for task_id, task in tasks.items()}
+    if out.parent == src:  # in place: authored URLs are kept verbatim
+        assert urls == {
+            "By File": "file://../comp/noop.yaml",
+            "By Resolve": "resolve://../comp/resolve.yaml#frag",
+        }
+    hydrated = PipelineHydrator(client=MagicMock()).hydrate_file(out).data
+    for task in hydrated["implementation"]["graph"]["tasks"].values():
+        assert task["componentRef"]["spec"]["name"] == "Noop"
 
 
 def test_compile_empty_graph_fails(tmp_path):
@@ -1643,10 +1691,9 @@ def test_compile_pipeline_file_wraps_compile_error(tmp_path):
     """The facade translates the compiler's CompileError into the CLI's
     uniform PipelineValidationError (mirrors hydrate_pipeline_file)."""
     out = tmp_path / "compiled.yaml"
-    # noop.yaml deliberately not colocated -> unresolvable local ref.
     with pytest.raises(PipelineValidationError) as exc:
-        compile_pipeline_file(FIXTURES / "pipeline.py", out)
-    assert "file://./noop.yaml" in str(exc.value)
+        compile_pipeline_file(_script_missing_noop(tmp_path), out)
+    assert "noop.yaml" in str(exc.value)
     assert not out.exists()
 
 
@@ -1857,7 +1904,7 @@ def test_compile_cli_unresolvable_local_ref_exit_nonzero(tmp_path):
                 "sdk",
                 "pipelines",
                 "compile",
-                str(FIXTURES / "pipeline.py"),
+                str(_script_missing_noop(tmp_path)),
                 "-o",
                 str(out),
             ]
