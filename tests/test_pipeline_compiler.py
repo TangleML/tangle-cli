@@ -589,8 +589,9 @@ def test_compile_task_decorator_rejects_unwrap_on_non_dict_annotation(tmp_path):
         compile_pipeline(pipeline_path, project / "compiled.yaml")
 
 
-def test_compile_task_decorator_emits_bundle_mode_and_resolve_root(tmp_path):
-    """@task(mode="bundle") is carried into the auto-emitted sidecar."""
+@pytest.mark.parametrize("mode", ["bundle", "bundle-bz2"])
+def test_compile_task_decorator_emits_bundle_mode_and_resolve_root(tmp_path, mode):
+    """The selected bundle mode is carried into the auto-emitted sidecar."""
     project = tmp_path / "project"
     src = project / "src"
     pipeline_path = src / "pipeline.py"
@@ -599,7 +600,7 @@ def test_compile_task_decorator_emits_bundle_mode_and_resolve_root(tmp_path):
     pipeline_path.write_text(
         "from tangle_cli.python_pipeline import Out, pipeline, task\n"
         "from helpers import MESSAGE\n\n"
-        "@task(image='python:3.12', mode='bundle', resolve_root='.')\n"
+        f"@task(image='python:3.12', mode={mode!r}, resolve_root='.')\n"
         "def bundled_task() -> str:\n"
         "    return MESSAGE\n\n"
         "@pipeline('Bundle Pipeline')\n"
@@ -614,7 +615,7 @@ def test_compile_task_decorator_emits_bundle_mode_and_resolve_root(tmp_path):
 
     sidecar = yaml.safe_load(result.components_path.read_text())
     local_from_python = sidecar["bundled-task"]["local_from_python"]
-    assert local_from_python["mode"] == "bundle"
+    assert local_from_python["mode"] == mode
     assert local_from_python["resolve_root"] == "./src"
     assert local_from_python["file"] == "./src/pipeline.py"
     assert local_from_python["function"] == "bundled_task"

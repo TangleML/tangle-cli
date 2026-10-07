@@ -1,11 +1,12 @@
 """
 Component YAML generator from Python functions.
 
-Converts Python functions into Tangle component YAML files. Supports two modes:
+Converts Python functions into Tangle component YAML files. Supports three modes:
 
 - **inline** (default): Single-file components with source code embedded directly.
 - **bundle**: Multi-file components with local dependency modules serialized via
-  zlib-compressed source text and injected into sys.modules at runtime.
+  zlib/Base64 source text and injected into sys.modules at runtime.
+- **bundle-bz2**: Opt-in bz2/Base85 variant for smaller embedded payloads.
 
 Key functions:
 - generate_component_yaml() - Top-level entry point for YAML generation
@@ -1856,7 +1857,7 @@ def _build_pip_install_command(deps: list[str]) -> list[str]:
 
 def _build_python_source(
     spec: FunctionSpec,
-    mode: Literal["inline", "bundle"],
+    mode: Literal["inline", "bundle", "bundle-bz2"],
     bundled_modules_b64: str | None = None,
 ) -> str:
     """Build the full Python source code to embed in the YAML.
@@ -1881,8 +1882,8 @@ def _build_python_source(
             parts.append(_SERIALIZE_STR_HELPER)
 
     # For bundle mode: add sys.modules injection from compressed embedded source text
-    if mode == "bundle" and bundled_modules_b64:
-        parts.append(ModuleBundler.build_injection(bundled_modules_b64))
+    if mode in {"bundle", "bundle-bz2"} and bundled_modules_b64:
+        parts.append(ModuleBundler.build_injection(bundled_modules_b64, mode=mode))
 
     # Add the source code (type-hint-stripped)
     # Use full module source when available — this preserves helper functions defined
@@ -1926,7 +1927,7 @@ def build_component_dict(
     container_image: str,
     dependencies: list[str],
     annotations: dict[str, str],
-    mode: Literal["inline", "bundle"] = "inline",
+    mode: Literal["inline", "bundle", "bundle-bz2"] = "inline",
     bundled_modules_b64: str | None = None,
 ) -> dict[str, Any]:
     """Build the complete component YAML dict.
@@ -1937,7 +1938,8 @@ def build_component_dict(
         dependencies: List of pip dependencies
         annotations: Metadata annotations dict
         mode: Generation mode
-        bundled_modules_b64: Base64-encoded pickled modules (bundle mode only)
+        bundled_modules_b64: Encoded module sources from ``ModuleBundler.encode``
+            using the same mode (bundle modes only)
 
     Returns:
         Dict representing the full component YAML structure.
@@ -2035,7 +2037,7 @@ def generate_component_yaml(
     container_image: str,
     function_name: str | None = None,
     dependencies_from: Path | None = None,
-    mode: Literal["inline", "bundle"] = "inline",
+    mode: Literal["inline", "bundle", "bundle-bz2"] = "inline",
     custom_name: str | None = None,
     custom_annotations: dict[str, str] | None = None,
     strip_code: bool = False,
@@ -2062,7 +2064,8 @@ def generate_component_yaml(
         container_image: Docker image reference
         function_name: Function to extract (auto-detected if None)
         dependencies_from: Path to pyproject.toml with pip dependencies
-        mode: "inline" for single-file, "bundle" for multi-file
+        mode: "inline" for single-file, "bundle" for zlib/Base64 multi-file,
+            "bundle-bz2" for opt-in bz2/Base85 multi-file
         custom_name: Override the component name
         custom_annotations: Additional annotations to merge
         strip_code: Omit python_original_code annotation
@@ -2098,7 +2101,7 @@ def generate_component_yaml(
         # Only add resolve_root to sys.path in bundle mode — in inline mode the
         # sibling modules won't be embedded, so letting the import succeed would
         # produce YAML that fails at runtime in the container.
-        extra_paths = [resolve_root] if resolve_root and mode == "bundle" else None
+        extra_paths = [resolve_root] if resolve_root and mode in {"bundle", "bundle-bz2"} else None
         module = load_python_module(file_path, extra_sys_path=extra_paths)
         func = get_function_from_module(module, resolved_func_name)
 
@@ -2226,7 +2229,7 @@ def generate_component_yaml(
         # 5. Handle bundle mode — embed source text of local modules
         # (not bytecode, which is Python-version-specific)
         bundled_modules_b64: str | None = None
-        if mode == "bundle":
+        if mode in {"bundle", "bundle-bz2"}:
             module_sources = ModuleBundler.collect_sources(
                 file_path,
                 resolve_root=resolve_root,
@@ -2234,7 +2237,7 @@ def generate_component_yaml(
                 source=spec.module_source_stripped,
             )
             if module_sources:
-                bundled_modules_b64 = ModuleBundler.encode(module_sources)
+                bundled_modules_b64 = ModuleBundler.encode(module_sources, mode=mode)
                 if bundled_modules_b64:
                     sorted_names = sorted(module_sources.keys(), key=lambda k: (k.count("."), k))
                     annotations["bundled_modules"] = json.dumps(sorted_names)

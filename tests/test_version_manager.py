@@ -4,6 +4,7 @@
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tangle_cli.component_from_func import generate_component_yaml
@@ -413,7 +414,8 @@ def test_bump_generated_yaml_preserves_custom_name(tmp_path: Path):
     assert data["metadata"]["annotations"]["version"] == "1.1"
 
 
-def test_bump_generated_yaml_preserves_bundle_mode(tmp_path: Path):
+@pytest.mark.parametrize("mode", ["bundle", "bundle-bz2"])
+def test_bump_generated_yaml_preserves_bundle_mode(tmp_path: Path, mode):
     helpers_dir = tmp_path / "helpers"
     helpers_dir.mkdir()
     (helpers_dir / "__init__.py").write_text("", encoding="utf-8")
@@ -442,7 +444,7 @@ def component(value: str) -> str:
         yaml_file,
         container_image="python:3.12",
         function_name="component",
-        mode="bundle",
+        mode=mode,
     )
 
     result = bump_version(yaml_file)
@@ -452,7 +454,8 @@ def component(value: str) -> str:
     data = yaml.safe_load(yaml_file.read_text())
     annotations = data["metadata"]["annotations"]
     command = data["implementation"]["container"]["command"][-1]
-    assert annotations["tangle_cli_generation_mode"] == "bundle"
+    assert annotations["tangle_cli_generation_mode"] == mode
+    assert ("base64.b85decode" if mode == "bundle-bz2" else "base64.b64decode") in command
     assert "helpers.utils" in annotations["bundled_modules"]
     assert "_EMBEDDED_MODULES" in command
     assert "helpers.utils" in command

@@ -416,7 +416,9 @@ uv run tangle api published-components experimental-search \
 
 ### Local components
 
-`generate from-python` converts a local Python function into a component YAML using inline source by default, or `--mode bundle` to embed local dependency modules. Common options include `--function`, `--output`, `--name`, `--image`, `--dependencies-from`, `--strip-code`, `--use-legacy-naming`, and `--resolve-root`.
+`generate from-python` converts a local Python function into a component YAML using inline source by default, or `--mode bundle` to embed local dependency modules with zlib/Base64. Common options include `--function`, `--output`, `--name`, `--image`, `--dependencies-from`, `--strip-code`, `--use-legacy-naming`, and `--resolve-root`.
+
+Opt in to `--mode bundle-bz2` for bz2/Base85 compression, which can reduce large Python bundles. The same mode is accepted by `@task(mode="bundle-bz2")` and `local_from_python.mode` during hydration. It requires Python's `_bz2` extension in the runtime image. Encoded braces are escaped in the generated Python literal so Jinja hydration cannot interpret the payload as a template. Both bundle modes still use one command-line argument, so sufficiently large bundles can still exceed Linux's per-argument limit.
 
 `bump-version` increments or sets component version metadata in YAML and updates/regenerates a referenced Python source when the component contains `python_original_code_path` annotations.
 

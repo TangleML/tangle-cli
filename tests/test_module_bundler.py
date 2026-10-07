@@ -9,10 +9,14 @@ before its dependency, breaking module-level references like
 from __future__ import annotations
 
 import base64
+import bz2
 import json
 import textwrap
 import zlib
+from pathlib import Path
 
+import pytest
+import tangle_cli
 from tangle_cli.module_bundler import (
     ModuleBundler,
     _import_node_targets,
@@ -25,6 +29,52 @@ from tangle_cli.module_bundler import (
 def _decode(b64: str) -> dict[str, str]:
     """Mirror of the runtime injection's decompress step."""
     return json.loads(zlib.decompress(base64.b64decode(b64)))
+
+
+class TestEncodedPayload:
+    """The payload rides in one command-line argument, capped at 128 KiB by Linux."""
+
+    @staticmethod
+    def _realistic_sources() -> dict[str, str]:
+        """This package's own modules: a large, real body of Python source."""
+        root = Path(tangle_cli.__file__).parent
+        return {f"tangle_cli.{p.stem}": p.read_text(encoding="utf-8") for p in sorted(root.glob("*.py"))}
+
+    def test_round_trips_realistic_sources(self):
+        sources = self._realistic_sources()
+        encoded = ModuleBundler.encode(sources, mode="bundle-bz2")
+        assert encoded is not None
+        decoded = json.loads(bz2.decompress(base64.b85decode(encoded)))
+        assert decoded == {name: sources[name] for name in _topological_order(sources)}
+
+    def test_default_retains_zlib_base64(self):
+        sources = {"helper": "VALUE = 42\n"}
+        legacy = base64.b64encode(zlib.compress(json.dumps(sources).encode(), level=9)).decode("ascii")
+        assert ModuleBundler.encode(sources) == legacy
+        assert ModuleBundler.encode(sources, mode="bundle") == legacy
+        injection = ModuleBundler.build_injection(bundled_modules_b64=legacy)
+        assert f"zlib.decompress(base64.b64decode({legacy!r}))" in injection
+        assert "bz2" not in injection
+
+    def test_escaped_injection_is_smaller_than_zlib_base64(self):
+        sources = self._realistic_sources()
+        encoded = ModuleBundler.encode(sources, mode="bundle-bz2")
+        legacy = ModuleBundler.encode(sources)
+        assert encoded is not None and legacy is not None
+        # Measure the actual emitted source, including escape overhead.
+        compact_injection = ModuleBundler.build_injection(encoded, mode="bundle-bz2")
+        legacy_injection = ModuleBundler.build_injection(legacy)
+        assert len(compact_injection) < 0.85 * len(legacy_injection)
+
+    @pytest.mark.parametrize("mode", ["bundle", "bundle-bz2"])
+    def test_empty_sources(self, mode):
+        assert ModuleBundler.encode({}, mode=mode) is None
+
+    def test_unknown_mode_is_rejected(self):
+        with pytest.raises(ValueError, match="Unsupported bundle mode"):
+            ModuleBundler.encode({"helper": "VALUE = 42\n"}, mode="unknown")
+        with pytest.raises(ValueError, match="Unsupported bundle mode"):
+            ModuleBundler.build_injection("encoded", mode="unknown")
 
 
 class TestTopologicalOrder:
