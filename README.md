@@ -1303,6 +1303,26 @@ def greeting_pipeline() -> Out[str]:
 
 Use `unwrap=["items", "metadata"]` to unwrap multiple dict parameters. The caller owns the key names; keys may contain letters, numbers, `_`, and `-`, and become `param__<key>` component inputs. Empty dicts are rejected because they do not define a component interface. If a generated name would collide with a fixed parameter or another generated name, compile fails before writing artifacts. Equivalent key sets are canonicalized for schema hashing, so two call sites with the same keys in different insertion orders dedupe to the same component fragment.
 
+Unwrapped values can also be artifacts. Annotate the dict values with `components.InputPath(...)` (use the builtin `dict[...]`; `typing.Dict` rejects non-type arguments) and every key becomes an `inputPath` input of that type. At runtime the function receives a dict mapping each key to the local path of its downloaded artifact:
+
+```python
+@task(image="python:3.12", unwrap="tables")
+def merge_parquets(
+    tables: dict[str, components.InputPath("ApacheParquet")],
+    merged_path: components.OutputPath("ApacheParquet"),
+):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pq.write_table(pa.concat_tables([pq.read_table(tables[key]) for key in sorted(tables)]), merged_path)
+
+
+# In a pipeline: any number of upstream Parquet outputs, keyed by the caller.
+merged = merge_parquets.named("merge")(tables={"shop": shop.table, "catalog": catalog.table})
+```
+
+Artifact unwraps persist `"kind": "input_path"` on each key (and `"value_kind": "input_path"` on the parameter) in `local_from_python.unwrapped_inputs`, so hydrate regenerates the same `inputPath` interface. Value unwraps omit these fields; entries without them are value inputs. `OutputPath` dict values are rejected.
+
 #### Pipeline run submission and validation
 
 `submit` hydrates refs by default and builds an API submit payload with `root_task.componentRef.spec`. Use `--no-hydrate` to submit the local YAML structure as-is. Use `--dry-run` to print the payload without creating a run.

@@ -123,7 +123,10 @@ def task(
             For example ``unwrap="run_data"`` turns
             ``run_data={"run_id_1": task.output}`` into a component input
             named ``run_data__run_id_1`` and reconstructs the original dict in
-            the generated runtime wrapper.
+            the generated runtime wrapper. Values annotated as
+            ``dict[str, components.InputPath(T)]`` become ``inputPath``
+            artifact inputs, and the reconstructed dict maps each key to the
+            artifact's local path.
 
     Returns:
         A decorator that, given the user's function, returns a

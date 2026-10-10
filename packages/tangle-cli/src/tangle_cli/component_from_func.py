@@ -345,30 +345,41 @@ def _dict_value_annotation(annotation: Any) -> Any:
     return None
 
 
-def _unwrapped_value_type(annotation: Any) -> tuple[str, str]:
-    """Infer the Tangle scalar type/deserializer for unwrapped dict values.
+_UNWRAPPED_KINDS = ("input", "input_path")
+
+
+def _unwrapped_value_spec(annotation: Any) -> tuple[str, str, Literal["input", "input_path"]]:
+    """Infer the Tangle type, deserializer and kind for unwrapped dict values.
 
     Args:
         annotation: The resolved annotation for the original dict parameter.
 
     Returns:
-        ``(tangle_type, deserializer)`` for each synthetic flattened input.
-        Unknown ``Any`` values default to ``String``/``str`` to match existing
+        ``(tangle_type, deserializer, kind)`` for each synthetic flattened
+        input. ``kind`` is ``"input"`` for value inputs (``inputValue``
+        placeholders) and ``"input_path"`` when the dict values are annotated
+        as ``InputPath(...)`` artifacts (``inputPath`` placeholders; the
+        runtime receives one local file path per key). Unknown ``Any`` values
+        default to ``String``/``str`` value inputs to match existing
         unannotated input behavior.
 
     Raises:
         ValueError: If the unwrap target is not annotated as ``dict`` or
-            ``dict[..., ...]``.
+            ``dict[..., ...]``, or its values are ``OutputPath`` annotations.
     """
     value_annotation = _dict_value_annotation(annotation)
     if value_annotation is None:
         raise ValueError("@task unwrap parameters must be annotated as dict[...] or dict")
     if value_annotation is Any:
-        return "String", "str"
+        return "String", "str", "input"
     tangle_type, deserializer, kind = _resolve_annotation(value_annotation)
-    if kind != "input" or not tangle_type:
-        return "String", "str"
-    return tangle_type, deserializer
+    if kind == "input_path":
+        return tangle_type or "String", "str", "input_path"
+    if kind == "output":
+        raise ValueError("@task unwrap parameters cannot have OutputPath values; only inputs can be unwrapped")
+    if not tangle_type:
+        return "String", "str", "input"
+    return tangle_type, deserializer, "input"
 
 
 def _normalize_unwrapped_input_keys(
@@ -435,7 +446,11 @@ def build_unwrapped_inputs_schema(
         writes this into the resolver sidecar so hydrate can regenerate the
         identical component interface without access to the original call-site
         dict. Each key entry records the original key, synthetic input name,
-        inferred Tangle type, and optional flag.
+        inferred Tangle type, and optional flag. Artifact unwraps
+        (``dict[str, InputPath(...)]``) additionally record
+        ``"kind": "input_path"`` on each key and ``"value_kind":
+        "input_path"`` on the parameter entry; value unwraps omit both keys so
+        their persisted schema (and fragment hash) is unchanged.
 
     Raises:
         ValueError: If an unwrap parameter is absent from the function
@@ -464,7 +479,7 @@ def build_unwrapped_inputs_schema(
         if param_name not in signature.parameters:
             raise ValueError(f"@task unwrap parameter {param_name!r} is not in the function signature")
         annotation = resolved_hints.get(param_name, signature.parameters[param_name].annotation)
-        tangle_type, _deserializer = _unwrapped_value_type(annotation)
+        tangle_type, _deserializer, kind = _unwrapped_value_spec(annotation)
         input_prefix = f"{param_name}__"
         key_specs = []
         for key in keys:
@@ -480,19 +495,23 @@ def build_unwrapped_inputs_schema(
                     f"which collides with unwrap parameter {seen_synthetic_names[input_name]!r}"
                 )
             seen_synthetic_names[input_name] = param_name
-            key_specs.append(
-                {
-                    "key": key,
-                    "input_name": input_name,
-                    "type": tangle_type,
-                    "optional": False,
-                }
-            )
-        schema[param_name] = {
+            key_spec: dict[str, Any] = {
+                "key": key,
+                "input_name": input_name,
+                "type": tangle_type,
+                "optional": False,
+            }
+            if kind != "input":
+                key_spec["kind"] = kind
+            key_specs.append(key_spec)
+        param_schema: dict[str, Any] = {
             "input_prefix": input_prefix,
             "value_type": tangle_type,
-            "keys": key_specs,
         }
+        if kind != "input":
+            param_schema["value_kind"] = kind
+        param_schema["keys"] = key_specs
+        schema[param_name] = param_schema
     return schema
 
 
@@ -517,28 +536,40 @@ def _expand_unwrapped_param(
         A ``ParamInfo`` for each flattened key, using names like
         ``run_data__shop``. The returned params retain ``source_param`` and
         ``source_key`` so generated runtime code can re-wrap CLI arguments into
-        the original dict before invoking the function.
+        the original dict before invoking the function. The persisted
+        ``kind``/``value_kind`` (default ``"input"``) decides whether each
+        key becomes an ``inputValue`` or an ``inputPath`` input; artifact
+        inputs always receive the local path as a plain ``str``.
 
     Raises:
-        ValueError: If ``annotation`` is not dict-like.
+        ValueError: If ``annotation`` is not dict-like, or the schema records
+            an unknown kind.
     """
-    _unwrapped_value_type(annotation)  # validates dict-like annotation
+    _unwrapped_value_spec(annotation)  # validates dict-like annotation
+    default_kind = schema.get("value_kind") or "input"
     expanded: list[ParamInfo] = []
     for key_spec in schema.get("keys", []) or []:
         key = str(key_spec["key"])
         input_name = str(key_spec.get("input_name") or f"{param.name}__{key}")
         tangle_type = str(key_spec.get("type") or schema.get("value_type") or "String")
+        kind = key_spec.get("kind") or default_kind
+        if kind not in _UNWRAPPED_KINDS:
+            raise ValueError(
+                f"@task unwrap parameter {param.name!r} key {key!r} has unsupported kind {kind!r}; "
+                f"expected one of {list(_UNWRAPPED_KINDS)}"
+            )
+        deserializer = "str" if kind == "input_path" else _TYPE_TO_DESERIALIZER.get(tangle_type, "str")
         expanded.append(
             ParamInfo(
                 name=input_name,
                 yaml_name=input_name,
                 python_type=str(annotation) if annotation is not inspect.Parameter.empty else None,
                 tangle_type=tangle_type,
-                kind="input",
+                kind=kind,
                 description=doc_dict.get(param.name),
                 default=inspect.Parameter.empty,
                 optional=bool(key_spec.get("optional", False)),
-                deserializer=_TYPE_TO_DESERIALIZER.get(tangle_type, "str"),
+                deserializer=deserializer,
                 source_param=param.name,
                 source_key=key,
             )

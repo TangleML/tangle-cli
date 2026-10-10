@@ -447,6 +447,68 @@ def test_compile_task_decorator_emits_unwrapped_input_schema_and_flat_edges(tmp_
     ]
 
 
+def test_compile_task_decorator_unwraps_input_path_artifacts_and_hydrates(tmp_path):
+    """``dict[str, InputPath(T)]`` unwraps to one ``inputPath`` input per key.
+
+    The persisted schema records the artifact kind, so hydrate regenerates the
+    same artifact interface from the sidecar alone.
+    """
+    project = tmp_path / "project"
+    src = project / "src"
+    pipeline_path = src / "pipeline.py"
+    src.mkdir(parents=True)
+    pipeline_path.write_text(
+        "from cloud_pipelines import components\n"
+        "from tangle_cli.python_pipeline import Out, pipeline, task\n\n"
+        "@task(image='python:3.12')\n"
+        "def produce(table_path: components.OutputPath('ApacheParquet')):\n"
+        "    open(table_path, 'w').close()\n\n"
+        "@task(image='python:3.12', unwrap='tables')\n"
+        "def merge(\n"
+        "    tables: dict[str, components.InputPath('ApacheParquet')],\n"
+        "    merged_path: components.OutputPath('ApacheParquet'),\n"
+        "):\n"
+        "    open(merged_path, 'w').close()\n\n"
+        "@pipeline('Unwrap Paths Pipeline')\n"
+        "def unwrap_paths_pipeline() -> Out[str]:\n"
+        "    shop = produce.named('shop')()\n"
+        "    catalog = produce.named('catalog')()\n"
+        "    merged = merge.named('merge')(tables={'shop': shop.table, 'catalog': catalog.table})\n"
+        "    return merged.merged\n",
+        encoding="utf-8",
+    )
+
+    out = project / "compiled.yaml"
+    result = compile_pipeline(pipeline_path, out)
+
+    compiled = yaml.safe_load(out.read_text())
+    merge_task = compiled["implementation"]["graph"]["tasks"]["merge"]
+    assert set(merge_task["arguments"]) == {"tables__shop", "tables__catalog"}
+    assert merge_task["arguments"]["tables__shop"]["taskOutput"] == {"taskId": "shop", "outputName": "table"}
+
+    sidecar = yaml.safe_load(result.components_path.read_text())
+    fragments = [name for name in sidecar if name.startswith("merge--")]
+    assert len(fragments) == 1
+    schema = sidecar[fragments[0]]["local_from_python"]["unwrapped_inputs"]["tables"]
+    assert schema["value_type"] == "ApacheParquet"
+    assert schema["value_kind"] == "input_path"
+    assert [(key["key"], key["type"], key["kind"]) for key in schema["keys"]] == [
+        ("catalog", "ApacheParquet", "input_path"),
+        ("shop", "ApacheParquet", "input_path"),
+    ]
+
+    hydrated = PipelineHydrator(client=MagicMock()).hydrate_file(out).data
+    spec = hydrated["implementation"]["graph"]["tasks"]["merge"]["componentRef"]["spec"]
+    assert [(item["name"], item["type"]) for item in spec["inputs"]] == [
+        ("tables__catalog", "ApacheParquet"),
+        ("tables__shop", "ApacheParquet"),
+    ]
+    args = spec["implementation"]["container"]["args"]
+    assert {"inputPath": "tables__catalog"} in args
+    assert {"inputPath": "tables__shop"} in args
+    assert not any(isinstance(arg, dict) and "inputValue" in arg for arg in args)
+
+
 def test_compile_task_decorator_uses_schema_hash_for_unwrapped_fragment_collisions(tmp_path):
     project = tmp_path / "project"
     src = project / "src"
