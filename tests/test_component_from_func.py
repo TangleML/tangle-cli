@@ -93,6 +93,101 @@ def test_unwrapped_input_schema_infers_dict_value_type():
     assert [item["type"] for item in schema["metrics"]["keys"]] == ["Integer", "Integer"]
 
 
+def test_unwrapped_value_schema_has_no_kind_keys():
+    """Value unwraps keep the historical schema shape (and fragment hash)."""
+    from typing import Dict
+
+    def uses_json_values(run_metrics: Dict[str, dict]) -> str:  # build_metrics_dict style
+        return "ok"
+
+    schema = cff.build_unwrapped_inputs_schema(uses_json_values, {"run_metrics": ["b", "a"]})
+
+    assert schema == {
+        "run_metrics": {
+            "input_prefix": "run_metrics__",
+            "value_type": "JsonObject",
+            "keys": [
+                {"key": "a", "input_name": "run_metrics__a", "type": "JsonObject", "optional": False},
+                {"key": "b", "input_name": "run_metrics__b", "type": "JsonObject", "optional": False},
+            ],
+        }
+    }
+    spec = extract_interface(uses_json_values, {}, unwrapped_inputs=schema)
+    assert [(p.yaml_name, p.kind, p.deserializer) for p in spec.inputs] == [
+        ("run_metrics__a", "input", "json.loads"),
+        ("run_metrics__b", "input", "json.loads"),
+    ]
+
+
+def test_unwrapped_input_path_schema_records_kind():
+    def merge(tables: dict[str, InputPath("ApacheParquet")]) -> str:
+        return "ok"
+
+    schema = cff.build_unwrapped_inputs_schema(merge, {"tables": ["shop", "catalog"]})
+
+    assert schema == {
+        "tables": {
+            "input_prefix": "tables__",
+            "value_type": "ApacheParquet",
+            "value_kind": "input_path",
+            "keys": [
+                {
+                    "key": "catalog",
+                    "input_name": "tables__catalog",
+                    "type": "ApacheParquet",
+                    "optional": False,
+                    "kind": "input_path",
+                },
+                {
+                    "key": "shop",
+                    "input_name": "tables__shop",
+                    "type": "ApacheParquet",
+                    "optional": False,
+                    "kind": "input_path",
+                },
+            ],
+        }
+    }
+    spec = extract_interface(merge, {}, unwrapped_inputs=schema)
+    assert [(p.yaml_name, p.kind, p.tangle_type, p.deserializer) for p in spec.inputs] == [
+        ("tables__catalog", "input_path", "ApacheParquet", "str"),
+        ("tables__shop", "input_path", "ApacheParquet", "str"),
+    ]
+
+
+def test_unwrapped_untyped_input_path_defaults_to_string_artifact():
+    def merge(files: dict[str, InputPath()]) -> str:
+        return "ok"
+
+    schema = cff.build_unwrapped_inputs_schema(merge, {"files": ["a"]})
+
+    assert schema["files"]["value_kind"] == "input_path"
+    assert schema["files"]["keys"][0]["type"] == "String"
+
+
+def test_unwrapped_output_path_values_are_rejected():
+    def bad(outs: dict[str, OutputPath("Text")]) -> str:
+        return "ok"
+
+    with pytest.raises(ValueError, match="cannot have OutputPath values"):
+        cff.build_unwrapped_inputs_schema(bad, {"outs": ["a"]})
+
+
+def test_unwrapped_schema_with_unknown_kind_is_rejected():
+    def merge(tables: dict[str, str]) -> str:
+        return "ok"
+
+    schema = {
+        "tables": {
+            "input_prefix": "tables__",
+            "value_type": "String",
+            "keys": [{"key": "a", "input_name": "tables__a", "type": "String", "kind": "output"}],
+        }
+    }
+    with pytest.raises(ValueError, match="unsupported kind 'output'"):
+        extract_interface(merge, {}, unwrapped_inputs=schema)
+
+
 # ============================================================================
 # Type resolution tests
 # ============================================================================
@@ -3039,3 +3134,142 @@ class TestNamedTupleReturnType:
         args = component["implementation"]["container"]["args"]
         assert "----output-paths" in args
         assert {"outputPath": "Output"} in args
+
+
+def test_generate_component_yaml_with_unwrapped_input_paths_runs_rewrapped_program(tmp_path):
+    source = tmp_path / "merge_component.py"
+    source.write_text(
+        textwrap.dedent(
+            '''
+            from cloud_pipelines import components
+
+            def merge_component(
+                out: components.OutputPath("Text"),
+                tables: dict[str, components.InputPath("ApacheParquet")],
+            ):
+                parts = []
+                for key in sorted(tables):
+                    with open(tables[key]) as fh:
+                        parts.append(key + "=" + fh.read())
+                with open(out, "w") as fh:
+                    fh.write("|".join(parts))
+            '''
+        ).lstrip()
+    )
+    module = load_python_module(source)
+    func = get_function_from_module(module, "merge_component")
+    unwrapped_inputs = cff.build_unwrapped_inputs_schema(func, {"tables": ["shop", "catalog"]})
+    output_file = tmp_path / "component.yaml"
+
+    assert generate_component_yaml(
+        source,
+        output_file,
+        container_image="python:3.12",
+        function_name="merge_component",
+        unwrapped_inputs=unwrapped_inputs,
+    ) is True
+
+    component = yaml.safe_load(output_file.read_text())
+    assert [(item["name"], item["type"]) for item in component["inputs"]] == [
+        ("tables__catalog", "ApacheParquet"),
+        ("tables__shop", "ApacheParquet"),
+    ]
+    args = component["implementation"]["container"]["args"]
+    assert {"inputPath": "tables__catalog"} in args
+    assert {"inputPath": "tables__shop"} in args
+    assert {"inputValue": "tables__catalog"} not in args
+
+    shop = tmp_path / "shop.parquet"
+    shop.write_text("S")
+    catalog = tmp_path / "catalog.parquet"
+    catalog.write_text("C")
+    program = component["implementation"]["container"]["command"][-1]
+    program_path = tmp_path / "program.py"
+    program_path.write_text(program)
+    out_path = tmp_path / "merged.txt"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(program_path),
+            "--out",
+            str(out_path),
+            "--tables__catalog",
+            str(catalog),
+            "--tables__shop",
+            str(shop),
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert out_path.read_text() == "catalog=C|shop=S"
+
+
+def test_generate_component_yaml_with_multiple_mixed_unwraps_runs_rewrapped_program(tmp_path):
+    """Two artifact unwraps plus a value unwrap on one task, with hyphenated keys."""
+    source = tmp_path / "multi_component.py"
+    source.write_text(
+        textwrap.dedent(
+            '''
+            from cloud_pipelines import components
+
+            def multi_component(
+                out: components.OutputPath("Text"),
+                raw: dict[str, components.InputPath("ApacheParquet")],
+                results: dict[str, components.InputPath("ApacheParquet")],
+                labels: dict[str, str],
+            ):
+                parts = []
+                for name, group in (("raw", raw), ("results", results)):
+                    for key in sorted(group):
+                        with open(group[key]) as fh:
+                            parts.append(name + ":" + key + "=" + fh.read() + "/" + labels[key])
+                with open(out, "w") as fh:
+                    fh.write("|".join(parts))
+            '''
+        ).lstrip()
+    )
+    module = load_python_module(source)
+    func = get_function_from_module(module, "multi_component")
+    keys = ["ucp-default", "ucp_alt"]
+    unwrapped_inputs = cff.build_unwrapped_inputs_schema(func, {"raw": keys, "results": keys, "labels": keys})
+    assert [unwrapped_inputs[name].get("value_kind") for name in ("raw", "results", "labels")] == [
+        "input_path",
+        "input_path",
+        None,
+    ]
+    output_file = tmp_path / "component.yaml"
+
+    assert generate_component_yaml(
+        source,
+        output_file,
+        container_image="python:3.12",
+        function_name="multi_component",
+        unwrapped_inputs=unwrapped_inputs,
+    ) is True
+
+    component = yaml.safe_load(output_file.read_text())
+    args = component["implementation"]["container"]["args"]
+    for name in ("raw", "results"):
+        for key in keys:
+            assert {"inputPath": f"{name}__{key}"} in args
+    for key in keys:
+        assert {"inputValue": f"labels__{key}"} in args
+
+    argv = [sys.executable, "PROGRAM", "--out", str(tmp_path / "out.txt")]
+    for name in ("raw", "results"):
+        for key in keys:
+            path = tmp_path / f"{name}-{key}.parquet"
+            path.write_text(f"{name}.{key}")
+            argv += [f"--{name}__{key}", str(path)]
+    argv += ["--labels__ucp-default", "D", "--labels__ucp_alt", "A"]
+    program_path = tmp_path / "program.py"
+    program_path.write_text(component["implementation"]["container"]["command"][-1])
+    argv[1] = str(program_path)
+    completed = subprocess.run(argv, capture_output=True, check=False, text=True)
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "out.txt").read_text() == (
+        "raw:ucp-default=raw.ucp-default/D|raw:ucp_alt=raw.ucp_alt/A|"
+        "results:ucp-default=results.ucp-default/D|results:ucp_alt=results.ucp_alt/A"
+    )
