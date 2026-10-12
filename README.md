@@ -1346,6 +1346,44 @@ existing = client.find_existing_components(
 
 `TangleApiClient` is handwritten in `tangle_cli.client` and inherits generated endpoint methods from `tangle_api.generated.operations.GeneratedTangleApiOperations`. The generated endpoint methods call the handwritten transport/request logic. Handwritten semantic helpers such as `find_existing_components(...)` return domain models and normalize common compatibility cases.
 
+### Execution trees and request hooks
+
+`client.get_execution_details(execution_id)` returns the execution with its whole subtree attached (`child_executions`), and injects each child's execution context into the parent's graph tasks. This is what run details (`get_run_details`) and artifact lookups use.
+
+Since 0.1.34 the tree is fetched breadth-first by `tangle_cli.execution_tree.fetch_execution_tree`:
+- one batch of `executions_details` requests per tree level;
+- up to `client.execution_tree_max_workers` requests in parallel (default 8), run inline when threads are unavailable (`sys.platform == "emscripten"`) or with 1 worker;
+- each execution is fetched once.
+
+The enriched result is identical to the previous one-request-per-node recursion; golden tests pin it. Downstream tools can call `fetch_execution_tree(client, root_id)` directly. It returns `{execution_id: TreeNode(execution_id, name, parent, details)}` in breadth-first order.
+
+Batched readers call two optional hooks on the client with relative API paths (for example `/api/executions/{id}/details`). Both are no-ops by default; override them in a subclass or wrapper to add caching:
+
+| Hook | When it's called | What an override can do |
+|------|------------------|-------------------------|
+| `prefetch(paths)` | Before a batch is read | Fetch the paths concurrently into a cache that its transport then serves |
+| `persist(paths)` | After a batch of responses that never change, such as an execution's details | Keep those responses in a durable cache and serve later reads from it |
+
+```python
+class CachingClient(TangleApiClient):
+    def prefetch(self, paths):
+        my_cache.warm(paths)          # e.g. parallel GETs into a cache the transport reads
+
+    def persist(self, paths):
+        my_cache.mark_immutable(paths)
+```
+
+### Client-side rate limiting
+
+Since 0.1.34 every client paces its own requests, so parallel readers such as the execution-tree fetch stay under Tangle's limits (about 10 requests/s per route per user):
+
+- **Pacing:** `TangleApiClient(..., max_requests_per_second=8.0)` spaces the start of every physical request at least `1/max_requests_per_second` apart. That includes retries and redirect hops, from every thread sharing the client. The default is `TangleApiClient.DEFAULT_MAX_REQUESTS_PER_SECOND` (8). `None` or `0` disables pacing. It can be changed on a live client (`client.max_requests_per_second = 4`).
+- **How waiting works:** a caller takes a slot only when it can start right away. Otherwise it sleeps outside the lock and checks again, so nothing busy-waits, and a pause that starts while it's asleep still holds it. A single thread (inline mode) just sleeps between its own requests. Idle time is not saved up into a later burst. Changing the rate on a live client keeps any active pause.
+- **Concurrency:** `execution_tree_max_workers` still caps parallel requests separately. Workers share one client: each `_refresh_auth()` and each per-send header snapshot runs under a per-client re-entrant lock. A custom `session=` must be safe to share across threads (`requests.Session` is, for ordinary use); otherwise set `execution_tree_max_workers = 1`.
+- **Retry deadline:** waiting for the *first* send's slot happens after the auth refresh and before a request's retry budget starts, because queueing behind other workers isn't retrying. Waits for retries and redirect hops do count. If their next slot (pacing, or a shared pause) would only open after the retry deadline, the client gives up at once instead of sleeping past it.
+- **Server pushback:** a `429` (`Retry-After`, or exponential backoff) or a `503` (its `Retry-After` is now honoured too, capped at 60 s like a 429's, including when opening a log stream) still retries within the existing shared retry budget. The retrying request's own wait is unchanged. While it waits, the client's shared limiter is paused for the same window. Other workers' next requests wait for the pause plus a small random jitter, up to 20% of the pause and at most 2 s, so they don't all resume at once. Other 5xx responses keep their per-request backoff without pausing anyone.
+- **Pyodide:** under `sys.platform == "emscripten"` the default is `None`. A browser host such as tangle-js paces requests in its own transport, and responses its cache serves never reach the network, so pacing there too would only compound delays. A host that wants client-side pacing can pass a value explicitly. `prefetch`/`persist` hooks are not rate limited by the client; whatever transport serves those prefetched paths applies its own pacing.
+
 The top-level `import tangle_cli` is lightweight and does not import static bindings eagerly. Normal installs include `tangle-api`; source checkouts or downstream embeddings may instead provide a local `tangle_api.generated` package before importing `tangle_cli.client`.
 
 ## Codegen/autogen from OpenAPI

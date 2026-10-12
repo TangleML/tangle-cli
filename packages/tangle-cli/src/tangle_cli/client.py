@@ -8,6 +8,8 @@ higher-level semantic helpers that downstream callers use.
 
 from __future__ import annotations
 
+import sys
+import threading
 import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import asdict, is_dataclass
@@ -32,6 +34,7 @@ from .api_transport import (
 from tangle_api.generated.operations import GeneratedTangleApiOperations
 from . import models as _cli_models
 from .logger import Logger, _null_logger, get_default_logger
+from .rate_limit import RequestRateLimiter
 from .models import (
     ComponentInfo,
     ComponentSpec,
@@ -58,12 +61,15 @@ class _RetryBudget:
     further send is admitted.
     """
 
-    __slots__ = ("attempts", "deadline", "sends")
+    __slots__ = ("attempts", "deadline", "first_slot_taken", "sends")
 
     def __init__(self, max_attempts: int, max_sends: int, deadline: float) -> None:
         self.attempts = max_attempts
         self.sends = max_sends
         self.deadline = deadline
+        # The first send's rate-limiter slot is taken before the budget exists
+        # (queueing behind other workers is not retrying), so it is not re-taken.
+        self.first_slot_taken = False
 
     def start_attempt(self) -> None:
         """Charge one logical try; callers gate on :meth:`can_retry` first."""
@@ -104,6 +110,9 @@ class _RetryBudget:
         """
 
         return delay < self.deadline - time.monotonic()
+
+
+_RATE_LIMITER_INIT_LOCK = threading.Lock()
 
 
 class TangleApiClient(GeneratedTangleApiOperations):
@@ -155,6 +164,14 @@ class TangleApiClient(GeneratedTangleApiOperations):
     # below attempts x chain length.
     _MAX_PHYSICAL_SENDS = max(2 * (_MAX_REDIRECTS + 1), 2 * (_MAX_GET_RETRIES + 1))
     _MAX_RETRY_ELAPSED_SECONDS = 120.0
+    #: Parallel ``executions_details`` requests per tree level in
+    #: :meth:`get_execution_details` (requests run inline without threads).
+    execution_tree_max_workers = 8
+    #: Client-side pacing of every physical request (all threads sharing this
+    #: client), below Tangle's ~10 requests/s per route per user. ``None`` or
+    #: ``0`` disables pacing. Off by default under Pyodide (``emscripten``),
+    #: whose host transport paces requests itself and where sleeping blocks.
+    DEFAULT_MAX_REQUESTS_PER_SECOND: float | None = None if sys.platform == "emscripten" else 8.0
 
     def __init__(
         self,
@@ -170,8 +187,10 @@ class TangleApiClient(GeneratedTangleApiOperations):
         session: requests.Session | None = None,
         include_env_credentials: bool = True,
         verify: VerifyArgument = None,
+        max_requests_per_second: float | None = DEFAULT_MAX_REQUESTS_PER_SECOND,
     ) -> None:
         self.base_url = _normalize_base_url(base_url or default_base_url())
+        self.max_requests_per_second = max_requests_per_second
         env_verbose = tangle_verbose_enabled()
         self.verbose = verbose or env_verbose
         self.logger = logger or (get_default_logger() if self.verbose else _null_logger)
@@ -188,6 +207,70 @@ class TangleApiClient(GeneratedTangleApiOperations):
         """Use CLI-composed models for generated operation deserialization."""
 
         return getattr(_cli_models, model_name, default)
+
+    # ---- Optional request hooks (extension point) -----------------------
+
+    def prefetch(self, paths: list[str]) -> None:
+        """Hook: *paths* (relative API paths, e.g. ``/api/executions/{id}/details``) are about to be read.
+
+        Batched readers such as :meth:`get_execution_details` call this before
+        issuing a batch of GETs, so a subclass or wrapper can fetch them
+        concurrently into a cache that its transport then serves. The default
+        does nothing.
+        """
+
+    def persist(self, paths: list[str]) -> None:
+        """Hook: the responses just read for *paths* are immutable and may be cached durably.
+
+        Called after a batch of GETs whose responses never change (for example
+        an execution's details). A subclass or wrapper may keep them in a
+        durable cache and serve later reads from it. The default does nothing.
+        """
+
+    # ---- Shared client state ---------------------------------------------
+
+    def _client_state_lock(self) -> Any:
+        """Re-entrant lock serializing auth refresh and per-send header snapshots.
+
+        Parallel readers (e.g. :meth:`get_execution_details`) share one client;
+        ``_refresh_auth`` overrides may mutate ``self.headers``/session state, so
+        each refresh and each header snapshot runs under this lock. Re-entrant,
+        so a refresh that itself issues requests through this client is safe.
+        The ``session`` passed to the constructor must be safe to share across
+        threads (``requests.Session`` is, for ordinary use); otherwise set
+        ``execution_tree_max_workers = 1``.
+        """
+
+        lock = self.__dict__.get("_state_lock")
+        if lock is None:
+            with _RATE_LIMITER_INIT_LOCK:
+                lock = self.__dict__.get("_state_lock")
+                if lock is None:
+                    lock = threading.RLock()
+                    self.__dict__["_state_lock"] = lock
+        return lock
+
+    # ---- Client-side rate limiting ---------------------------------------
+
+    def _request_rate_limiter(self) -> RequestRateLimiter:
+        """The limiter shared by every thread using this client (created lazily).
+
+        A ``max_requests_per_second`` changed after construction updates the
+        existing limiter in place, so an active server-pushback pause is kept.
+        """
+
+        rps = getattr(self, "max_requests_per_second", self.DEFAULT_MAX_REQUESTS_PER_SECOND)
+        wanted = rps if rps and rps > 0 else None
+        limiter = self.__dict__.get("_rate_limiter")
+        if limiter is None:
+            with _RATE_LIMITER_INIT_LOCK:
+                limiter = self.__dict__.get("_rate_limiter")
+                if limiter is None:
+                    limiter = RequestRateLimiter(wanted)
+                    self.__dict__["_rate_limiter"] = limiter
+        if limiter.max_per_second != wanted:
+            limiter.set_rate(wanted)
+        return limiter
 
     def set_verbose(self, enabled: bool) -> None:
         """Enable or disable request logging."""
@@ -225,13 +308,21 @@ class TangleApiClient(GeneratedTangleApiOperations):
         clean_params = self._clean_mapping(params)
         request_method = method.upper()
 
+        with self._client_state_lock():
+            self._refresh_auth()
+        # Queue for the first send's pacing slot AFTER the (serialized) auth
+        # refresh, so workers released together from a slow refresh are still
+        # paced, and BEFORE the retry budget starts: waiting behind other workers
+        # sharing this client is not retrying, so it must not spend the retry
+        # deadline. Later sends (retries, redirect hops) take their slot inside
+        # the budget, before its deadline check.
+        self._request_rate_limiter().acquire()
         budget = _RetryBudget(
             self._MAX_GET_RETRIES + 1,
             self._MAX_PHYSICAL_SENDS,
             time.monotonic() + self._MAX_RETRY_ELAPSED_SECONDS,
         )
-
-        self._refresh_auth()
+        budget.first_slot_taken = True
         response = self._request_with_rate_limit_retries(
             request_method,
             url,
@@ -251,7 +342,8 @@ class TangleApiClient(GeneratedTangleApiOperations):
             # leaking it. ``response.headers`` stays available after close.
             if kwargs.get("stream"):
                 response.close()
-            self._refresh_auth()
+            with self._client_state_lock():
+                self._refresh_auth()
             try:
                 response = self._request_with_rate_limit_retries(
                     request_method,
@@ -328,6 +420,9 @@ class TangleApiClient(GeneratedTangleApiOperations):
             # still reportable if a later round exhausts the budget mid-chain.
             last_response = response
             self._release_response(response)
+            # Hold this client's other workers for the same window so they don't
+            # keep hitting the limit; this thread sleeps through it below.
+            self._request_rate_limiter().pause(delay)
             self._sleep_for_rate_limit(delay)
             rate_limit_round += 1
 
@@ -426,10 +521,18 @@ class TangleApiClient(GeneratedTangleApiOperations):
             else:
                 if response.status_code not in self._RETRYABLE_GET_STATUSES:
                     return response
+                if response.status_code == 503:
+                    # A 503 is the server shedding load: honour its Retry-After
+                    # (capped like a 429's) and hold this client's other workers.
+                    retry_after = self._retry_after_delay(response.headers.get("Retry-After"))
+                    if retry_after is not None:
+                        delay = max(delay, min(retry_after, self._MAX_RETRY_AFTER_SECONDS))
                 # Budget exhausted, or the backoff alone would outlast the
                 # deadline: return the final 5xx for raise_for_status.
                 if not budget.can_retry() or not budget.allows_wait(delay):
                     return response
+                if response.status_code == 503:
+                    self._request_rate_limiter().pause(delay)
                 # Release the intermediate response so its connection returns to
                 # the pool. Its body is already buffered (these GETs are never
                 # streamed), so it stays reportable if the retry runs out of
@@ -457,8 +560,12 @@ class TangleApiClient(GeneratedTangleApiOperations):
             self.logger.info(f"429 rate limited; retrying in {delay:.1f}s")
         time.sleep(delay)
 
-    def _sleep_for_stream_open_retry(self, backoff: float, next_attempt: int, reason: str) -> None:
+    def _sleep_for_stream_open_retry(
+        self, backoff: float, next_attempt: int, reason: str, *, minimum: float | None = None
+    ) -> None:
         delay = min(backoff, self._MAX_STREAM_OPEN_BACKOFF_SECONDS)
+        if minimum is not None:
+            delay = max(delay, minimum)  # e.g. a 503's Retry-After
         self.logger.warn(
             f"transient {reason} opening log stream; retrying in {delay:.1f}s "
             f"(attempt {next_attempt}/{self._MAX_STREAM_OPEN_ATTEMPTS})"
@@ -516,12 +623,27 @@ class TangleApiClient(GeneratedTangleApiOperations):
         response: requests.Response | None = None
 
         for _ in range(self._MAX_REDIRECTS + 1):
+            # Pace (and honour any shared 429/503 pause) BEFORE consuming the send:
+            # the budget's deadline check then sees the time spent waiting, so a
+            # limiter wait can never carry a send past the retry deadline.
+            remaining = budget.deadline - time.monotonic()
+            if budget.first_slot_taken:
+                budget.first_slot_taken = False
+            elif remaining > 0 and self._request_rate_limiter().acquire(max_wait=remaining) is None:
+                # The next slot (pacing, or a shared 429/503 pause) would only open
+                # after the retry deadline: give up now instead of sleeping past it.
+                # (An already-passed deadline is left to the budget check below.)
+                raise requests.exceptions.RetryError(
+                    f"Retry budget exhausted (rate-limit wait would outlast the deadline) "
+                    f"while sending {current_method} {self._credential_safe_url(current_url)}"
+                )
             if not budget.try_consume_send():
                 raise requests.exceptions.RetryError(
                     f"Retry budget exhausted ({budget.exhaustion_reason()}) "
                     f"while sending {current_method} {self._credential_safe_url(current_url)}"
                 )
-            request_headers = self._headers(extra_headers)
+            with self._client_state_lock():  # consistent snapshot vs a concurrent _refresh_auth
+                request_headers = self._headers(extra_headers)
             call_kwargs = dict(request_kwargs)
             if self._verify is not _VERIFY_UNSET and "verify" not in call_kwargs:
                 call_kwargs["verify"] = self._verify
@@ -697,8 +819,21 @@ class TangleApiClient(GeneratedTangleApiOperations):
     # ---- Handwritten semantic helpers consumed by tangle-deploy ----------
 
     def get_execution_details(self, execution_id: str) -> GetExecutionInfoResponse:
-        details = self.executions_details(execution_id)
-        self._enrich_execution_tree(details)
+        """Fetch an execution and its whole subtree, enriched with execution context.
+
+        The tree is fetched breadth-first with
+        :func:`tangle_cli.execution_tree.fetch_execution_tree`: one batch per
+        level, ``execution_tree_max_workers`` parallel requests (inline without
+        threads), and the :meth:`prefetch`/:meth:`persist` hooks around each
+        batch. :meth:`_enrich_execution_tree` then builds the same enriched
+        tree as the historical one-request-per-node recursion.
+        """
+
+        from .execution_tree import fetch_execution_tree
+
+        tree = fetch_execution_tree(self, execution_id, max_workers=self.execution_tree_max_workers)
+        details = tree[execution_id].details
+        self._enrich_execution_tree(details, {eid: node.details for eid, node in tree.items()})
         return details
 
     @staticmethod
@@ -787,8 +922,18 @@ class TangleApiClient(GeneratedTangleApiOperations):
                 last_exc = None
                 if attempt == self._MAX_STREAM_OPEN_ATTEMPTS:
                     break
+                minimum = None
+                if response.status_code == 503:
+                    # Load shedding: honour Retry-After (capped like a 429's) and
+                    # hold this client's other workers for the same window.
+                    retry_after = self._retry_after_delay(response.headers.get("Retry-After"))
+                    if retry_after is not None:
+                        minimum = min(retry_after, self._MAX_RETRY_AFTER_SECONDS)
+                    self._request_rate_limiter().pause(
+                        max(min(backoff, self._MAX_STREAM_OPEN_BACKOFF_SECONDS), minimum or 0.0)
+                    )
                 self._sleep_for_stream_open_retry(
-                    backoff, attempt + 1, f"HTTP {response.status_code}"
+                    backoff, attempt + 1, f"HTTP {response.status_code}", minimum=minimum
                 )
                 backoff *= 2.0
                 continue
@@ -1052,7 +1197,18 @@ class TangleApiClient(GeneratedTangleApiOperations):
         execution = self.executions_details(root_execution_id)
         return execution.task_spec
 
-    def _enrich_execution_tree(self, execution: GetExecutionInfoResponse) -> None:
+    def _enrich_execution_tree(
+        self,
+        execution: GetExecutionInfoResponse,
+        fetched: Mapping[str, GetExecutionInfoResponse] | None = None,
+    ) -> None:
+        """Attach child executions and inject execution context into graph tasks, recursively.
+
+        *fetched* maps execution ids to already-fetched details (see
+        :meth:`get_execution_details`); a child missing from it is fetched
+        with ``executions_details``.
+        """
+
         child_ids = execution.raw.get("child_task_execution_ids") or {}
         if not isinstance(child_ids, dict):
             return
@@ -1061,8 +1217,10 @@ class TangleApiClient(GeneratedTangleApiOperations):
         for task_name, child_execution_id in child_ids.items():
             if not child_execution_id:
                 continue
-            child = self.executions_details(child_execution_id)
-            self._enrich_execution_tree(child)
+            child = fetched.get(child_execution_id) if fetched is not None else None
+            if child is None:
+                child = self.executions_details(child_execution_id)
+            self._enrich_execution_tree(child, fetched)
             execution.child_executions[task_name] = child
 
             task = execution.task_spec.graph_tasks.get(task_name)
