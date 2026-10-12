@@ -1,0 +1,105 @@
+{
+  "run": {
+    "id": "run-1",
+    "root_execution_id": "root-exec",
+    "created_at": "2026-06-11T00:00:00Z",
+    "created_by": "tester@example.com",
+    "annotations": {
+      "team": "search"
+    }
+  },
+  "execution": {
+    "id": "fan-exec",
+    "component": "Fan",
+    "transparent": false,
+    "transparency_reason": "no inline source, canonical location, git metadata, or standard public image found",
+    "implementation": {
+      "graph": {
+        "tasks": {
+          "Score A": {
+            "componentRef": {
+              "name": "Score",
+              "digest": "digest-Score",
+              "spec": {
+                "name": "Score",
+                "description": "Score does work",
+                "metadata": {
+                  "annotations": {
+                    "version": "1.0"
+                  }
+                },
+                "inputs": [
+                  {
+                    "name": "in",
+                    "type": "String"
+                  }
+                ],
+                "outputs": [
+                  {
+                    "name": "out",
+                    "type": "String"
+                  }
+                ]
+              }
+            },
+            "arguments": {
+              "in": "hello"
+            },
+            "execution_id": "score-a-exec",
+            "input_artifacts": {
+              "in": "art-prep"
+            },
+            "output_artifacts": {
+              "out": "art-a"
+            },
+            "state": "SUCCEEDED"
+          },
+          "Score B": {
+            "componentRef": {
+              "name": "Score",
+              "digest": "digest-Score",
+              "spec": {
+                "name": "Score",
+                "description": "Score does work",
+                "metadata": {
+                  "annotations": {
+                    "version": "1.0"
+                  }
+                },
+                "inputs": [
+                  {
+                    "name": "in",
+                    "type": "String"
+                  }
+                ],
+                "outputs": [
+                  {
+                    "name": "out",
+                    "type": "String"
+                  }
+                ]
+              }
+            },
+            "arguments": {
+              "in": "hello"
+            },
+            "execution_id": "score-b-exec",
+            "input_artifacts": {
+              "in": "art-prep"
+            },
+            "output_artifacts": {
+              "out": "art-b"
+            },
+            "state": "FAILED"
+          }
+        }
+      }
+    },
+    "arguments": {
+      "arg": "value"
+    },
+    "input_artifacts": {
+      "in": "art-prep"
+    }
+  }
+}

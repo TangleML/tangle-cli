@@ -1,0 +1,224 @@
+{
+  "run": {
+    "id": "run-1",
+    "root_execution_id": "root-exec",
+    "created_at": "2026-06-11T00:00:00Z",
+    "created_by": "tester@example.com",
+    "annotations": {
+      "team": "search"
+    }
+  },
+  "execution": {
+    "id": "root-exec",
+    "component": "Golden Pipeline",
+    "transparent": false,
+    "transparency_reason": "no inline source, canonical location, git metadata, or standard public image found",
+    "implementation": {
+      "graph": {
+        "tasks": {
+          "Prepare": {
+            "componentRef": {
+              "name": "Prepare",
+              "digest": "digest-Prepare",
+              "spec": {
+                "name": "Prepare",
+                "description": "Prepare does work",
+                "metadata": {
+                  "annotations": {
+                    "version": "1.0",
+                    "python_dependencies": "[big list]"
+                  }
+                },
+                "inputs": [
+                  {
+                    "name": "in",
+                    "type": "String"
+                  }
+                ],
+                "outputs": [
+                  {
+                    "name": "out",
+                    "type": "String"
+                  }
+                ],
+                "implementation": {
+                  "container": {
+                    "image": "gcr.io/prep:v1"
+                  }
+                }
+              },
+              "text": "raw yaml for Prepare"
+            },
+            "arguments": {
+              "in": "hello"
+            },
+            "execution_id": "prep-exec",
+            "input_artifacts": {},
+            "output_artifacts": {
+              "out": "art-prep"
+            },
+            "state": "SUCCEEDED"
+          },
+          "Fan": {
+            "componentRef": {
+              "name": "Fan",
+              "digest": "digest-Fan",
+              "spec": {
+                "name": "Fan",
+                "implementation": {
+                  "graph": {
+                    "tasks": {
+                      "Score A": {
+                        "componentRef": {
+                          "name": "Score",
+                          "digest": "digest-Score",
+                          "spec": {
+                            "name": "Score",
+                            "description": "Score does work",
+                            "metadata": {
+                              "annotations": {
+                                "version": "1.0",
+                                "python_dependencies": "[big list]"
+                              }
+                            },
+                            "inputs": [
+                              {
+                                "name": "in",
+                                "type": "String"
+                              }
+                            ],
+                            "outputs": [
+                              {
+                                "name": "out",
+                                "type": "String"
+                              }
+                            ],
+                            "implementation": {
+                              "container": {
+                                "image": "gcr.io/score:v2"
+                              }
+                            }
+                          },
+                          "text": "raw yaml for Score"
+                        },
+                        "arguments": {
+                          "in": "hello"
+                        },
+                        "execution_id": "score-a-exec",
+                        "input_artifacts": {
+                          "in": "art-prep"
+                        },
+                        "output_artifacts": {
+                          "out": "art-a"
+                        },
+                        "state": "SUCCEEDED"
+                      },
+                      "Score B": {
+                        "componentRef": {
+                          "name": "Score",
+                          "digest": "digest-Score",
+                          "spec": {
+                            "name": "Score",
+                            "description": "Score does work",
+                            "metadata": {
+                              "annotations": {
+                                "version": "1.0",
+                                "python_dependencies": "[big list]"
+                              }
+                            },
+                            "inputs": [
+                              {
+                                "name": "in",
+                                "type": "String"
+                              }
+                            ],
+                            "outputs": [
+                              {
+                                "name": "out",
+                                "type": "String"
+                              }
+                            ],
+                            "implementation": {
+                              "container": {
+                                "image": "gcr.io/score:v2"
+                              }
+                            }
+                          },
+                          "text": "raw yaml for Score"
+                        },
+                        "arguments": {
+                          "in": "hello"
+                        },
+                        "execution_id": "score-b-exec",
+                        "input_artifacts": {
+                          "in": "art-prep"
+                        },
+                        "output_artifacts": {
+                          "out": "art-b"
+                        },
+                        "state": "FAILED"
+                      }
+                    }
+                  }
+                }
+              },
+              "text": "raw yaml for Fan"
+            },
+            "arguments": {},
+            "execution_id": "fan-exec",
+            "input_artifacts": {
+              "in": "art-prep"
+            },
+            "output_artifacts": {}
+          },
+          "Report": {
+            "componentRef": {
+              "name": "Report",
+              "digest": "digest-Report",
+              "spec": {
+                "name": "Report",
+                "description": "Report does work",
+                "metadata": {
+                  "annotations": {
+                    "version": "1.0",
+                    "python_dependencies": "[big list]"
+                  }
+                },
+                "inputs": [
+                  {
+                    "name": "in",
+                    "type": "String"
+                  }
+                ],
+                "outputs": [
+                  {
+                    "name": "out",
+                    "type": "String"
+                  }
+                ],
+                "implementation": {
+                  "container": {
+                    "image": "gcr.io/report:v1"
+                  }
+                }
+              },
+              "text": "raw yaml for Report"
+            },
+            "arguments": {
+              "in": "hello"
+            },
+            "execution_id": "report-exec",
+            "input_artifacts": {
+              "a": "art-a",
+              "b": "art-b"
+            },
+            "output_artifacts": {}
+          }
+        }
+      }
+    },
+    "arguments": {
+      "arg": "value"
+    }
+  }
+}
