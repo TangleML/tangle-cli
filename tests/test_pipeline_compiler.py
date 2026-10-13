@@ -336,6 +336,235 @@ def test_compile_rejects_overrides_without_cfg_param(tmp_path):
     assert not out.exists()
 
 
+# ---------------------------------------------------------------------------
+# Override-only config: a ROOT with an IMPLICIT default config.yaml that is
+# missing compiles from ``{}`` + the typed ``--override`` values. Explicit
+# ``config=``, no overrides, and nested children stay strict.
+
+_SHARD_COMPONENT = (
+    "name: Shard\n"
+    "inputs:\n"
+    "  - name: shard\n"
+    "    type: String\n"
+    "    optional: true\n"
+    "  - name: wait_for\n"
+    "    type: String\n"
+    "    optional: true\n"
+    "outputs:\n"
+    "  - name: wait_for_output\n"
+    "    type: String\n"
+    "implementation:\n"
+    "  container:\n"
+    "    image: python:3.12\n"
+    "    command: [sh, -c, 'true']\n"
+)
+
+_FANOUT_SRC = (
+    "from tangle_cli.python_pipeline import pipeline, ref\n"
+    "\n"
+    "@pipeline('Fanout Pipeline')\n"
+    "def fanout_pipeline(cfg) -> None:\n"
+    "    for shard in cfg.shards:\n"
+    "        ref(url='file://./shard.yaml').named(f'Shard {shard}')(shard=str(shard))\n"
+)
+
+
+def _write_fanout(tmp_path: Path, src: str = _FANOUT_SRC) -> Path:
+    (tmp_path / "shard.yaml").write_text(_SHARD_COMPONENT)
+    script = tmp_path / "fanout_pipeline.py"
+    script.write_text(src)
+    return script
+
+
+def _graph_tasks(path: Path) -> dict:
+    return yaml.safe_load(path.read_text())["implementation"]["graph"]["tasks"]
+
+
+def test_compile_override_only_list_fans_out_without_config_file(tmp_path):
+    """A typed list override drives a compile-time for-loop into distinct
+    named tasks when no config.yaml exists (API facade)."""
+    script = _write_fanout(tmp_path)
+    out = tmp_path / "compiled.yaml"
+    assert not (tmp_path / "config.yaml").exists()
+
+    result = compile_pipeline_file(script, out, overrides={"shards": "[us, eu, 3]"})
+
+    tasks = _graph_tasks(out)
+    assert list(tasks) == ["Shard us", "Shard eu", "Shard 3"]
+    assert [t["arguments"]["shard"] for t in tasks.values()] == ["us", "eu", "3"]
+    assert result.task_count == 3
+    validate_dehydrated_data(yaml.safe_load(out.read_text()))
+    # The note names keys only, never override values; no config is created.
+    (warning,) = result.warnings
+    assert "default config.yaml not found" in warning
+    assert "['shards']" in warning
+    assert "'us'" not in warning and "eu" not in warning
+    assert not (tmp_path / "config.yaml").exists()
+
+
+def test_compile_override_only_typed_int_drives_range(tmp_path):
+    script = _write_fanout(
+        tmp_path,
+        "from tangle_cli.python_pipeline import pipeline, ref\n"
+        "\n"
+        "@pipeline('Range Pipeline')\n"
+        "def range_pipeline(cfg) -> None:\n"
+        "    for i in range(cfg.count):\n"
+        "        ref(url='file://./shard.yaml').named(f'Part {i}')(shard=f'{cfg.prefix}-{i}')\n",
+    )
+    out = tmp_path / "compiled.yaml"
+
+    compile_pipeline(script, out, overrides={"count": "2", "prefix": "p"})
+
+    tasks = _graph_tasks(out)
+    assert list(tasks) == ["Part 0", "Part 1"]
+    assert [t["arguments"]["shard"] for t in tasks.values()] == ["p-0", "p-1"]
+
+
+def test_compile_override_only_matches_empty_config_file(tmp_path, monkeypatch):
+    """A missing default config.yaml is modelled exactly as an empty one:
+    identical compiled bytes and identical root compile key."""
+    from tangle_cli import pipeline_compiler as pc
+
+    keys = []
+    real_key_for = pc._compile_key_for
+
+    def spy(*args, **kwargs):
+        key = real_key_for(*args, **kwargs)
+        keys.append(key)
+        return key
+
+    monkeypatch.setattr(pc, "_compile_key_for", spy)
+    script = _write_fanout(tmp_path)
+    overrides = {"shards": "[a, b]"}
+
+    missing_out = tmp_path / "missing" / "compiled.yaml"
+    missing_out.parent.mkdir()
+    compile_pipeline(script, missing_out, overrides=overrides)
+
+    (tmp_path / "config.yaml").write_text("{}\n")
+    empty_out = tmp_path / "empty" / "compiled.yaml"
+    empty_out.parent.mkdir()
+    empty_result = compile_pipeline(script, empty_out, overrides=overrides)
+
+    assert keys[0] == keys[1]
+    assert missing_out.read_text() == empty_out.read_text()
+    assert empty_result.warnings == []
+
+
+def test_compile_missing_default_config_without_overrides_stays_strict(tmp_path):
+    script = _write_fanout(tmp_path)
+    out = tmp_path / "compiled.yaml"
+
+    with pytest.raises(CompileError) as exc:
+        compile_pipeline(script, out)
+
+    msg = str(exc.value)
+    assert "config file not found" in msg
+    assert "the default config.yaml" in msg
+    assert "--override KEY=VALUE" in msg
+    assert not out.exists()
+
+
+def test_compile_missing_explicit_config_with_overrides_stays_strict(tmp_path):
+    script = _write_fanout(
+        tmp_path,
+        _FANOUT_SRC.replace(
+            "@pipeline('Fanout Pipeline')",
+            "@pipeline('Fanout Pipeline', config='fanout_config.yaml')",
+        ),
+    )
+    out = tmp_path / "compiled.yaml"
+
+    with pytest.raises(CompileError) as exc:
+        compile_pipeline(script, out, overrides={"shards": "[a]"})
+
+    msg = str(exc.value)
+    assert "config file not found" in msg
+    assert "@pipeline(config='fanout_config.yaml')" in msg
+    assert "--override KEY=VALUE" not in msg
+    assert not out.exists()
+
+
+def test_compile_override_only_root_keeps_nested_child_strict(tmp_path):
+    """Root overrides never relax a child's own missing config.yaml."""
+    script = _write_fanout(
+        tmp_path,
+        "from tangle_cli.python_pipeline import In, Out, pipeline, ref, subpipeline\n"
+        "\n"
+        "@pipeline('Strict Child', config='child_config.yaml')\n"
+        "def strict_child(seed: In[str], cfg) -> Out[str]:\n"
+        "    return ref(url='file://./noop.yaml').named('Noop')(wait_for=seed)\n"
+        "\n"
+        "@pipeline('Override Root')\n"
+        "def override_root(parent_wait_token: In[str], cfg) -> Out[str]:\n"
+        "    return subpipeline(strict_child).named('Run Child')(seed=parent_wait_token)\n",
+    )
+    out = tmp_path / "compiled.yaml"
+    _provide_noop(out)
+
+    with pytest.raises(CompileError) as exc:
+        compile_pipeline(script, out, overrides={"shards": "[a]"}, pipeline_name="override_root")
+
+    assert "child_config.yaml" in str(exc.value)
+    assert "config file not found" in str(exc.value)
+    assert not out.exists()
+
+
+def test_compile_override_only_propagate_root_broadcasts_overrides(tmp_path):
+    """A propagate_config-only root (no ``cfg``) with no config.yaml
+    broadcasts its overrides; a child takes only the keys it declares."""
+    script = _write_fanout(
+        tmp_path,
+        "from tangle_cli.python_pipeline import In, Out, pipeline, ref, subpipeline\n"
+        "\n"
+        "@pipeline('Leaf Child', config='child_config.yaml')\n"
+        "def leaf_child(seed: In[str], cfg) -> Out[str]:\n"
+        "    return ref(url='file://./shard.yaml').named('Leaf')(shard=cfg.shared_key, wait_for=seed)\n"
+        "\n"
+        "@pipeline('Broadcast Only Root', propagate_config=True)\n"
+        "def broadcast_only_root(parent_wait_token: In[str]) -> Out[str]:\n"
+        "    return subpipeline(leaf_child).named('Run Child')(seed=parent_wait_token)\n",
+    )
+    (tmp_path / "child_config.yaml").write_text("shared_key: from-child\n")
+    out = tmp_path / "compiled.yaml"
+
+    result = compile_pipeline(
+        script,
+        out,
+        overrides={"shared_key": "from-override", "unused": "x"},
+        pipeline_name="broadcast_only_root",
+    )
+
+    (child_path,) = result.subgraph_paths
+    (leaf,) = _graph_tasks(child_path).values()
+    assert leaf["arguments"]["shard"] == "from-override"
+    assert any("default config.yaml not found" in w for w in result.warnings)
+
+
+def test_compile_cli_override_only_fans_out_without_config_file(tmp_path, capsys):
+    script = _write_fanout(tmp_path)
+    out = tmp_path / "compiled.yaml"
+    app = cli.build_app()
+
+    run_app(
+        app,
+        [
+            "sdk",
+            "pipelines",
+            "compile",
+            str(script),
+            "-o",
+            str(out),
+            "--override",
+            "shards=[north, south]",
+        ],
+    )
+
+    assert list(_graph_tasks(out)) == ["Shard north", "Shard south"]
+    assert "warning: pipeline 'Fanout Pipeline': default config.yaml not found" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     "literal, type_name",
     [
