@@ -13,7 +13,8 @@ The compile driver:
 3. Loads the cfg from ``<script_dir>/<config_path>`` and overlays
    ``--override key=value`` pairs (CLI wins). ``cfg`` is compile-time
    only — its values are baked into emitted constants, never copied
-   into the output YAML.
+   into the output YAML. A root with a missing IMPLICIT ``config.yaml`` and
+   at least one override compiles from an empty base config.
 4. Traces the pipeline and emits the body dict.
 5. Writes the single dehydrated pipeline YAML. No wrapper config and no
    ``.yaml.j2`` template sidecar are written. When the pipeline uses
@@ -692,6 +693,17 @@ def _resolve_cfg_for_pipeline(
     A ``config=`` declared without a matching use appends an explanatory
     warning; a root that received ``--override`` values it cannot consume is a
     hard :class:`CompileError`.
+
+    Override-only config: a ROOT pipeline that loads config (a ``cfg``
+    parameter and/or ``propagate_config=True``), has no explicit ``config=``,
+    and received at least one ``--override`` compiles from an EMPTY base
+    config when the implicit default ``config.yaml`` is absent -- exactly as
+    if an empty ``config.yaml`` existed (``raw_cfg == {}``, no config
+    identity, so the same compile key), with a warning naming only the
+    override keys. For a ``propagate_config`` root the overrides become the
+    broadcast payload. Everything else stays strict: an explicit ``config=``
+    that is missing, a missing file with no overrides, and a nested child's
+    missing config all still raise.
     """
     cfg_path = _resolve_cfg_path_in_dir(pipeline_fn, base_dir)
     uses_cfg = _pipeline_accepts_cfg(pipeline_fn)
@@ -703,13 +715,23 @@ def _resolve_cfg_for_pipeline(
             pipeline_fn=pipeline_fn,
             is_root=is_root,
         )
+        implicit_root_config = is_root and not pipeline_fn.config_path
+        allow_override_only = implicit_root_config and bool(overrides)
         loaded_cfg, raw_cfg, config_identity = _load_cfg_and_raw(
             cfg_path,
             overrides,
             coerce=is_root,
             pipeline_fn=pipeline_fn,
             usage="cfg" if uses_cfg else "propagate_config",
+            allow_override_only=allow_override_only,
+            suggest_override_only=implicit_root_config,
         )
+        if allow_override_only and not cfg_path.exists():
+            ctx.warnings.append(
+                f"pipeline {pipeline_fn.name!r}: default config.yaml not found next to "
+                "the pipeline source; using --override values only as its config "
+                f"(keys: {sorted(overrides)!r})."
+            )
         cfg = loaded_cfg if uses_cfg else Cfg({})
         if not uses_cfg and pipeline_fn.config_path:
             ctx.warnings.append(
@@ -2999,6 +3021,8 @@ def _load_cfg_and_raw(
     coerce: bool = True,
     pipeline_fn: PipelineFn,
     usage: str = "cfg",
+    allow_override_only: bool = False,
+    suggest_override_only: bool = False,
 ):
     """Load cfg AND return the resolved config dict and its identity.
 
@@ -3012,7 +3036,15 @@ def _load_cfg_and_raw(
     ``coerce=False`` so its already-typed native ``effective`` overrides pass
     through unchanged. Overrides are applied to the :class:`Cfg` object only —
     the compiled YAML carries no config keys.
+
+    ``allow_override_only`` (decided by :func:`_resolve_cfg_for_pipeline`)
+    turns a missing file into an empty base config so ``overrides`` alone
+    build the cfg; the identity is ``None``, byte-identical to an empty
+    ``config.yaml``. ``suggest_override_only`` only adds that hint to the
+    missing-file error.
     """
+    if not cfg_path.exists() and allow_override_only and overrides:
+        return build_cfg({}, overrides=dict(overrides), coerce=coerce), {}, None
     if not cfg_path.exists():
         source = (
             f"@pipeline(config={pipeline_fn.config_path!r})"
@@ -3032,6 +3064,11 @@ def _load_cfg_and_raw(
                 f"{source} is required as a compile-time input. Create the file, "
                 "or remove the `cfg` parameter (and omit `config=`) if the "
                 "pipeline does not use compile-time config."
+            )
+        if suggest_override_only:
+            reason += (
+                " Alternatively, pass the needed keys as --override KEY=VALUE "
+                "to compile without a config file."
             )
         raise CompileError(
             f"config file not found: {cfg_path}. Pipeline {pipeline_fn.name!r} {reason}"

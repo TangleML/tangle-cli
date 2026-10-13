@@ -862,6 +862,21 @@ def greeting_pipeline(who: In[str], cfg) -> Out[str]:
 
 `In[T]` parameters become runtime graph inputs. A single `-> Out[T]` return exposes one graph output; use `@pipeline(output_name=...)` to name that output. For multiple outputs, define a frozen dataclass subclass of `Outputs` with `Out[T]` fields and return an instance. A pipeline that accepts a `cfg` parameter reads `config.yaml` (or the path passed via `@pipeline(config="...")`) at compile time, with `--override key=value` values overlaid by the compile command.
 
+If the default `config.yaml` is absent, a root pipeline that received at least one `--override` compiles from an empty config plus those typed overrides (with a warning naming the keys), exactly as if an empty `config.yaml` existed. This allows compile-time fan-out without a config file:
+
+```python
+@pipeline("Sharded")
+def sharded(cfg) -> None:
+    for shard in cfg.shards:
+        process.named(f"Process {shard}")(shard=shard)
+```
+
+```bash
+tangle sdk pipelines compile sharded.py -o sharded.yaml --override 'shards=[us, eu]'
+```
+
+A missing explicit `@pipeline(config="...")`, a missing file with no overrides, and a nested child's missing config remain errors.
+
 ###### Input defaults
 
 A parameter default becomes the input's `default`, which the schema carries as a string, so `threshold: In[int] = 5` emits `default: '5'`. The same rules apply to `graph_input(default=...)`:
