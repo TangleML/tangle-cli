@@ -9,8 +9,12 @@ and the top-level key / ``template_file`` guards).
 """
 import copy
 
+import jsonschema
 import pytest
+from jsonschema import Draft202012Validator
+from jsonschema.validators import validator_for
 
+from tangle_cli import schema_validation
 from tangle_cli.schema_validation import (
     SchemaValidationError,
     assert_no_template_delimiters,
@@ -175,6 +179,80 @@ def test_validate_dehydrated_data_rejects_unsupported_execution_options(
     ] = execution_options
     with pytest.raises(SchemaValidationError):
         validate_dehydrated_data(data)
+
+
+# ---------------------------------------------------------------------------
+# Compiled-validator caching: check_schema runs once, every payload
+# still fully validated with unchanged error semantics.
+
+
+@pytest.fixture
+def check_schema_calls(monkeypatch):
+    """Cold validator cache; record every check_schema call."""
+    calls: list[object] = []
+    original = Draft202012Validator.check_schema
+
+    def counting(cls, s, *args, **kwargs):
+        calls.append(s)
+        return original(s, *args, **kwargs)
+
+    monkeypatch.setattr(Draft202012Validator, "check_schema", classmethod(counting))
+    schema_validation._dehydrated_validator.cache_clear()
+    yield calls
+    schema_validation._dehydrated_validator.cache_clear()
+
+
+def _uncached_error(data) -> str | None:
+    """Reference: the pre-cache path (build a validator every call)."""
+    schema = load_dehydrated_schema()
+    cls = validator_for(schema)
+    errors = sorted(cls(schema).iter_errors(data), key=lambda e: list(e.absolute_path))
+    if not errors:
+        return None
+    best = jsonschema.exceptions.best_match(errors)
+    loc = ".".join(str(p) for p in best.absolute_path) or "root"
+    return f"dehydrated pipeline failed schema validation at {loc}: {best.message}"
+
+
+def _invalid_payloads() -> list[dict]:
+    missing_name = _valid_pipeline()
+    del missing_name["name"]
+    no_tasks = _valid_pipeline()
+    no_tasks["implementation"]["graph"]["tasks"] = {}
+    inline_spec = _valid_pipeline()
+    inline_spec["implementation"]["graph"]["tasks"]["extract"]["componentRef"] = {
+        "spec": {"name": "Extract"}
+    }
+    bad_retry = _valid_pipeline()
+    bad_retry["implementation"]["graph"]["tasks"]["load"]["executionOptions"] = {
+        "retryStrategy": {"maxRetries": -1}
+    }
+    return [missing_name, no_tasks, inline_spec, bad_retry]
+
+
+def test_check_schema_runs_once_across_many_validations(check_schema_calls):
+    for _ in range(25):
+        validate_dehydrated_data(_valid_pipeline())
+        for payload in _invalid_payloads():
+            with pytest.raises(SchemaValidationError):
+                validate_dehydrated_data(payload)
+    assert len(check_schema_calls) == 1
+
+
+def test_cached_validator_keeps_error_messages(check_schema_calls):
+    # Interleave valid/invalid payloads on a warm cache; each result must
+    # match the uncached reference exactly (message + location).
+    for _ in range(3):
+        validate_dehydrated_data(_valid_pipeline())
+        for payload in _invalid_payloads():
+            expected = _uncached_error(payload)
+            assert expected is not None
+            with pytest.raises(SchemaValidationError) as excinfo:
+                validate_dehydrated_data(payload)
+            assert str(excinfo.value) == expected
+            assert excinfo.value.location == expected.split(" at ", 1)[1].split(":", 1)[0]
+            validate_dehydrated_data(_valid_pipeline())
+    assert len(check_schema_calls) == 1
 
 
 # ---------------------------------------------------------------------------
