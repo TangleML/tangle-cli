@@ -104,20 +104,27 @@ def load_dehydrated_schema() -> dict[str, Any]:
         ) from e
 
 
+@lru_cache(maxsize=1)
+def _dehydrated_validator() -> Any:
+    """Build (and ``check_schema``) the packaged-schema validator once."""
+    schema = load_dehydrated_schema()
+    validator_cls = validator_for(schema)
+    validator_cls.check_schema(schema)
+    return validator_cls(schema)
+
+
 def validate_dehydrated_data(data: Mapping[str, Any]) -> None:
     """Validate ``data`` against the dehydrated pipeline schema.
 
     Uses the draft declared in the schema's ``$schema`` (Draft 2020-12)
-    via :func:`jsonschema.validators.validator_for`.
+    via :func:`jsonschema.validators.validator_for`. The validator is built
+    once; ``data`` is fully validated on every call.
 
     Raises:
         SchemaValidationError: with the single best/most-specific message
             when ``data`` does not conform.
     """
-    schema = load_dehydrated_schema()
-    validator_cls = validator_for(schema)
-    validator_cls.check_schema(schema)
-    validator = validator_cls(schema)
+    validator = _dehydrated_validator()
 
     errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
     if not errors:
