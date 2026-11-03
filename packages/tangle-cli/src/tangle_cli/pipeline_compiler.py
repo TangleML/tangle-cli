@@ -1230,6 +1230,7 @@ def _process_subpipeline_children(
             parent_args=parent_tasks[task_id].get("arguments", {}),
             child_artifact=child_artifact,
         )
+        _materialize_child_input_defaults(parent_tasks[task_id], child_artifact.body)
         subpipeline_output_names[task_id] = _child_output_names(child_artifact.body)
 
     # OUTPUT cross-file validation — a safety net beyond the
@@ -1259,6 +1260,47 @@ def _child_input_specs(child_body: dict[str, Any]) -> tuple[list[str], set[str]]
         if not spec.get("optional"):
             required.add(name)
     return names, required
+
+
+def _materialize_child_input_defaults(task: dict[str, Any], child_body: Mapping[str, Any]) -> None:
+    """Pass each defaulted child input the call omits as a constant argument.
+
+    Tangle applies an input's ``default`` for a container component and for
+    a run's root graph, but not for a graph component nested inside another
+    graph: an omitted argument leaves the child's input unset, and a required
+    consumer of it fails the submit. Writing the child's own default at the
+    call site gives the child the value its declaration promises. Arguments
+    the caller passed are never touched, and inputs without a ``default`` are
+    left unset. Each artifact compiles its own subpipeline tasks, so every
+    nesting level is covered. Without existing ``arguments`` the key is
+    inserted right after ``componentRef``, in the canonical task key order.
+    """
+    arguments = task.get("arguments")
+    if arguments is not None and not isinstance(arguments, dict):
+        return
+    supplied = arguments or {}
+    defaults: dict[str, str] = {}
+    for spec in child_body.get("inputs") or []:
+        if not isinstance(spec, Mapping):
+            continue
+        name = spec.get("name")
+        default = spec.get("default")
+        # ``InputSpec.default`` is ``string | null``; a constant argument is a
+        # string too, so a non-string default is left to schema validation.
+        if isinstance(name, str) and isinstance(default, str) and name not in supplied:
+            defaults[name] = default
+    if not defaults:
+        return
+    if isinstance(arguments, dict):
+        arguments.update(defaults)
+        return
+    items = [(key, value) for key, value in task.items() if key != "arguments"]
+    task.clear()
+    for key, value in items:
+        task[key] = value
+        if key == "componentRef":
+            task["arguments"] = defaults
+    task.setdefault("arguments", defaults)
 
 
 def _child_output_names(child_body: dict[str, Any]) -> set[str]:
