@@ -1245,6 +1245,8 @@ def parent(seed: In[str]) -> Out[str]:
     return child_result.wait_for_output
 ```
 
+A child input the call omits gets the child's own `default`, written into the parent task's `arguments` as a constant. Tangle applies input defaults only to a container component and to a run's root graph, never to a graph nested inside another, so without this the omitted input would be unset inside the child and a required consumer would fail the submit ("no upstream artifact and no default value"). An argument the call passes always wins, an input without a `default` stays unset, and each nesting level applies its own child's defaults. Graphs nested by other routes (a `ref(...)` to a graph component, a published graph or a saved pipeline) are not rewritten: hydration only resolves `componentRef`s.
+
 Use `ref(url=...)`, `ref(name=...)`, or `ref(digest=...)` to call an existing component YAML or published component instead of authoring a local `@task`. Use `@registered(fragment=..., gen_config=...)` for operation wrappers that are already present in an existing `gen_config.yaml`; the compiler rewrites those calls to `resolve://...#fragment` without generating a new sidecar.
 
 ##### Component locators
