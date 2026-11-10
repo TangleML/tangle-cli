@@ -24,7 +24,8 @@ _GENERATION = {"file": "daily_pulse.py", "function": "load_orders", "image": "im
 
 def _rows(*specs: tuple[str, str | None]) -> list[ComponentInfo]:
     return [
-        ComponentInfo(name="orders-loader", digest=digest, version="1.0", published_by=owner)
+        # Like real listing rows, these carry no version; it lives in the spec.
+        ComponentInfo(name="orders-loader", digest=digest, published_by=owner)
         for digest, owner in specs
     ]
 
@@ -66,7 +67,11 @@ class _Client:
         return TangleApiClient.find_existing_components(self, *args, **kwargs)
 
     def get_component_spec(self, digest: str) -> dict[str, Any]:
-        return {"name": "orders-loader", "digest": digest}
+        return {
+            "name": "orders-loader",
+            "digest": digest,
+            "metadata": {"annotations": {"version": "1.0"}},
+        }
 
 
 def _entry(**over: Any) -> dict[str, Any]:

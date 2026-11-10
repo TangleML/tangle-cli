@@ -11,10 +11,10 @@ from __future__ import annotations
 import sys
 import threading
 import time
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import asdict, is_dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, overload
 from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
@@ -988,11 +988,25 @@ class TangleApiClient(GeneratedTangleApiOperations):
 
         return ComponentSpec.from_dict(_to_plain(self.components_get(digest)))
 
-    def resolve_digest(self, digest: str) -> str:
-        """Resolve a component digest/name, following deprecation successors."""
+    @overload
+    def resolve_digest(self, digest: str, accept: None = None) -> str: ...
+
+    @overload
+    def resolve_digest(self, digest: str, accept: Callable[[str], bool]) -> str | None: ...
+
+    def resolve_digest(
+        self, digest: str, accept: Callable[[str], bool] | None = None
+    ) -> str | None:
+        """Resolve a component digest/name, following deprecation successors.
+
+        With ``accept``, return the last digest on the way that it accepts,
+        stopping before a successor it rejects once one was accepted, or None
+        if it accepts none.
+        """
 
         current = digest
         seen: set[str] = set()
+        accepted: str | None = None
 
         while current not in seen:
             seen.add(current)
@@ -1002,18 +1016,22 @@ class TangleApiClient(GeneratedTangleApiOperations):
                     include_deprecated=True,
                     name_substring=current,
                 )
-            if len(matches) != 1:
-                return current
+            resolved, successor = current, None
+            if len(matches) == 1:
+                component = matches[0]
+                resolved = str(component.get("digest") or current)
+                if component.get("deprecated"):
+                    successor = component.get("superseded_by")
+            if accept is not None:
+                if accept(resolved):
+                    accepted = resolved
+                elif accepted is not None:
+                    return accepted
+            if not successor:
+                return resolved if accept is None else accepted
+            current = str(successor)
 
-            component = matches[0]
-            resolved = str(component.get("digest") or current)
-            successor = component.get("superseded_by")
-            if component.get("deprecated") and successor:
-                current = str(successor)
-                continue
-            return resolved
-
-        return current
+        return current if accept is None else accepted
 
     def _published_component_rows(
         self,
