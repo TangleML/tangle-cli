@@ -580,11 +580,17 @@ class PipelineHydrator(TangleCliHandler):
     def _find_latest_version_component(
         self,
         components: list[ComponentInfo],
+        specs: Mapping[str, dict[str, Any]] | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Find the component with the highest version from a list."""
+        """Find the component with the highest version from a list.
+
+        ``specs`` holds specs already fetched for this lookup, keyed by digest.
+        """
         client = self._api_client()
 
         def _fetch(digest: str) -> tuple[str, dict[str, Any]]:
+            if specs and digest in specs:
+                return digest, specs[digest]
             component = client.get_component_spec(digest)
             if not component:
                 raise HydrationError(f"Component not found: {digest}")
@@ -1039,7 +1045,14 @@ class PipelineHydrator(TangleCliHandler):
                 self.log.info(f"   Resolve: trying digest={str(value)[:16]}...")
             elif kind == "url":
                 self.log.info(f"   Resolve: trying url={value}")
-            return self._resolve_registered_component(kind, value, path, base_dir)
+            constraint = entry.get("version") if kind == "digest" else None
+            if constraint and self.component_resolvers.get("digest") is _resolve_digest:
+                return self._fetch_digest_within(str(value), constraint)
+            result = self._resolve_registered_component(kind, value, path, base_dir)
+            if constraint and result and not _spec_satisfies_version(result[1], constraint):
+                self.log.info(f"   Resolve: {result[0][:16]}... does not satisfy {constraint}")
+                return None
+            return result
         if "name" in entry:
             return self._resolve_by_name_with_filters(entry)
         if any(kind in entry for kind in self._resolve_entry_kinds()):
@@ -1189,6 +1202,7 @@ class PipelineHydrator(TangleCliHandler):
             publisher = require_authenticated_user_id(self._api_client())
         version_constraint = entry.get("version")
         required_annotations = entry.get("annotations")
+        specs: dict[str, dict[str, Any]] = {}
 
         search_names = [component_name, add_official_prefix(component_name)]
         candidates = self._api_client().find_existing_components(
@@ -1204,7 +1218,9 @@ class PipelineHydrator(TangleCliHandler):
         if version_constraint:
             if not _parse_version_constraint(version_constraint):
                 raise HydrationError(f"Invalid version constraint: '{version_constraint}'")
-            candidates = _filter_by_version_constraint(candidates, version_constraint)
+            candidates = self._filter_by_spec_version(
+                candidates, version_constraint, specs
+            )
             if not candidates:
                 self.log.info(
                     f"   Resolve: no candidates matching version {version_constraint}"
@@ -1219,12 +1235,83 @@ class PipelineHydrator(TangleCliHandler):
                 )
                 return None
 
-        found_digest, spec = self._find_latest_version_component(candidates)
+        found_digest, spec = self._find_latest_version_component(candidates, specs)
         self.log.info(
             f"   Resolve: matched {spec.get('name', 'unknown')} "
             f"(digest: {found_digest[:16]}...)"
         )
         return found_digest, spec
+
+    def _fetch_digest_within(
+        self, pin: str, constraint: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Fetch ``pin``, following its successors only while they satisfy ``constraint``.
+
+        Successors before the first satisfying one are passed through; the walk
+        stops before one that would leave the range. None if nothing satisfies.
+        """
+        if not _parse_version_constraint(constraint):
+            raise HydrationError(f"Invalid version constraint: '{constraint}'")
+        specs: dict[str, dict[str, Any]] = {}
+
+        def accept(digest: str) -> bool:
+            spec = self._fetch_spec_or_none(digest)
+            if spec is None:
+                return False
+            specs[digest] = spec
+            return _spec_satisfies_version(spec, constraint)
+
+        if self.upgrade_deprecated:
+            chosen = self._api_client().resolve_digest(pin, accept=accept)
+        else:
+            chosen = pin if accept(pin) else None
+        if chosen is None:
+            if not specs:
+                # Nothing on the walk exists: an error, as without a constraint.
+                raise HydrationError(f"Component not found: {pin}")
+            self.log.info(f"   Resolve: no version of {pin[:16]}... satisfies {constraint}")
+            return None
+        self.log.info(
+            f"   Resolve: {pin[:16]}... -> {chosen[:16]}... version "
+            f"{utils.get_version_from_data(specs[chosen])} satisfies {constraint}"
+        )
+        return chosen, specs[chosen]
+
+    def _fetch_spec_or_none(self, digest: str) -> dict[str, Any] | None:
+        """Fetch and normalize a component spec; None only if it is not found."""
+        try:
+            spec_obj = self._api_client().get_component_spec(digest)
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            if getattr(response, "status_code", None) == 404:
+                return None
+            raise
+        if not spec_obj:
+            return None
+        return self.normalize_component_spec(spec_obj)
+
+    def _filter_by_spec_version(
+        self,
+        candidates: list[ComponentInfo],
+        constraint: str,
+        specs: dict[str, dict[str, Any]],
+    ) -> list[ComponentInfo]:
+        """Keep candidates whose component spec satisfies ``constraint``.
+
+        Published-component rows carry no version; it lives only in the spec.
+        Fetched specs are recorded in ``specs`` so selection can reuse them.
+        """
+        result: list[ComponentInfo] = []
+        for candidate in candidates:
+            if not candidate.digest:
+                continue
+            spec = self._fetch_spec_or_none(candidate.digest)
+            if spec is None:
+                continue
+            specs[candidate.digest] = spec
+            if _spec_satisfies_version(spec, constraint):
+                result.append(candidate)
+        return result
 
     def _filter_by_annotations(
         self,
@@ -1730,15 +1817,16 @@ def _version_satisfies(version: str, constraint: str) -> bool:
     return True
 
 
-def _filter_by_version_constraint(
-    candidates: list[ComponentInfo],
-    constraint: str,
-) -> list[ComponentInfo]:
-    """Filter candidates whose version satisfies a constraint string."""
-    return [
-        c for c in candidates
-        if c.version and _version_satisfies(c.version, constraint)
-    ]
+def _spec_satisfies_version(spec: Mapping[str, Any], constraint: str) -> bool:
+    """Check a component spec's own version against a constraint string.
+
+    A spec without a version never satisfies a constraint. An invalid
+    constraint raises even then.
+    """
+    if not _parse_version_constraint(constraint):
+        raise HydrationError(f"Invalid version constraint: '{constraint}'")
+    version = utils.get_version_from_data(spec)
+    return bool(version) and _version_satisfies(version, constraint)
 
 
 class DehydrateChoice:
