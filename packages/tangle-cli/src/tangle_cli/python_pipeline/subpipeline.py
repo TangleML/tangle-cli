@@ -13,7 +13,8 @@ operation by wrapping it::
 ``subpipeline(child)`` returns a :class:`SubpipelineRef` — a task-like
 handle that mirrors :class:`tangle_cli.python_pipeline.ref.CallableRef`
 ergonomics (``.bind`` / ``.named`` / ``.with_annotations`` and call-site
-kwargs). Calling the handle inside an active ``@pipeline`` trace records
+kwargs), plus ``.with_task_annotations`` for defaults that reach the tasks
+inside the child. Calling the handle inside an active ``@pipeline`` trace records
 ONE parent task (never the child's internals) and returns a
 :class:`tangle_cli.python_pipeline.placeholders.TaskOutputProxy`. Tangle only
 supports conditional execution and execution options for container-component
@@ -33,6 +34,7 @@ never inferred from ``ref_url is None``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -69,6 +71,7 @@ class SubpipelineRef:
     task_id_hint: str | None = None
     annotations: dict[str, str] | None = None
     config_overrides: dict[str, Any] = field(default_factory=dict)
+    task_annotations: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Builders — all return a fresh SubpipelineRef (immutable composition)
@@ -91,6 +94,24 @@ class SubpipelineRef:
         for k, v in ann.items():
             merged[k] = v  # type: ignore[assignment]
         return replace(self, annotations=merged)
+
+    def with_task_annotations(self, ann: Mapping[str, Any]) -> "SubpipelineRef":
+        """Default annotations for every task in the child's subtree except
+        boundary tasks; nearer call sites and a task's own annotations win.
+        Scalar mapping only: it is part of the child's compile key."""
+        if not isinstance(ann, Mapping):
+            raise CompileError(
+                "subpipeline(...).with_task_annotations() takes a mapping, got "
+                f"{type(ann).__name__}. Compute values from the parent's cfg, e.g. "
+                ".with_task_annotations({'key': cfg.value})."
+            )
+        for key, value in ann.items():
+            if not (value is None or isinstance(value, (str, int, float, bool))):
+                raise CompileError(
+                    f"subpipeline(...).with_task_annotations() value for {key!r} must be "
+                    f"a string or another scalar, got {type(value).__name__}."
+                )
+        return replace(self, task_annotations={**self.task_annotations, **ann})
 
     def with_position(
         self,
@@ -253,7 +274,8 @@ def subpipeline(child: "PipelineFn") -> SubpipelineRef:
 
     Returns:
         A :class:`SubpipelineRef` supporting ``.bind`` / ``.named`` /
-        ``.with_annotations`` and trace-time ``__call__``.
+        ``.with_annotations`` / ``.with_task_annotations`` and trace-time
+        ``__call__``.
 
     Raises:
         CompileError: if ``child`` is not a :class:`PipelineFn` (e.g. a

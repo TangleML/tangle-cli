@@ -706,7 +706,7 @@ def _resolve_cfg_for_pipeline(
     missing config all still raise.
     """
     cfg_path = _resolve_cfg_path_in_dir(pipeline_fn, base_dir)
-    uses_cfg = _pipeline_accepts_cfg(pipeline_fn)
+    uses_cfg = _pipeline_reads_cfg(pipeline_fn)
     should_load_config = uses_cfg or pipeline_fn.propagate_config
     if should_load_config:
         _assert_config_output_path_is_separate(
@@ -722,7 +722,13 @@ def _resolve_cfg_for_pipeline(
             overrides,
             coerce=is_root,
             pipeline_fn=pipeline_fn,
-            usage="cfg" if uses_cfg else "propagate_config",
+            usage=(
+                "cfg"
+                if _pipeline_accepts_cfg(pipeline_fn)
+                else "task_annotations"
+                if uses_cfg
+                else "propagate_config"
+            ),
             allow_override_only=allow_override_only,
             suggest_override_only=implicit_root_config,
         )
@@ -774,6 +780,7 @@ def _compile_pipeline_fn(
     precomputed_key: PipelineCompileKey | None = None,
     layout_policy: _LayoutPolicy = _NO_LAYOUT,
     occurrence_path: tuple[str, ...] = (),
+    inherited_task_annotations: Mapping[str, Any] | None = None,
 ) -> SubgraphArtifact:
     """Trace + emit ``pipeline_fn`` into an in-memory :class:`SubgraphArtifact`.
 
@@ -831,7 +838,12 @@ def _compile_pipeline_fn(
     #    legitimate RUNTIME template placeholders the no-template-delimiter
     #    output guard must skip for THIS artifact's body.
     with _temp_sys_path(base_dir):
-        builder = trace_pipeline(pipeline_fn, cfg=cfg, inputs={})
+        builder = trace_pipeline(
+            pipeline_fn,
+            cfg=cfg,
+            inputs={},
+            inherited_task_annotations=inherited_task_annotations,
+        )
     # Caller-supplied root annotations: ROOT ONLY (a child keeps exactly what
     # its own ``@pipeline`` declared), merged PER KEY with the caller winning
     # on collision, before emit so they pass the same emit-time guards as
@@ -994,6 +1006,7 @@ def _compile_pipeline_fn(
             parent_propagate_config=pipeline_fn.propagate_config,
             layout_carry=layout_policy.carry,
             occurrence_path=occurrence_path,
+            inherited_task_annotations=inherited_task_annotations or {},
         )
     finally:
         ctx.active_stack.pop()
@@ -1022,6 +1035,7 @@ def _process_subpipeline_children(
     parent_propagate_config: bool,
     layout_carry: Layout | None = None,
     occurrence_path: tuple[str, ...] = (),
+    inherited_task_annotations: Mapping[str, Any],
 ) -> None:
     """Compile each ``subpipeline(child)(...)`` recorded during ``builder``'s
     trace and rewrite the parent task's ``componentRef`` to a pure
@@ -1085,7 +1099,7 @@ def _process_subpipeline_children(
         # ``_select``/``_env``).
         child_doc: CfgDocument | None = None
         child_identity: str | None = None
-        if (_pipeline_accepts_cfg(child_fn) or child_fn.propagate_config) and child_cfg_path.exists():
+        if (_pipeline_reads_cfg(child_fn) or child_fn.propagate_config) and child_cfg_path.exists():
             child_doc = read_cfg_document(child_cfg_path)
             child_identity = _config_identity(child_doc)
         if ctx.broadcast_stack or sub_ref.config_overrides:
@@ -1121,6 +1135,7 @@ def _process_subpipeline_children(
         else:
             effective = {}
 
+        child_task_annotations = {**inherited_task_annotations, **sub_ref.task_annotations}
         child_key = _compile_key_for(
             child_fn,
             child_cfg_path,
@@ -1128,6 +1143,7 @@ def _process_subpipeline_children(
             fingerprint_context=f"on subpipeline task {task_id!r} -> child pipeline {child_fn.name!r}",
             ambient_context=ambient_passthrough or None,
             config_identity=child_identity,
+            task_annotations=child_task_annotations,
         )
 
         # Cycle detection (covers self-reference). active_stack holds the
@@ -1198,6 +1214,7 @@ def _process_subpipeline_children(
                     precomputed_key=child_key,
                     layout_policy=child_policy,
                     occurrence_path=(*occurrence_path, task_id),
+                    inherited_task_annotations=child_task_annotations,
                 )
             finally:
                 if pushed_edge_override:
@@ -1428,6 +1445,7 @@ def _compile_key_for(
     fingerprint_context: str | None = None,
     ambient_context: Mapping[str, Any] | None = None,
     config_identity: str | None = None,
+    task_annotations: Mapping[str, Any] | None = None,
 ) -> PipelineCompileKey:
     """Build the canonical :class:`PipelineCompileKey` for ``pipeline_fn``.
 
@@ -1462,13 +1480,16 @@ def _compile_key_for(
       see :func:`_config_identity`) -> the same envelope plus
       ``"\x00config"``, so different environment selections get distinct
       keys while identical resolved configs keep identical keys.
+    * **``task_annotations``** (defaults pushed in by ancestor
+      ``.with_task_annotations`` call sites) -> the same envelope plus
+      ``"\x00task_annotations"``.
     """
     src = _pipeline_source_path(pipeline_fn)
     if src is not None:
         source_canon = canonical_repo_path(src)
     else:
         source_canon = f"<dynamic:{pipeline_fn.fn.__qualname__}>"
-    if ambient_context or config_identity is not None:
+    if ambient_context or config_identity is not None or task_annotations:
         # Reserved keys (NUL-prefixed) can never be real config keys, so an
         # envelope never collides with an effective-only fingerprint over the
         # same keys (e.g. effective={x:1},ambient={} vs effective={x:1},ambient={y:2}).
@@ -1477,6 +1498,8 @@ def _compile_key_for(
             envelope["\x00ambient"] = dict(sorted(ambient_context.items()))
         if config_identity is not None:
             envelope["\x00config"] = config_identity
+        if task_annotations:
+            envelope["\x00task_annotations"] = dict(task_annotations)
         fingerprint_input: Mapping[str, Any] = envelope
     else:
         # Byte-identical to today's key: the default-isolation guarantee.
@@ -2982,6 +3005,12 @@ def _pipeline_source_path(pipeline_fn: PipelineFn) -> Path | None:
     return resolved
 
 
+def _pipeline_reads_cfg(pipeline_fn: PipelineFn) -> bool:
+    """Whether compile-time config is observable: a ``cfg`` parameter or a
+    ``task_annotations`` function."""
+    return _pipeline_accepts_cfg(pipeline_fn) or callable(pipeline_fn.task_annotations)
+
+
 def _pipeline_accepts_cfg(pipeline_fn: PipelineFn) -> bool:
     """Return whether the pipeline function has a real ``cfg`` parameter.
 
@@ -3099,6 +3128,12 @@ def _load_cfg_and_raw(
                 f"{source} is required as the config payload to broadcast to "
                 "descendant subpipelines. Create the file, remove `config=`, "
                 "or disable propagate_config if there is no config to broadcast."
+            )
+        elif usage == "task_annotations":
+            reason = (
+                "has a task_annotations function, so "
+                f"{source} is required as a compile-time input. Create the file, "
+                "or pass task_annotations a mapping instead."
             )
         else:
             reason = (

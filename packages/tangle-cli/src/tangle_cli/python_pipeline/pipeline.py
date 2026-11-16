@@ -9,6 +9,7 @@ inside a :class:`GraphBuilder` context.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -45,7 +46,7 @@ class PipelineFn:
     # ``metadata.labels`` — a separate block from annotations, and typed
     # ``str -> str`` by both schemas.
     labels: dict[str, str] = field(default_factory=dict)
-    task_annotations: dict[str, Any] = field(default_factory=dict)
+    task_annotations: Mapping[str, Any] | Callable[[Any], Mapping[str, Any]] = field(default_factory=dict)
     caller_dir: Path | None = None
     # Convention for the single Out[T] slot's name. Defaults to the PoC
     # canonical sentinel ``wait_for_output``; overridable via
@@ -147,7 +148,7 @@ def pipeline(
     config: str | None = None,
     annotations: dict[str, Any] | None = None,
     labels: dict[str, str] | None = None,
-    task_annotations: dict[str, Any] | None = None,
+    task_annotations: Mapping[str, Any] | Callable[[Any], Mapping[str, Any]] | None = None,
     flow_direction: str | None = None,
     output_name: str = "wait_for_output",
     propagate_config: bool = False,
@@ -176,10 +177,12 @@ def pipeline(
             ``editor.flow-direction`` root annotation
             (``"left-to-right"`` / ``"top-to-bottom"``). Sugar over
             ``annotations``; applied last, so it wins on that key.
-        task_annotations: Per-task default annotations applied to every
-            task in the pipeline. Accepted for API completeness but not
-            wired through in MVP — the PoC sets per-task annotations
-            explicitly via ``.with_annotations``.
+        task_annotations: Default annotations for every task in this
+            pipeline's body: a mapping, or a function of the pipeline's
+            resolved ``cfg`` returning one. A task's own annotations win per
+            key. ``subpipeline`` boundary tasks and the tasks inside a child
+            are not covered; push defaults into a child with
+            ``subpipeline(child).with_task_annotations(...)``.
         output_name: Name for the single ``Out[T]`` output slot.
             Defaults to ``wait_for_output`` (matches the PoC).
         propagate_config: Broadcasts this pipeline's own config.yaml deep
@@ -215,7 +218,7 @@ def pipeline(
             config_path=config,
             annotations=merged_annotations,
             labels=checked_labels,
-            task_annotations=dict(task_annotations or {}),
+            task_annotations=task_annotations or {},
             caller_dir=caller_dir,
             output_name=output_name,
             propagate_config=propagate_config,
