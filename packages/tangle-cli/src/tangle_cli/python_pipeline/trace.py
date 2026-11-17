@@ -29,6 +29,7 @@ import dataclasses
 import inspect
 import textwrap
 import typing
+from collections.abc import Mapping
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -217,10 +218,16 @@ def trace_pipeline(
     pipeline_fn: "PipelineFn",
     cfg: Any,
     inputs: dict[str, Any] | None = None,
+    *,
+    inherited_task_annotations: Mapping[str, Any] | None = None,
 ) -> GraphBuilder:
     """Trace ``pipeline_fn`` against ``cfg`` (+ optional runtime ``inputs``).
 
     Returns the populated :class:`GraphBuilder` ready for emit.
+
+    Every task except a ``subpipeline`` boundary task gets the pipeline's own
+    ``task_annotations``, overlaid by ``inherited_task_annotations`` (pushed in
+    by ancestor call sites), overlaid by the task's own annotations.
 
     The function's parameters are inspected:
     - ``cfg`` (no ``In`` annotation, named exactly ``cfg``) → bound to
@@ -309,6 +316,13 @@ def trace_pipeline(
     finally:
         _BUILDER.reset(token)
 
+    defaults = {**_own_task_annotations(pipeline_fn, cfg), **(inherited_task_annotations or {})}
+    if defaults:
+        boundary_task_ids = {task_id for task_id, _ref in builder.task_refs_for_subpipelines}
+        for node in builder.tasks:
+            if node.task_id not in boundary_task_ids:
+                node.annotations = {**defaults, **(node.annotations or {})}
+
     # Capture the declared output(s). ``get_type_hints`` returns the
     # resolved return annotation under the ``return`` key. Two shapes:
     #   * single ``-> Out[T]``     -> one output (legacy path, unchanged);
@@ -342,6 +356,17 @@ def trace_pipeline(
         _trace_multi_output(builder, pipeline_fn, return_anno, result)
 
     return builder
+
+
+def _own_task_annotations(pipeline_fn: "PipelineFn", cfg: Any) -> dict[str, Any]:
+    declared = pipeline_fn.task_annotations
+    resolved = declared(cfg) if callable(declared) else declared
+    if not isinstance(resolved, Mapping):
+        raise CompileError(
+            f"@pipeline({pipeline_fn.name!r}) task_annotations must be a mapping or a "
+            f"function of cfg returning one, got {type(resolved).__name__}."
+        )
+    return dict(resolved)
 
 
 def _trace_multi_output(

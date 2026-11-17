@@ -914,6 +914,30 @@ _select:
 
 Task IDs default from the left-hand variable name at the call site, converted to title case. If there is no simple left-hand variable, or if you want a stable explicit label, call `.named("Task Id")` before invoking the task. Use `.bind(...)` to pre-fill task arguments and `.with_annotations({...})` to add per-task annotations.
 
+##### Default task annotations
+
+`@pipeline(task_annotations=...)` sets default annotations for every task in that pipeline's body. Pass a mapping, or a function of the pipeline's resolved `cfg` when values differ per environment:
+
+```python
+@pipeline(
+    "Daily",
+    config="config.yaml",
+    task_annotations=lambda cfg: {"example.com/account": cfg.service_account},
+)
+def daily(cfg=None) -> None:
+    extract = load()                                          # the defaults
+    train = fit.with_annotations({"example.com/gpu": "a100"})()  # the defaults plus its own key
+    subpipeline(report).with_task_annotations(
+        {"example.com/account": cfg.service_account}
+    )(wait_for=train)
+```
+
+- A function makes the config file a required compile-time input, as a `cfg` parameter does.
+- A task's own annotations, from `.with_annotations(...)` or a typed helper such as `.with_position(...)`, win per key; the other defaults stay.
+- Defaults do not reach a `subpipeline` boundary task or the tasks inside a child. `subpipeline(child).with_task_annotations({...})` pushes a mapping into every task of the child's subtree, except `subpipeline` boundary tasks. It takes a mapping of scalars, not a function: compute values from the parent's `cfg`.
+- Precedence, lowest first: the child's own `task_annotations`, an outer call site, a nearer call site, the task's own annotations.
+- Call-site defaults are part of the child's compile identity: calls pushing different defaults compile the child into separate sidecars, and identical calls share one.
+
 ##### Root pipeline annotations
 
 `@pipeline(annotations={...})` writes the compiled pipeline's root `metadata.annotations` block. A caller that compiles programmatically can supply the block instead — typically from its own per-environment config file, so the values do not have to be hard-coded in source:
