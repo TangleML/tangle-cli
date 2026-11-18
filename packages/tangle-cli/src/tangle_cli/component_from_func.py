@@ -1882,7 +1882,7 @@ def _build_pip_install_command(deps: list[str]) -> list[str]:
     return [
         "sh",
         "-c",
-        f'({install_cmd} || {install_cmd} --user) && "$0" "$@"',
+        f'({install_cmd} || {install_cmd} --user) && exec "$0" "$@"',
     ]
 
 
@@ -2013,7 +2013,7 @@ def build_component_dict(
     shell_bootstrap = textwrap.dedent("""\
         program_path=$(mktemp)
         printf "%s" "$0" > "$program_path"
-        python3 -u "$program_path" "$@"
+        exec python3 -u "$program_path" "$@"
     """)
 
     command = pip_install + ["sh", "-ec", shell_bootstrap, python_source]
