@@ -270,6 +270,30 @@ def test_a_child_defaults_function_imports_siblings_of_the_child(tmp_path):
     assert _annotations(direct, "Child Task") == {"team": "helper-child"}
 
 
+@pytest.mark.parametrize("order", [("plain", "configured"), ("configured", "plain")])
+def test_a_child_defaults_function_without_a_config_fails_whichever_sibling_comes_first(tmp_path, order):
+    first, second = order
+    with pytest.raises(
+        CompileError,
+        match=r"config file not found: .*Pipeline 'Child' has a task_annotations function",
+    ):
+        _compile(
+            tmp_path,
+            f"""
+            def child():
+                op.named("Child Task")()
+
+            plain = pipeline("Child")(child)
+            configured = pipeline("Child", task_annotations=lambda cfg: {{"team": cfg.team}})(child)
+
+            @pipeline("Root")
+            def root():
+                subpipeline({first}).named("First")()
+                subpipeline({second}).named("Second")()
+            """,
+        )
+
+
 @pytest.mark.parametrize("declared", ['"davies"', 'lambda cfg: "davies"'])
 def test_pipeline_defaults_that_are_not_a_mapping_fail_the_compile(tmp_path, declared):
     with pytest.raises(CompileError, match=r"'Root'.*must be a mapping or a function of cfg returning one, got str"):
