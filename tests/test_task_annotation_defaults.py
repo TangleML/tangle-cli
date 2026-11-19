@@ -223,6 +223,53 @@ def test_wrappers_with_the_same_own_defaults_share_a_sidecar(tmp_path, declared)
     assert _annotations(_child(out, "First"), "Child Task") == {"team": "left"}
 
 
+def test_a_child_defaults_function_imports_siblings_of_the_child(tmp_path):
+    src = tmp_path / "src"
+    child_dir = src / "child"
+    child_dir.mkdir(parents=True)
+    (child_dir / "child_annotation_helper.py").write_text(
+        "def annotations_for(cfg):\n    return {'team': 'helper-' + cfg.team}\n", encoding="utf-8"
+    )
+    (child_dir / "config.yaml").write_text("team: child\n", encoding="utf-8")
+    (child_dir / "child_pipeline.py").write_text(
+        _HEADER
+        + textwrap.dedent(
+            """
+            def defaults(cfg):
+                from child_annotation_helper import annotations_for
+
+                return annotations_for(cfg)
+
+            @pipeline("Child", task_annotations=defaults)
+            def child():
+                op.named("Child Task")()
+            """
+        ),
+        encoding="utf-8",
+    )
+    (src / "pipeline.py").write_text(
+        _HEADER
+        + textwrap.dedent(
+            """
+            from child.child_pipeline import child
+
+            @pipeline("Root")
+            def root():
+                subpipeline(child).named("Run Child")()
+            """
+        ),
+        encoding="utf-8",
+    )
+    nested = tmp_path / "nested" / "compiled.yaml"
+    direct = tmp_path / "direct" / "compiled.yaml"
+
+    compile_pipeline(src / "pipeline.py", nested, None, pipeline_name="Root")
+    compile_pipeline(child_dir / "child_pipeline.py", direct, None, pipeline_name="Child")
+
+    assert _annotations(_child(nested, "Run Child"), "Child Task") == {"team": "helper-child"}
+    assert _annotations(direct, "Child Task") == {"team": "helper-child"}
+
+
 @pytest.mark.parametrize("declared", ['"davies"', 'lambda cfg: "davies"'])
 def test_pipeline_defaults_that_are_not_a_mapping_fail_the_compile(tmp_path, declared):
     with pytest.raises(CompileError, match=r"'Root'.*must be a mapping or a function of cfg returning one, got str"):
