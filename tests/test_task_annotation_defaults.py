@@ -164,6 +164,65 @@ def test_descendants_of_a_shared_child_split_by_the_defaults_pushed_above_them(t
     assert _annotations(grandchild_b, "GC Task") == {"env": "b"}
 
 
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ('{"team": "left"}', '{"team": "right"}'),
+        ('lambda cfg: {"team": cfg.left}', 'lambda cfg: {"team": cfg.right}'),
+    ],
+    ids=["mapping", "function"],
+)
+def test_wrappers_differing_only_in_their_own_defaults_get_separate_sidecars(tmp_path, left, right):
+    out = _compile(
+        tmp_path,
+        f"""
+        def child():
+            op.named("Child Task")()
+
+        left = pipeline("Child", task_annotations={left})(child)
+        right = pipeline("Child", task_annotations={right})(child)
+
+        @pipeline("Root")
+        def root():
+            subpipeline(left).named("Left")()
+            subpipeline(right).named("Right")()
+        """,
+        config="left: left\nright: right\n",
+    )
+
+    assert _child(out, "Left") != _child(out, "Right")
+    assert _annotations(_child(out, "Left"), "Child Task") == {"team": "left"}
+    assert _annotations(_child(out, "Right"), "Child Task") == {"team": "right"}
+
+
+@pytest.mark.parametrize(
+    "declared",
+    ['{"team": "left"}', 'lambda cfg: {"team": cfg.left}'],
+    ids=["mapping", "function"],
+)
+def test_wrappers_with_the_same_own_defaults_share_a_sidecar(tmp_path, declared):
+    out = _compile(
+        tmp_path,
+        f"""
+        def child():
+            op.named("Child Task")()
+
+        first = pipeline("Child", task_annotations={declared})(child)
+        second = pipeline("Child", task_annotations={declared})(child)
+
+        @pipeline("Root")
+        def root():
+            subpipeline(first).named("First")()
+            subpipeline(second).named("Second")()
+            subpipeline(first).named("First Again")()
+        """,
+        config="left: left\n",
+    )
+
+    assert _child(out, "First") == _child(out, "Second") == _child(out, "First Again")
+    assert _annotations(_child(out, "First"), "Child Task") == {"team": "left"}
+
+
 @pytest.mark.parametrize("declared", ['"davies"', 'lambda cfg: "davies"'])
 def test_pipeline_defaults_that_are_not_a_mapping_fail_the_compile(tmp_path, declared):
     with pytest.raises(CompileError, match=r"'Root'.*must be a mapping or a function of cfg returning one, got str"):
