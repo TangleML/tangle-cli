@@ -1144,7 +1144,9 @@ def _process_subpipeline_children(
             ambient_context=ambient_passthrough or None,
             config_identity=child_identity,
             task_annotations=child_task_annotations,
-            own_task_annotations=_own_task_annotations_for_key(child_fn, child_doc, effective),
+            own_task_annotations=_own_task_annotations_for_key(
+                child_fn, child_doc, effective, base_dir=child_base_dir, ctx=ctx
+            ),
         )
 
         # Cycle detection (covers self-reference). active_stack holds the
@@ -1526,20 +1528,34 @@ def _own_task_annotations_for_key(
     pipeline_fn: PipelineFn,
     doc: CfgDocument | None,
     overrides: Mapping[str, Any],
+    *,
+    base_dir: Path,
+    ctx: CompileContext,
 ) -> dict[str, Any]:
     """A child's own ``@pipeline(task_annotations=...)`` as its trace applies
     them, for its compile key.
 
     A function is resolved against the cfg :func:`_resolve_cfg_for_pipeline`
-    builds for the child (its config plus ``overrides``). Without a config
-    file it contributes nothing: the child's own compile then fails on the
-    missing file.
+    builds for the child (its config plus ``overrides``), under the import
+    setup :func:`_compile_pipeline_fn` traces the child with (``base_dir``
+    recorded for the after-compile purge, shadowing modules evicted, and
+    ``base_dir`` on ``sys.path``), so a function importing a sibling of the
+    child resolves it as it does in the trace. Without a config file it
+    contributes nothing: the child's own compile then fails on the missing
+    file.
     """
     if not callable(pipeline_fn.task_annotations):
         return _own_task_annotations(pipeline_fn, None)
     if doc is None:
         return {}
-    return _own_task_annotations(pipeline_fn, build_cfg(doc.data, overrides=dict(overrides), coerce=False))
+    cfg = build_cfg(doc.data, overrides=dict(overrides), coerce=False)
+    try:
+        ctx.source_dirs.add(base_dir.resolve())
+    except OSError:  # pragma: no cover — defensive
+        pass
+    _evict_shadowed_bundle_modules(base_dir)
+    with _temp_sys_path(base_dir):
+        return _own_task_annotations(pipeline_fn, cfg)
 
 
 def _validate_artifact(artifact: SubgraphArtifact, ctx: CompileContext) -> None:
