@@ -1145,7 +1145,7 @@ def _process_subpipeline_children(
             config_identity=child_identity,
             task_annotations=child_task_annotations,
             own_task_annotations=_own_task_annotations_for_key(
-                child_fn, child_doc, effective, base_dir=child_base_dir, ctx=ctx
+                child_fn, child_cfg_path, child_doc, effective, base_dir=child_base_dir, ctx=ctx
             ),
         )
 
@@ -1526,6 +1526,7 @@ def _compile_key_for(
 
 def _own_task_annotations_for_key(
     pipeline_fn: PipelineFn,
+    cfg_path: Path,
     doc: CfgDocument | None,
     overrides: Mapping[str, Any],
     *,
@@ -1540,15 +1541,22 @@ def _own_task_annotations_for_key(
     setup :func:`_compile_pipeline_fn` traces the child with (``base_dir``
     recorded for the after-compile purge, shadowing modules evicted, and
     ``base_dir`` on ``sys.path``), so a function importing a sibling of the
-    child resolves it as it does in the trace. Without a config file it
-    contributes nothing: the child's own compile then fails on the missing
-    file.
+    child resolves it as it does in the trace. Without a config file (``doc``
+    is ``None``) it raises the missing-config error the child's own compile
+    would, before the artifact lookup could reuse a sibling's artifact.
     """
     if not callable(pipeline_fn.task_annotations):
         return _own_task_annotations(pipeline_fn, None)
     if doc is None:
-        return {}
-    cfg = build_cfg(doc.data, overrides=dict(overrides), coerce=False)
+        cfg, _raw, _identity = _load_cfg_and_raw(
+            cfg_path,
+            overrides,
+            coerce=False,
+            pipeline_fn=pipeline_fn,
+            usage="cfg" if _pipeline_accepts_cfg(pipeline_fn) else "task_annotations",
+        )
+    else:
+        cfg = build_cfg(doc.data, overrides=dict(overrides), coerce=False)
     try:
         ctx.source_dirs.add(base_dir.resolve())
     except OSError:  # pragma: no cover — defensive
