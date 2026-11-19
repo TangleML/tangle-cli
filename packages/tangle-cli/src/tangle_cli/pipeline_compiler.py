@@ -88,7 +88,7 @@ from .python_pipeline.pipeline import PipelineFn
 from .python_pipeline.ref import CallableRef
 from .python_pipeline.registered import _REGISTERED_URL_PLACEHOLDER
 from .python_pipeline.subpipeline import _SUBPIPELINE_URL_PLACEHOLDER, SubpipelineRef
-from .python_pipeline.trace import _strip_optional_none, trace_pipeline
+from .python_pipeline.trace import _own_task_annotations, _strip_optional_none, trace_pipeline
 from .python_pipeline.types import In
 from .schema_validation import (
     CALLER_ANNOTATION_POLICY,
@@ -1144,6 +1144,7 @@ def _process_subpipeline_children(
             ambient_context=ambient_passthrough or None,
             config_identity=child_identity,
             task_annotations=child_task_annotations,
+            own_task_annotations=_own_task_annotations_for_key(child_fn, child_doc, effective),
         )
 
         # Cycle detection (covers self-reference). active_stack holds the
@@ -1446,6 +1447,7 @@ def _compile_key_for(
     ambient_context: Mapping[str, Any] | None = None,
     config_identity: str | None = None,
     task_annotations: Mapping[str, Any] | None = None,
+    own_task_annotations: Mapping[str, Any] | None = None,
 ) -> PipelineCompileKey:
     """Build the canonical :class:`PipelineCompileKey` for ``pipeline_fn``.
 
@@ -1483,13 +1485,18 @@ def _compile_key_for(
     * **``task_annotations``** (defaults pushed in by ancestor
       ``.with_task_annotations`` call sites) -> the same envelope plus
       ``"\x00task_annotations"``.
+    * **``own_task_annotations``** (the child's own resolved
+      ``@pipeline(task_annotations=...)``, see
+      :func:`_own_task_annotations_for_key`) -> the same envelope plus
+      ``"\x00own_task_annotations"``, so two wrappers over one function that
+      differ only there never share a sidecar.
     """
     src = _pipeline_source_path(pipeline_fn)
     if src is not None:
         source_canon = canonical_repo_path(src)
     else:
         source_canon = f"<dynamic:{pipeline_fn.fn.__qualname__}>"
-    if ambient_context or config_identity is not None or task_annotations:
+    if ambient_context or config_identity is not None or task_annotations or own_task_annotations:
         # Reserved keys (NUL-prefixed) can never be real config keys, so an
         # envelope never collides with an effective-only fingerprint over the
         # same keys (e.g. effective={x:1},ambient={} vs effective={x:1},ambient={y:2}).
@@ -1500,6 +1507,8 @@ def _compile_key_for(
             envelope["\x00config"] = config_identity
         if task_annotations:
             envelope["\x00task_annotations"] = dict(task_annotations)
+        if own_task_annotations:
+            envelope["\x00own_task_annotations"] = dict(own_task_annotations)
         fingerprint_input: Mapping[str, Any] = envelope
     else:
         # Byte-identical to today's key: the default-isolation guarantee.
@@ -1511,6 +1520,26 @@ def _compile_key_for(
         config_path=canonical_repo_path(cfg_path),
         overrides_fingerprint=overrides_fingerprint(fingerprint_input, context=fingerprint_context),
     )
+
+
+def _own_task_annotations_for_key(
+    pipeline_fn: PipelineFn,
+    doc: CfgDocument | None,
+    overrides: Mapping[str, Any],
+) -> dict[str, Any]:
+    """A child's own ``@pipeline(task_annotations=...)`` as its trace applies
+    them, for its compile key.
+
+    A function is resolved against the cfg :func:`_resolve_cfg_for_pipeline`
+    builds for the child (its config plus ``overrides``). Without a config
+    file it contributes nothing: the child's own compile then fails on the
+    missing file.
+    """
+    if not callable(pipeline_fn.task_annotations):
+        return _own_task_annotations(pipeline_fn, None)
+    if doc is None:
+        return {}
+    return _own_task_annotations(pipeline_fn, build_cfg(doc.data, overrides=dict(overrides), coerce=False))
 
 
 def _validate_artifact(artifact: SubgraphArtifact, ctx: CompileContext) -> None:
