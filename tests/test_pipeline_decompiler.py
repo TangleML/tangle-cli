@@ -1892,14 +1892,14 @@ def test_a_template_component_is_refused_without_rendering(tmp_path: Path, route
 
 def test_hydrating_a_template_first_then_decompiling_succeeds(tmp_path: Path) -> None:
     """The explicit hydrate renders it; decompile then reads plain YAML."""
-    _template_leaf(tmp_path)
+    (tmp_path / "leaf.j2").write_text("# {{ note }}\n" + dump_yaml(_leaf("templated")), encoding="utf-8")
+    _write(tmp_path / "leaf.yaml", {"template_file": "leaf.j2", "note": "rendered by hydrate"})
     source = _write(tmp_path / "in.yaml", _graph_spec("Root", {"a": _ref(url="file://./leaf.yaml")}))
     hydrated = PipelineHydrator(client=_UnreachableLibrary()).hydrate_file(source).data
-    (tmp_path / "SENTINEL").unlink()
 
     result = decompile_pipeline_file(_write(tmp_path / "hydrated.yaml", hydrated), tmp_path / "gen.py", client=_UnreachableLibrary())
 
-    assert result.verified and not (tmp_path / "SENTINEL").exists()
+    assert result.verified
 
 
 @pytest.mark.parametrize("fallback", [False, True], ids=["primary", "behind-fallback"])

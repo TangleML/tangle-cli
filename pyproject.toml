@@ -1,6 +1,6 @@
 [project]
 name = "tangle-cli"
-version = "0.1.39"
+version = "0.1.40"
 description = "CLI for Tangle, the open-source ML pipeline orchestration platform"
 readme = "README.md"
 authors = [
@@ -14,7 +14,7 @@ dependencies = [
     "cyclopts>=4.16.1",
     "docstring-parser>=0.16",
     "httpx>=0.28.1",
-    "jinja2>=3.1",
+    "jinja2>=3.1.6",
     "jsonschema>=4.25.0",
     "platformdirs>=4.10.0",
     "pydantic>=2.0",

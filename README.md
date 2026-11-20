@@ -496,6 +496,8 @@ uv run tangle sdk pipelines diagram pipeline.yaml
 uv run tangle sdk pipelines layout pipeline.yaml --recursive
 ```
 
+`hydrate` renders a `template_file` config in Jinja2's sandbox: a template that reaches for Python internals fails the hydration. `--trusted-hydration` and `--trusted-source` apply to `local_from_python` and do not lift the sandbox. `{% include %}`, `{% import %}` and `include_raw` read files from the template's directory.
+
 `pipelines dehydrate` is the inverse of `hydrate`. It replaces inline component specs with references, using the same noninteractive dehydrator as `pipeline-runs export --dehydrate`, and a single `--mode` applies to every component:
 
 | `--mode` | Each inline component becomes |
@@ -652,7 +654,7 @@ Python: a dehydrated input whose components resolve through
 trust. So is any other resolver kind that may build or run code —
 `local_from_docker` and the other docker/container spellings, or any kind a
 downstream package registers — with `unsupported-executable-component-source`,
-and a `template_file` component config, whose Jinja could reach Python, with
+and a `template_file` component config, which only hydration renders, with
 `unsupported-template-component-source`: decompile resolves only digests,
 names, http(s) URLs and plain files, through the built-in resolvers and URI
 readers; a URI scheme only a downstream reader handles is refused the same way. Run `tangle sdk pipelines hydrate` on such a pipeline first — that is
