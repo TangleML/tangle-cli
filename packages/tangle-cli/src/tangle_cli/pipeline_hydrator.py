@@ -167,14 +167,25 @@ def render_template(
 ) -> str:
     """Render a Jinja2 template with the given context.
 
-    Ported from TD's ``render_template`` helper, including ``include_raw``.
+    A template is pipeline input, so it renders in Jinja2's
+    ``SandboxedEnvironment``: access to Python internals fails the render.
+    ``include_raw`` includes a file from the template's directory without
+    Jinja2 processing, through the same loader as ``{% include %}``.
     """
 
-    from jinja2 import Environment, FileSystemLoader
+    from jinja2 import FileSystemLoader
+    from jinja2.exceptions import SecurityError
+    from jinja2.sandbox import SandboxedEnvironment
+
+    class _TemplateSandbox(SandboxedEnvironment):
+        def unsafe_undefined(self, obj: Any, attribute: str) -> Any:
+            raise SecurityError(
+                f"access to attribute {attribute!r} of a {type(obj).__name__!r} object is unsafe"
+            )
 
     template_dir = template_path.parent
     template_name = template_path.name
-    env = Environment(
+    env = _TemplateSandbox(
         loader=FileSystemLoader(str(template_dir)),
         keep_trailing_newline=True,
     )
@@ -191,7 +202,13 @@ def render_template(
     if overrides:
         merged_context.update(overrides)
 
-    return template.render(**merged_context)
+    try:
+        return template.render(**merged_context)
+    except SecurityError as exc:
+        raise UntrustedHydrationSourceError(
+            f"Refusing to render template {template_path}: it uses a feature "
+            f"that the template sandbox blocks ({exc})."
+        ) from exc
 
 
 class PipelineHydrator(TangleCliHandler):
